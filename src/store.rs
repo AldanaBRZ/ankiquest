@@ -161,12 +161,18 @@ impl Store {
         let _ = fs::remove_file(shm_of(&copy));
         let _ = fs::remove_file(&copy);
 
-        self.upsert(user, &reviews, clock)?;
+        self.upsert(user, &reviews, &[], clock)?;
         self.signatures.insert(user.into(), before);
         Ok(true)
     }
 
-    pub fn upsert(&mut self, user: &str, reviews: &[Review], clock: Clock) -> Result<(), Error> {
+    pub fn upsert(
+        &mut self,
+        user: &str,
+        reviews: &[Review],
+        deleted: &[i64],
+        clock: Clock,
+    ) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
         {
             let mut insert = tx.prepare(
@@ -175,6 +181,10 @@ impl Store {
             )?;
             for r in reviews {
                 insert.execute(params![user, r.id, r.cid, r.last_ivl, r.time_ms, r.kind])?;
+            }
+            let mut delete = tx.prepare("delete from reviews where user = ?1 and id = ?2")?;
+            for id in deleted {
+                delete.execute(params![user, id])?;
             }
             tx.execute(
                 "insert into clocks (user, offset_west_min, rollover_hour) values (?1, ?2, ?3)
@@ -274,6 +284,34 @@ mod tests {
         assert!(store.mark_seen("hill", "level:2").unwrap());
         assert!(!store.mark_seen("hill", "level:2").unwrap());
         assert!(!store.ingest(&base, "missing").unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undone_reviews_are_deleted() {
+        let dir = temp_dir("undo");
+        let mut store = Store::open(&dir).unwrap();
+        let review = |id| Review {
+            id,
+            cid: 1,
+            last_ivl: 0,
+            time_ms: 4000,
+            kind: 1,
+        };
+        let clock = Clock::default();
+        store
+            .upsert("hill", &[review(1), review(2), review(3)], &[], clock)
+            .unwrap();
+        store
+            .upsert("hill", &[review(4)], &[2, 3, 99], clock)
+            .unwrap();
+        let ids: Vec<i64> = store
+            .reviews("hill")
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![1, 4]);
         let _ = fs::remove_dir_all(&dir);
     }
 }
