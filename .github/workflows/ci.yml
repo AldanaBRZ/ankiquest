@@ -43,7 +43,10 @@ jobs:
                     services.nginx.enable = true;
                     security.acme.acceptTerms = true;
                     security.acme.defaults.email = "ci@example.com";
-                    services.anki-sync-server.enable = true;
+                    services.anki-sync-server = {
+                      enable = true;
+                      users = [{ username = "hill"; passwordFile = "/run/secrets/anki"; }];
+                    };
                     services.ankiquest = {
                       enable = true;
                       domain = "anki.example.com";
