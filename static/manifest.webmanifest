@@ -1,0 +1,9 @@
+{
+  "name": "ankiquest",
+  "short_name": "ankiquest",
+  "display": "standalone",
+  "start_url": "/",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

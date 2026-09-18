@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Test
+        run: nix develop --command cargo test
+
+      - name: Lint
+        run: nix develop --command cargo clippy --all-targets -- -D warnings
+
+      - name: Build the package
+        run: nix build --print-build-logs
+
+      - name: Evaluate the NixOS module
+        run: |
+          nix eval --impure --raw --expr '
+            let
+              flake = builtins.getFlake "git+file://'"$PWD"'";
+              system = flake.inputs.nixpkgs.lib.nixosSystem {
+                system = "x86_64-linux";
+                modules = [
+                  flake.nixosModules.default
+                  {
+                    boot.isContainer = true;
+                    system.stateVersion = "26.05";
+                    services.nginx.enable = true;
+                    security.acme.acceptTerms = true;
+                    security.acme.defaults.email = "ci@example.com";
+                    services.anki-sync-server.enable = true;
+                    services.ankiquest = {
+                      enable = true;
+                      domain = "anki.example.com";
+                      ntfy = "https://ntfy.sh";
+                      users.hill.ntfyTopic = "example";
+                    };
+                  }
+                ];
+              };
+            in system.config.system.build.toplevel.drvPath'

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ankiquest</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<meta name="theme-color" content="#101418">
+<style>
+:root {
+  --bg: #f4f1ea; --card: #fffdf8; --ink: #1d2327; --dim: #6b7278; --line: #e2dccf;
+  --accent: #2f7dd1; --gold: #d99a1c; --fire: #e2582b; --ice: #5bb5d8; --ok: #3d9a5f;
+  --h0: #e6e0d3; --h1: #b9d7f2; --h2: #7fb6e8; --h3: #3f8dd8; --h4: #1d5fa8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101418; --card: #181e24; --ink: #e8e6e1; --dim: #8b949c; --line: #28313a;
+    --accent: #5aa5f0; --gold: #f0b840; --fire: #ff7a4a; --ice: #7fd0ee; --ok: #5cc483;
+    --h0: #222b33; --h1: #1d3f5e; --h2: #235d92; --h3: #2f7dd1; --h4: #6bb6ff;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 16px 16px calc(32px + env(safe-area-inset-bottom));
+}
+main { max-width: 760px; margin: 0 auto; display: grid; gap: 14px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+header h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+header a { color: var(--dim); font-size: 14px; text-decoration: none; }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+.hero { display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; }
+.level {
+  width: 76px; height: 76px; border-radius: 50%; display: grid; place-items: center;
+  border: 4px solid var(--gold); font-weight: 700; font-size: 28px; font-variant-numeric: tabular-nums;
+}
+.level small { display: block; font-size: 10px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: -6px; text-align: center; }
+.name { font-size: 22px; font-weight: 700; }
+.bar { height: 10px; border-radius: 5px; background: var(--h0); overflow: hidden; margin-top: 6px; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.6s ease; }
+.bar.gold > i { background: var(--gold); }
+.bar.ok > i { background: var(--ok); }
+.sub { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.stat { text-align: center; }
+.stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 12px; color: var(--dim); }
+.fire b { color: var(--fire); }
+.ice b { color: var(--ice); }
+.risk { border-color: var(--fire); color: var(--fire); font-weight: 600; text-align: center; }
+.quest { display: grid; gap: 2px; margin-bottom: 12px; }
+.quest:last-child { margin-bottom: 0; }
+.quest .row { display: flex; justify-content: space-between; gap: 8px; }
+.quest.done .title { color: var(--ok); }
+.heat { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 1fr); gap: 3px; overflow-x: auto; }
+.heat i { width: 100%; min-width: 9px; aspect-ratio: 1; border-radius: 2px; background: var(--h0); }
+.heat i.l1 { background: var(--h1); } .heat i.l2 { background: var(--h2); }
+.heat i.l3 { background: var(--h3); } .heat i.l4 { background: var(--h4); }
+.heat i.frozen { background: var(--ice); opacity: 0.55; }
+.heat i.pad { visibility: hidden; }
+.ach { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.ach div { border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 13px; }
+.ach div.locked { opacity: 0.55; }
+.ach div.got { border-color: var(--gold); }
+.ach b { display: block; font-size: 14px; }
+.ach .bar { height: 5px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+td, th { padding: 8px 4px; text-align: right; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; color: var(--dim); font-weight: 600; }
+td:nth-child(2), th:nth-child(2) { text-align: left; }
+tr:last-child td { border-bottom: 0; }
+td a { color: inherit; font-weight: 600; text-decoration: none; }
+tr.me td { color: var(--accent); }
+.empty { color: var(--dim); text-align: center; padding: 24px 0; }
+</style>
+</head>
+<body>
+<main id="app"><p class="empty">Loading</p></main>
+<script>
+const app = document.getElementById("app");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const num = n => n.toLocaleString();
+const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
+
+function board(rows, me) {
+  if (!rows.length) return `<p class="empty">Nobody has synced yet.</p>`;
+  return `<table><tr><th>#</th><th>Player</th><th>Lvl</th><th>Week XP</th><th>Streak</th><th>Today</th></tr>${
+    rows.map((r, i) => `<tr class="${r.user === me ? "me" : ""}"><td>${i + 1}</td><td><a href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a></td><td>${r.level}</td><td>${num(r.week_xp)}</td><td>${r.streak}</td><td>${num(r.today_reviews)}</td></tr>`).join("")
+  }</table>`;
+}
+
+function heat(cells) {
+  const max = Math.max(1, ...cells.map(c => c.reviews));
+  const first = new Date(cells[0].date + "T00:00:00Z");
+  const pad = (first.getUTCDay() + 6) % 7;
+  const level = n => n === 0 ? 0 : Math.min(4, 1 + Math.floor(n / max * 3.999));
+  return "<i class='pad'></i>".repeat(pad) + cells.map(c =>
+    `<i class="${c.frozen ? "frozen" : "l" + level(c.reviews)}" title="${c.date}: ${c.frozen ? "streak freeze" : num(c.reviews) + " reviews, " + num(c.xp) + " XP"}"></i>`).join("");
+}
+
+function view(p, rows) {
+  const unlocked = p.achievements.filter(a => a.unlocked).length;
+  const achievements = [...p.achievements].sort((a, b) => !!b.unlocked - !!a.unlocked || pct(b.progress, b.target) - pct(a.progress, a.target));
+  return `
+<header><h1>ankiquest</h1><a href="#">Leaderboard</a></header>
+<section class="hero">
+  <div class="level"><div><small>Level</small>${p.level}</div></div>
+  <div>
+    <div class="name">${esc(p.display)}</div>
+    <div class="bar gold"><i style="width:${pct(p.xp_into_level, p.xp_for_next)}%"></i></div>
+    <div class="sub">${num(p.xp_into_level)} / ${num(p.xp_for_next)} XP to level ${p.level + 1} · ${num(p.xp_total)} total</div>
+  </div>
+</section>
+${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for today's reviews.</section>` : ""}
+<section class="stats">
+  <div class="stat fire"><b>${p.streak}</b><span>day streak</span></div>
+  <div class="stat ice"><b>${p.freezes}</b><span>freezes</span></div>
+  <div class="stat"><b>${num(p.today.reviews)}</b><span>reviews today</span></div>
+  <div class="stat"><b>${num(p.today.xp)}</b><span>XP today</span></div>
+</section>
+<section><h2>Daily quests</h2>${p.quests.map(q => `
+  <div class="quest ${q.done ? "done" : ""}">
+    <div class="row"><span class="title">${q.done ? "✓ " : ""}${esc(q.title)}</span><span class="sub">${num(q.progress)} / ${num(q.target)} · +${q.reward} XP</span></div>
+    <div class="bar ${q.done ? "ok" : ""}"><i style="width:${pct(q.progress, q.target)}%"></i></div>
+  </div>`).join("")}
+  <div class="sub">Finish all three for a +100 XP bonus.</div>
+</section>
+<section><h2>Last 26 weeks</h2><div class="heat">${heat(p.heatmap)}</div></section>
+<section><h2>This week</h2>${board(rows, p.user)}</section>
+<section><h2>Lifetime</h2><div class="stats">
+  <div class="stat"><b>${num(p.lifetime.reviews)}</b><span>reviews</span></div>
+  <div class="stat"><b>${num(p.lifetime.hours)}</b><span>hours</span></div>
+  <div class="stat"><b>${p.lifetime.best_streak}</b><span>best streak</span></div>
+  <div class="stat"><b>${num(p.lifetime.best_combo)}</b><span>best combo</span></div>
+</div></section>
+<section><h2>Achievements · ${unlocked} / ${p.achievements.length}</h2><div class="ach">${achievements.map(a => `
+  <div class="${a.unlocked ? "got" : "locked"}"><b>${esc(a.title)}</b>${esc(a.description)}
+    ${a.unlocked ? `<div class="sub">${a.unlocked} · +${a.reward} XP</div>` : `<div class="bar"><i style="width:${pct(a.progress, a.target)}%"></i></div>`}
+  </div>`).join("")}</div>
+</section>`;
+}
+
+async function render() {
+  const user = decodeURIComponent(location.hash.slice(1));
+  try {
+    const rows = await (await fetch("/api/leaderboard")).json();
+    if (user) {
+      const res = await fetch("/api/profile/" + encodeURIComponent(user));
+      if (res.ok) {
+        const p = await res.json();
+        document.title = `${p.display} · level ${p.level}`;
+        app.innerHTML = view(p, rows);
+        return;
+      }
+    }
+    document.title = "ankiquest";
+    app.innerHTML = `<header><h1>ankiquest</h1></header><section><h2>This week</h2>${board(rows, "")}</section>`;
+  } catch (e) {
+    app.innerHTML = `<p class="empty">Could not reach the server.</p>`;
+  }
+}
+
+addEventListener("hashchange", render);
+document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && render());
+setInterval(render, 30000);
+render();
+</script>
+</body>
+</html>
