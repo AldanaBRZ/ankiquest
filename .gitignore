@@ -2,3 +2,5 @@
 /result
 /state
 ankiquest.json
+__pycache__
+*.ankiaddon

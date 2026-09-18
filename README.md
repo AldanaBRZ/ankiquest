@@ -27,7 +27,10 @@ Open `/#<user>` for a profile, `/` for the leaderboard.
 
 ## Getting reviews in
 
-The [AnkiDroid fork](https://github.com/float3/Anki-Android/tree/ankiquest) uploads new review rows after each answer and shows XP feedback while reviewing. Set the server URL, player and token under Settings → Sync → Custom sync server. Sync itself can stay on AnkiWeb.
+Both clients upload new review rows after each answer and show XP feedback while reviewing. Sync itself can stay on AnkiWeb.
+
+- AnkiDroid: install the [fork](https://github.com/float3/Anki-Android/tree/ankiquest) and fill in Settings → ankiquest.
+- Desktop: zip the contents of `addon/` into `ankiquest.ankiaddon`, open it with Anki, then set `url`, `user` and `token` under Tools → Add-ons → ankiquest → Config.
 
 `POST /api/reviews/<user>` with `Authorization: Bearer <token>` and
 
