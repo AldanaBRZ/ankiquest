@@ -16,6 +16,7 @@ use store::{Error, Store};
 
 const POLL: Duration = Duration::from_secs(20);
 const MAX_PENDING: usize = 5000;
+const MAX_SEPARATE_PUSHES: usize = 3;
 
 #[derive(Deserialize, Clone, Default)]
 struct UserConfig {
@@ -307,8 +308,18 @@ fn tick(app: &App) -> Result<(), Error> {
         let Some(profile) = app.profile(&user) else {
             continue;
         };
+        let mut fresh = Vec::new();
         for event in &profile.events {
             if store.mark_seen(&user, &event.key)? {
+                fresh.push(event);
+            }
+        }
+        if fresh.len() > MAX_SEPARATE_PUSHES {
+            let titles: Vec<&str> = fresh.iter().map(|e| e.title.as_str()).collect();
+            let title = format!("{} new unlocks", fresh.len());
+            push(&app.config, &user, &title, &titles.join(", "), "tada");
+        } else {
+            for event in fresh {
                 push(&app.config, &user, &event.title, &event.body, "tada");
             }
         }

@@ -60,6 +60,10 @@ struct DayStats {
     early: bool,
     late: bool,
     review_xp: f64,
+    relearns: u64,
+    max_ivl: i64,
+    first_seen: u64,
+    longest_session_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +123,20 @@ enum Metric {
     PerfectDays,
     EarlyDays,
     LateDays,
+    DaysActive,
+    Relearns,
+    MaxInterval,
+    DistinctCards,
+    LongestSession,
+    MaxSessions,
+    BestMonth,
+    WeekendDays,
+    Comebacks,
+    FreezesUsed,
+    FastDays,
+    NewYearDays,
+    Anniversaries,
+    Years,
 }
 
 struct Def {
@@ -143,6 +161,9 @@ const ACHIEVEMENTS: &[Def] = &[
     def(Metric::Reviews, 25_000, "Memory Palace"),
     def(Metric::Reviews, 50_000, "Living Library"),
     def(Metric::Reviews, 100_000, "Mnemosyne"),
+    def(Metric::Reviews, 250_000, "Quarter Million"),
+    def(Metric::Reviews, 500_000, "Half a Million"),
+    def(Metric::Reviews, 1_000_000, "The Millionaire"),
     def(Metric::Streak, 3, "Warming Up"),
     def(Metric::Streak, 7, "Full Week"),
     def(Metric::Streak, 14, "Fortnight"),
@@ -151,29 +172,106 @@ const ACHIEVEMENTS: &[Def] = &[
     def(Metric::Streak, 100, "Centurion"),
     def(Metric::Streak, 200, "Unbreakable"),
     def(Metric::Streak, 365, "Orbit Complete"),
+    def(Metric::Streak, 500, "Five Hundred Sunrises"),
+    def(Metric::Streak, 730, "Two Orbits"),
+    def(Metric::Streak, 1_000, "Thousand Days"),
+    def(Metric::Streak, 1_500, "Unstoppable"),
+    def(Metric::Streak, 2_000, "Perennial"),
     def(Metric::DayReviews, 100, "Busy Day"),
     def(Metric::DayReviews, 250, "Marathon"),
     def(Metric::DayReviews, 500, "Ultramarathon"),
+    def(Metric::DayReviews, 750, "Iron Lung"),
+    def(Metric::DayReviews, 1_000, "Thousand in a Day"),
+    def(Metric::DayReviews, 1_500, "Grinder"),
+    def(Metric::DayReviews, 2_000, "Madness"),
     def(Metric::Combo, 50, "In the Zone"),
     def(Metric::Combo, 100, "Flow State"),
     def(Metric::Combo, 250, "Trance"),
+    def(Metric::Combo, 500, "Zen"),
+    def(Metric::Combo, 1_000, "Nirvana"),
     def(Metric::Hours, 10, "Ten Hours In"),
     def(Metric::Hours, 50, "Fifty Hours In"),
     def(Metric::Hours, 100, "Hundred Hours In"),
     def(Metric::Hours, 500, "Scholar"),
+    def(Metric::Hours, 1_000, "Thousand Hours"),
+    def(Metric::Hours, 2_000, "Two Thousand Hours"),
+    def(Metric::Hours, 5_000, "Lifer"),
     def(Metric::Mature, 100, "Long Term"),
     def(Metric::Mature, 1_000, "Deep Roots"),
     def(Metric::Mature, 10_000, "Old Growth"),
+    def(Metric::Mature, 25_000, "Ancient Forest"),
+    def(Metric::Mature, 50_000, "Redwood"),
+    def(Metric::Mature, 100_000, "Bedrock"),
     def(Metric::NewCards, 100, "Collector"),
     def(Metric::NewCards, 1_000, "Curator"),
     def(Metric::NewCards, 5_000, "Archivist"),
+    def(Metric::NewCards, 10_000, "Encyclopedist"),
+    def(Metric::NewCards, 25_000, "Lexicographer"),
+    def(Metric::NewCards, 50_000, "Polymath"),
     def(Metric::Quests, 10, "Adventurer"),
     def(Metric::Quests, 50, "Quest Hound"),
     def(Metric::Quests, 200, "Completionist"),
+    def(Metric::Quests, 500, "Quest Master"),
+    def(Metric::Quests, 1_000, "Legend"),
+    def(Metric::Quests, 2_500, "Mythic"),
     def(Metric::PerfectDays, 7, "Perfect Week"),
     def(Metric::PerfectDays, 30, "Perfect Month"),
+    def(Metric::PerfectDays, 100, "Perfectionist"),
+    def(Metric::PerfectDays, 365, "Flawless Year"),
     def(Metric::EarlyDays, 5, "Early Bird"),
+    def(Metric::EarlyDays, 30, "Dawn Patrol"),
+    def(Metric::EarlyDays, 100, "Sunrise Scholar"),
     def(Metric::LateDays, 5, "Night Owl"),
+    def(Metric::LateDays, 30, "Nocturnal"),
+    def(Metric::LateDays, 100, "Creature of the Night"),
+    def(Metric::DaysActive, 30, "Regular"),
+    def(Metric::DaysActive, 100, "Hundred Days"),
+    def(Metric::DaysActive, 365, "A Year of Days"),
+    def(Metric::DaysActive, 730, "Two Years of Days"),
+    def(Metric::DaysActive, 1_000, "Thousand Days Studied"),
+    def(Metric::DaysActive, 2_000, "Two Thousand Days Studied"),
+    def(Metric::Relearns, 100, "Second Chance"),
+    def(Metric::Relearns, 1_000, "Persistence"),
+    def(Metric::Relearns, 10_000, "Never Give Up"),
+    def(Metric::Relearns, 50_000, "Sisyphus"),
+    def(Metric::MaxInterval, 180, "Half-Year Memory"),
+    def(Metric::MaxInterval, 365, "Year-Old Memory"),
+    def(Metric::MaxInterval, 1_825, "Five-Year Memory"),
+    def(Metric::MaxInterval, 3_650, "Decade Memory"),
+    def(Metric::DistinctCards, 1_000, "Wide Net"),
+    def(Metric::DistinctCards, 5_000, "Big Deck"),
+    def(Metric::DistinctCards, 20_000, "Vast Library"),
+    def(Metric::DistinctCards, 50_000, "Everything Everywhere"),
+    def(Metric::LongestSession, 60, "Deep Work"),
+    def(Metric::LongestSession, 120, "Two-Hour Sitting"),
+    def(Metric::LongestSession, 240, "Iron Chair"),
+    def(Metric::MaxSessions, 5, "Snacker"),
+    def(Metric::MaxSessions, 10, "Grazer"),
+    def(Metric::MaxSessions, 20, "Can't Stop"),
+    def(Metric::BestMonth, 1_000, "Busy Month"),
+    def(Metric::BestMonth, 3_000, "Big Month"),
+    def(Metric::BestMonth, 10_000, "Monster Month"),
+    def(Metric::BestMonth, 20_000, "Month of Madness"),
+    def(Metric::WeekendDays, 10, "Weekend Warrior"),
+    def(Metric::WeekendDays, 52, "Weekend Regular"),
+    def(Metric::WeekendDays, 200, "No Days Off"),
+    def(Metric::Comebacks, 1, "Comeback"),
+    def(Metric::Comebacks, 3, "Phoenix"),
+    def(Metric::FreezesUsed, 1, "Saved by the Ice"),
+    def(Metric::FreezesUsed, 10, "Glacier"),
+    def(Metric::FreezesUsed, 50, "Ice Age"),
+    def(Metric::FastDays, 1, "Speed Demon"),
+    def(Metric::FastDays, 10, "Lightning"),
+    def(Metric::FastDays, 50, "Quicksilver"),
+    def(Metric::NewYearDays, 1, "New Year, Same Me"),
+    def(Metric::NewYearDays, 3, "Tradition"),
+    def(Metric::Anniversaries, 1, "Anniversary"),
+    def(Metric::Anniversaries, 5, "Old Friends"),
+    def(Metric::Anniversaries, 10, "Lifelong"),
+    def(Metric::Years, 1, "One Year In"),
+    def(Metric::Years, 3, "Three Years In"),
+    def(Metric::Years, 5, "Veteran"),
+    def(Metric::Years, 10, "Decade of Anki"),
 ];
 
 #[derive(Default)]
@@ -190,6 +288,19 @@ struct Totals {
     early_days: u64,
     late_days: u64,
     days_active: u64,
+    relearns: u64,
+    max_ivl: u64,
+    distinct_cards: u64,
+    longest_session_ms: i64,
+    max_sessions: u64,
+    best_month: u64,
+    weekend_days: u64,
+    comebacks: u64,
+    freezes_used: u64,
+    fast_days: u64,
+    new_year_days: u64,
+    anniversaries: u64,
+    years: u64,
 }
 
 impl Totals {
@@ -206,6 +317,20 @@ impl Totals {
             Metric::PerfectDays => self.perfect_days,
             Metric::EarlyDays => self.early_days,
             Metric::LateDays => self.late_days,
+            Metric::DaysActive => self.days_active,
+            Metric::Relearns => self.relearns,
+            Metric::MaxInterval => self.max_ivl,
+            Metric::DistinctCards => self.distinct_cards,
+            Metric::LongestSession => (self.longest_session_ms / 60_000) as u64,
+            Metric::MaxSessions => self.max_sessions,
+            Metric::BestMonth => self.best_month,
+            Metric::WeekendDays => self.weekend_days,
+            Metric::Comebacks => self.comebacks,
+            Metric::FreezesUsed => self.freezes_used,
+            Metric::FastDays => self.fast_days,
+            Metric::NewYearDays => self.new_year_days,
+            Metric::Anniversaries => self.anniversaries,
+            Metric::Years => self.years,
         }
     }
 }
@@ -223,6 +348,25 @@ fn describe(metric: Metric, n: u64) -> String {
         Metric::PerfectDays => format!("Complete every quest on {n} days"),
         Metric::EarlyDays => format!("Study before 7am on {n} days"),
         Metric::LateDays => format!("Study after 11pm on {n} days"),
+        Metric::DaysActive => format!("Study on {n} different days"),
+        Metric::Relearns => format!("Relearn {n} forgotten cards"),
+        Metric::MaxInterval => format!("Recall a card last seen {n} days before"),
+        Metric::DistinctCards => format!("Review {n} different cards"),
+        Metric::LongestSession => format!("Study {n} minutes in one sitting"),
+        Metric::MaxSessions => format!("Study in {n} separate sessions in one day"),
+        Metric::BestMonth => format!("Review {n} cards in one calendar month"),
+        Metric::WeekendDays => format!("Study on {n} Saturdays or Sundays"),
+        Metric::Comebacks => match n {
+            1 => "Come back after a month away".into(),
+            _ => format!("Come back after a month away {n} times"),
+        },
+        Metric::FreezesUsed => format!("Have a streak freeze save you {n} times"),
+        Metric::FastDays => {
+            format!("Review 100+ cards in a day averaging under 5 seconds, {n} times")
+        }
+        Metric::NewYearDays => format!("Study on New Year's Day {n} times"),
+        Metric::Anniversaries => format!("Study on the anniversary of your first review {n} times"),
+        Metric::Years => format!("Keep going for {n} years since your first review"),
     }
 }
 
@@ -333,6 +477,11 @@ pub fn level_for(xp: u64) -> (u64, u64, u64) {
 }
 
 pub fn date_string(day: i64) -> String {
+    let (y, m, d) = civil(day);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn civil(day: i64) -> (i64, i64, i64) {
     let z = day + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -342,7 +491,11 @@ pub fn date_string(day: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}")
+    (y, m, d)
+}
+
+fn is_weekend(day: i64) -> bool {
+    (day + 3).rem_euclid(7) >= 5
 }
 
 fn week_of(day: i64) -> i64 {
@@ -444,6 +597,7 @@ fn collect_days(reviews: &[Review], clock: &Clock) -> (BTreeMap<i64, DayStats>, 
     let mut days: BTreeMap<i64, DayStats> = BTreeMap::new();
     let mut seen = HashSet::new();
     let mut combo = 0u64;
+    let mut session_ms = 0i64;
     let mut prev: Option<(i64, i64)> = None;
     for r in reviews {
         let day = clock.day(r.id);
@@ -452,16 +606,26 @@ fn collect_days(reviews: &[Review], clock: &Clock) -> (BTreeMap<i64, DayStats>, 
         let continues = prev.is_some_and(|(d, id)| d == day && r.id - id < SESSION_GAP_MS);
         if continues {
             combo += 1;
+            session_ms += r.time_ms;
         } else {
             combo = 1;
+            session_ms = r.time_ms;
             s.sessions += 1;
         }
         prev = Some((day, r.id));
         s.reviews += 1;
         s.time_ms += r.time_ms;
         s.max_combo = s.max_combo.max(combo);
-        if seen.insert(r.cid) && r.kind == 0 {
-            s.new_cards += 1;
+        s.longest_session_ms = s.longest_session_ms.max(session_ms);
+        s.max_ivl = s.max_ivl.max(r.last_ivl);
+        if r.kind == 2 {
+            s.relearns += 1;
+        }
+        if seen.insert(r.cid) {
+            s.first_seen += 1;
+            if r.kind == 0 {
+                s.new_cards += 1;
+            }
         }
         if r.last_ivl >= MATURE_IVL {
             s.mature += 1;
@@ -504,9 +668,37 @@ pub fn compute(
     let mut today_quests = Vec::new();
     let mut events = Vec::new();
     let empty = DayStats::default();
+    let (first_year, first_month, first_date) = civil(first);
+    let mut month = (first_year, first_month);
+    let mut month_reviews = 0u64;
+    let mut last_active: Option<i64> = None;
 
     for day in first..=today {
         let stats = days.get(&day);
+        let (year, month_of_year, date) = civil(day);
+        if (year, month_of_year) != month {
+            month = (year, month_of_year);
+            month_reviews = 0;
+        }
+        totals.years = ((day - first) / 365) as u64;
+        if let Some(s) = stats {
+            month_reviews += s.reviews;
+            totals.best_month = totals.best_month.max(month_reviews);
+            totals.relearns += s.relearns;
+            totals.max_ivl = totals.max_ivl.max(s.max_ivl.max(0) as u64);
+            totals.distinct_cards += s.first_seen;
+            totals.longest_session_ms = totals.longest_session_ms.max(s.longest_session_ms);
+            totals.max_sessions = totals.max_sessions.max(s.sessions);
+            totals.weekend_days += u64::from(is_weekend(day));
+            totals.fast_days += u64::from(s.reviews >= 100 && s.time_ms < s.reviews as i64 * 5_000);
+            totals.new_year_days += u64::from(month_of_year == 1 && date == 1);
+            totals.anniversaries +=
+                u64::from(year > first_year && month_of_year == first_month && date == first_date);
+            if last_active.is_some_and(|last| day - last >= 30) {
+                totals.comebacks += 1;
+            }
+            last_active = Some(day);
+        }
         if stats.is_some() {
             streak += 1;
             totals.best_streak = totals.best_streak.max(streak);
@@ -517,6 +709,7 @@ pub fn compute(
             if streak > 0 && freezes > 0 {
                 freezes -= 1;
                 frozen.insert(day);
+                totals.freezes_used += 1;
             } else {
                 streak = 0;
             }
@@ -834,6 +1027,54 @@ mod tests {
                 .iter()
                 .any(|e| e.key == "achievement:dayreviews-100")
         );
+    }
+
+    #[test]
+    fn calendar_and_memory_achievements() {
+        let mut reviews = reviews_on(0, 5, 0);
+        reviews.extend(reviews_on(2, 5, 100));
+        reviews.extend(reviews_on(40, 5, 200));
+        let mut fast = reviews_on(365, 120, 1000);
+        for r in &mut fast {
+            r.time_ms = 3_000;
+        }
+        fast[0].last_ivl = 400;
+        reviews.extend(fast);
+        let p = compute("a", "a", &reviews, &utc(), at(365));
+        let unlocked = |id: &str| {
+            p.achievements
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap_or_else(|| panic!("no achievement {id}"))
+                .unlocked
+                .is_some()
+        };
+        for id in [
+            "comebacks-1",
+            "anniversaries-1",
+            "years-1",
+            "newyeardays-1",
+            "maxinterval-365",
+            "fastdays-1",
+            "dayreviews-100",
+        ] {
+            assert!(unlocked(id), "{id} should be unlocked");
+        }
+        assert!(!unlocked("comebacks-3"));
+        assert!(!unlocked("maxinterval-1825"));
+        let weekend = p
+            .achievements
+            .iter()
+            .find(|a| a.id == "weekenddays-10")
+            .unwrap();
+        assert_eq!(weekend.progress, 1);
+    }
+
+    #[test]
+    fn achievement_ids_are_unique() {
+        let p = compute("a", "a", &[], &utc(), at(1));
+        let ids: HashSet<_> = p.achievements.iter().map(|a| a.id.clone()).collect();
+        assert_eq!(ids.len(), p.achievements.len());
     }
 
     #[test]
