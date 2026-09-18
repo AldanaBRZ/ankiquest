@@ -1,0 +1,27 @@
+name: Desktop add-on
+
+on:
+  push:
+    tags: ["addon-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Package
+        run: cd addon && zip -r ../ankiquest.ankiaddon . -x '__pycache__/*' '*.pyc' 'meta.json'
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/addon-')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" ankiquest.ankiaddon \
+            --title "Desktop add-on ${GITHUB_REF_NAME#addon-}" \
+            --notes "Double-click ankiquest.ankiaddon, or use Tools → Add-ons → Install from file in Anki. Then set url, user and token under Tools → Add-ons → ankiquest → Config and restart Anki."
