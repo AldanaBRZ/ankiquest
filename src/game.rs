@@ -268,6 +268,7 @@ pub struct Today {
     pub minutes: u64,
     pub xp: u64,
     pub max_combo: u64,
+    pub current_combo: u64,
     pub new_cards: u64,
 }
 
@@ -439,7 +440,7 @@ fn review_base_xp(r: &Review) -> f64 {
     }
 }
 
-fn collect_days(reviews: &[Review], clock: &Clock) -> BTreeMap<i64, DayStats> {
+fn collect_days(reviews: &[Review], clock: &Clock) -> (BTreeMap<i64, DayStats>, u64) {
     let mut days: BTreeMap<i64, DayStats> = BTreeMap::new();
     let mut seen = HashSet::new();
     let mut combo = 0u64;
@@ -477,7 +478,7 @@ fn collect_days(reviews: &[Review], clock: &Clock) -> BTreeMap<i64, DayStats> {
         }
         s.review_xp += review_base_xp(r) * (1.0 + combo.min(100) as f64 / 200.0);
     }
-    days
+    (days, combo)
 }
 
 pub fn compute(
@@ -487,7 +488,7 @@ pub fn compute(
     clock: &Clock,
     now_ms: i64,
 ) -> Profile {
-    let days = collect_days(reviews, clock);
+    let (days, last_combo) = collect_days(reviews, clock);
     let today = clock.day(now_ms);
     let seed = seed_of(user);
     let first = days.keys().next().copied().unwrap_or(today);
@@ -646,6 +647,11 @@ pub fn compute(
             minutes: (now.time_ms / 60_000) as u64,
             xp: day_xp.get(&today).copied().unwrap_or(0),
             max_combo: now.max_combo,
+            current_combo: if reviews.last().is_some_and(|r| clock.day(r.id) == today) {
+                last_combo
+            } else {
+                0
+            },
             new_cards: now.new_cards,
         },
         lifetime: Lifetime {
@@ -775,6 +781,7 @@ mod tests {
         reviews.extend(later);
         let p = compute("a", "a", &reviews, &utc(), at(5));
         assert_eq!(p.today.max_combo, 10);
+        assert_eq!(p.today.current_combo, 4);
         assert_eq!(p.today.reviews, 14);
     }
 
