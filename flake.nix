@@ -85,6 +85,17 @@
           default = null;
           example = "https://ntfy.sh";
         };
+        weekTimezone = lib.mkOption {
+          type = lib.types.str;
+          default = "UTC";
+          example = "Europe/Berlin";
+          description = "Time zone of the shared leaderboard week, which runs Monday to Sunday for every player.";
+        };
+        weekRolloverHour = lib.mkOption {
+          type = lib.types.ints.between 0 23;
+          default = 4;
+          description = "Local hour in weekTimezone at which the leaderboard week turns over on Mondays.";
+        };
         remindHour = lib.mkOption {
           type = lib.types.ints.between 0 23;
           default = 20;
@@ -111,6 +122,8 @@
             state_dir = "/var/lib/ankiquest";
             ntfy = cfg.ntfy;
             remind_hour = cfg.remindHour;
+            week_timezone = cfg.weekTimezone;
+            week_rollover_hour = cfg.weekRolloverHour;
             public_url =
               if cfg.domain == null
               then null

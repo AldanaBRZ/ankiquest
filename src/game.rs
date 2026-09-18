@@ -1,3 +1,5 @@
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
@@ -45,6 +47,55 @@ impl Clock {
 
     pub fn hour(&self, ms: i64) -> i64 {
         self.local_secs(ms).rem_euclid(86400) / 3600
+    }
+
+    fn day_start_ms(&self, day: i64) -> i64 {
+        (day * 86400 + self.rollover_hour * 3600 + self.offset_west_min * 60) * 1000
+    }
+}
+
+/// The leaderboard week shared by every player: Monday to Sunday in one time zone,
+/// turning over at the same hour for everyone.
+#[derive(Clone, Copy, Debug)]
+pub struct Week {
+    pub tz: Tz,
+    pub rollover_hour: u32,
+}
+
+impl Default for Week {
+    fn default() -> Self {
+        Self {
+            tz: Tz::UTC,
+            rollover_hour: 4,
+        }
+    }
+}
+
+impl Week {
+    fn shifted(&self, ms: i64) -> NaiveDateTime {
+        DateTime::from_timestamp_millis(ms)
+            .unwrap_or_default()
+            .with_timezone(&self.tz)
+            .naive_local()
+            - Duration::hours(i64::from(self.rollover_hour))
+    }
+
+    fn of(&self, ms: i64) -> (i32, u32) {
+        let week = self.shifted(ms).date().iso_week();
+        (week.year(), week.week())
+    }
+
+    /// When the week containing `ms` ends, in milliseconds since the epoch.
+    pub fn end_after(&self, ms: i64) -> i64 {
+        let date = self.shifted(ms).date();
+        let monday = date + Duration::days(7 - i64::from(date.weekday().num_days_from_monday()));
+        let boundary = monday
+            .and_hms_opt(self.rollover_hour, 0, 0)
+            .unwrap_or_default();
+        self.tz
+            .from_local_datetime(&boundary)
+            .earliest()
+            .map_or(ms + 7 * 86_400_000, |t| t.timestamp_millis())
     }
 }
 
@@ -498,10 +549,6 @@ fn is_weekend(day: i64) -> bool {
     (day + 3).rem_euclid(7) >= 5
 }
 
-fn week_of(day: i64) -> i64 {
-    (day + 3).div_euclid(7)
-}
-
 fn mix(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -650,6 +697,7 @@ pub fn compute(
     display: &str,
     reviews: &[Review],
     clock: &Clock,
+    week: &Week,
     now_ms: i64,
 ) -> Profile {
     let (days, last_combo) = collect_days(reviews, clock);
@@ -816,9 +864,10 @@ pub fn compute(
         })
         .collect();
 
+    let this_week = week.of(now_ms);
     let week_xp = day_xp
-        .range(today - 6..=today)
-        .filter(|(d, _)| week_of(**d) == week_of(today))
+        .range(today - 9..=today)
+        .filter(|(d, _)| week.of(clock.day_start_ms(**d)) == this_week)
         .map(|(_, xp)| xp)
         .sum();
 
@@ -918,6 +967,67 @@ mod tests {
     }
 
     #[test]
+    fn week_is_shared_across_time_zones() {
+        let berlin = chrono_tz::Europe::Berlin;
+        let week = Week {
+            tz: berlin,
+            rollover_hour: 4,
+        };
+        let at_berlin = |d, h| {
+            berlin
+                .with_ymd_and_hms(2026, 9, d, h, 0, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let buenos_aires = Clock {
+            offset_west_min: 180,
+            rollover_hour: 4,
+        };
+        let review = |id| Review {
+            id,
+            cid: id,
+            last_ivl: 0,
+            time_ms: 5_000,
+            kind: 1,
+        };
+
+        assert_eq!(week.of(at_berlin(21, 3)), week.of(at_berlin(20, 12)));
+        assert_ne!(week.of(at_berlin(21, 5)), week.of(at_berlin(20, 12)));
+        assert_eq!(week.end_after(at_berlin(21, 10)), at_berlin(28, 4));
+        assert_eq!(week.end_after(at_berlin(21, 3)), at_berlin(21, 4));
+
+        let sunday = at_berlin(20, 20);
+        let late_sunday = at_berlin(21, 8);
+        let p = compute(
+            "a",
+            "a",
+            &[review(sunday), review(late_sunday)],
+            &buenos_aires,
+            &week,
+            late_sunday,
+        );
+        assert_eq!(
+            p.week_xp, 0,
+            "their Sunday started before the shared week did"
+        );
+        assert_eq!(p.today.reviews, 2);
+
+        let monday = at_berlin(21, 10);
+        let p = compute(
+            "a",
+            "a",
+            &[review(sunday), review(monday)],
+            &buenos_aires,
+            &week,
+            monday,
+        );
+        assert!(
+            p.week_xp > 0,
+            "their Monday started after the shared week did"
+        );
+    }
+
+    #[test]
     fn levels_are_monotonic() {
         assert_eq!(level_for(0), (1, 0, 100));
         assert_eq!(level_for(99).0, 1);
@@ -931,21 +1041,42 @@ mod tests {
 
     #[test]
     fn streak_counts_consecutive_days() {
-        let p = compute("a", "a", &history(&[10, 11, 12]), &utc(), at(12));
+        let p = compute(
+            "a",
+            "a",
+            &history(&[10, 11, 12]),
+            &utc(),
+            &Week::default(),
+            at(12),
+        );
         assert_eq!(p.streak, 3);
         assert!(!p.at_risk);
     }
 
     #[test]
     fn today_without_reviews_is_at_risk_not_broken() {
-        let p = compute("a", "a", &history(&[10, 11, 12]), &utc(), at(13));
+        let p = compute(
+            "a",
+            "a",
+            &history(&[10, 11, 12]),
+            &utc(),
+            &Week::default(),
+            at(13),
+        );
         assert_eq!(p.streak, 3);
         assert!(p.at_risk);
     }
 
     #[test]
     fn missed_day_without_freeze_resets() {
-        let p = compute("a", "a", &history(&[10, 11, 13]), &utc(), at(13));
+        let p = compute(
+            "a",
+            "a",
+            &history(&[10, 11, 13]),
+            &utc(),
+            &Week::default(),
+            at(13),
+        );
         assert_eq!(p.streak, 1);
         assert_eq!(p.lifetime.best_streak, 2);
     }
@@ -954,7 +1085,7 @@ mod tests {
     fn freeze_is_earned_and_spent() {
         let mut days: Vec<i64> = (1..=7).collect();
         days.push(9);
-        let p = compute("a", "a", &history(&days), &utc(), at(9));
+        let p = compute("a", "a", &history(&days), &utc(), &Week::default(), at(9));
         assert_eq!(p.streak, 8);
         assert_eq!(p.freezes, 0);
         assert!(
@@ -972,7 +1103,7 @@ mod tests {
             r.id += 3_600_000;
         }
         reviews.extend(later);
-        let p = compute("a", "a", &reviews, &utc(), at(5));
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(5));
         assert_eq!(p.today.max_combo, 10);
         assert_eq!(p.today.current_combo, 4);
         assert_eq!(p.today.reviews, 14);
@@ -993,8 +1124,8 @@ mod tests {
     #[test]
     fn quests_are_deterministic_and_distinct() {
         let reviews = history(&[1, 2, 3]);
-        let a = compute("a", "a", &reviews, &utc(), at(3));
-        let b = compute("a", "a", &reviews, &utc(), at(3));
+        let a = compute("a", "a", &reviews, &utc(), &Week::default(), at(3));
+        let b = compute("a", "a", &reviews, &utc(), &Week::default(), at(3));
         assert_eq!(a.quests.len(), 3);
         let titles = |p: &Profile| p.quests.iter().map(|q| q.title.clone()).collect::<Vec<_>>();
         assert_eq!(titles(&a), titles(&b));
@@ -1004,7 +1135,14 @@ mod tests {
 
     #[test]
     fn xp_sums_into_heatmap_and_total() {
-        let p = compute("a", "a", &history(&[1, 2, 3]), &utc(), at(3));
+        let p = compute(
+            "a",
+            "a",
+            &history(&[1, 2, 3]),
+            &utc(),
+            &Week::default(),
+            at(3),
+        );
         let heat: u64 = p.heatmap.iter().map(|c| c.xp).sum();
         assert_eq!(heat, p.xp_total);
         assert!(p.xp_total > 0);
@@ -1014,7 +1152,7 @@ mod tests {
     #[test]
     fn achievements_unlock_with_events() {
         let reviews: Vec<Review> = reviews_on(1, 120, 0);
-        let p = compute("a", "a", &reviews, &utc(), at(1));
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(1));
         let first = p
             .achievements
             .iter()
@@ -1040,7 +1178,7 @@ mod tests {
         }
         fast[0].last_ivl = 400;
         reviews.extend(fast);
-        let p = compute("a", "a", &reviews, &utc(), at(365));
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(365));
         let unlocked = |id: &str| {
             p.achievements
                 .iter()
@@ -1072,14 +1210,14 @@ mod tests {
 
     #[test]
     fn achievement_ids_are_unique() {
-        let p = compute("a", "a", &[], &utc(), at(1));
+        let p = compute("a", "a", &[], &utc(), &Week::default(), at(1));
         let ids: HashSet<_> = p.achievements.iter().map(|a| a.id.clone()).collect();
         assert_eq!(ids.len(), p.achievements.len());
     }
 
     #[test]
     fn empty_history() {
-        let p = compute("a", "a", &[], &utc(), at(50));
+        let p = compute("a", "a", &[], &utc(), &Week::default(), at(50));
         assert_eq!(p.level, 1);
         assert_eq!(p.streak, 0);
         assert_eq!(p.quests.len(), 3);

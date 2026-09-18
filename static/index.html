@@ -32,6 +32,7 @@ header h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 header a { color: var(--dim); font-size: 14px; text-decoration: none; }
 section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .hero { display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; }
 .level {
   width: 76px; height: 76px; border-radius: 50%; display: grid; place-items: center;
@@ -93,6 +94,15 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;",
 const num = n => n.toLocaleString();
 const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 
+let weekEnds = 0;
+function weekTitle() {
+  const left = weekEnds - Date.now();
+  if (left <= 0) return "This week";
+  const h = Math.floor(left / 3600000), d = Math.floor(h / 24);
+  const when = new Date(weekEnds).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return `This week · resets in ${d ? `${d}d ${h % 24}h` : h ? `${h}h` : "<1h"}<span class="sub"> · ${when}</span>`;
+}
+
 function board(rows, me) {
   if (!rows.length) return `<p class="empty">Nobody has uploaded reviews yet.</p>`;
   const lead = Math.max(1, rows[0].week_xp);
@@ -149,7 +159,7 @@ ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for 
   <div class="sub">Finish all three for a +100 XP bonus.</div>
 </section>
 <section><h2>Last 26 weeks</h2><div class="heat">${heat(p.heatmap)}</div></section>
-<section><h2>This week</h2>${board(rows, p.user)}</section>
+<section><h2>${weekTitle()}</h2>${board(rows, p.user)}</section>
 <section><h2>Lifetime</h2><div class="stats">
   <div class="stat"><b>${num(p.lifetime.reviews)}</b><span>reviews</span></div>
   <div class="stat"><b>${num(p.lifetime.hours)}</b><span>hours</span></div>
@@ -166,7 +176,11 @@ ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for 
 async function render() {
   const user = decodeURIComponent(location.hash.slice(1));
   try {
-    const rows = await (await fetch("/api/leaderboard")).json();
+    const [rows, week] = await Promise.all([
+      fetch("/api/leaderboard").then(r => r.json()),
+      fetch("/api/week").then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+    weekEnds = week?.ends_at ?? 0;
     if (user) {
       const res = await fetch("/api/profile/" + encodeURIComponent(user));
       if (res.ok) {
@@ -180,7 +194,7 @@ async function render() {
     let me = "";
     try { me = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
     document.title = "ankiquest";
-    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>This week</h2>${board(rows, me)}</section>`;
+    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${weekTitle()}</h2>${board(rows, me)}</section>`;
   } catch (e) {
     app.innerHTML = `<p class="empty">Could not reach the server.</p>`;
   }

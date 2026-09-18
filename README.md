@@ -17,13 +17,15 @@ cargo run -- ankiquest.json
   "ntfy": "https://ntfy.sh",
   "remind_hour": 20,
   "public_url": "https://anki.example.com",
+  "week_timezone": "Europe/Berlin",
+  "week_rollover_hour": 4,
   "users": {
     "hill": { "display": "hill", "ntfy_topic": "some-secret-topic", "token_file": "hill.token" }
   }
 }
 ```
 
-Open `/#<user>` for a profile, `/` for the leaderboard.
+Open `/#<user>` for a profile, `/` for the leaderboard. The leaderboard week runs Monday to Sunday in `week_timezone` and turns over at `week_rollover_hour` for everyone at once; each Anki day counts towards the week it started in. Streaks, quests and "today" still follow each player's own Anki day.
 
 ## Getting reviews in
 
@@ -56,6 +58,7 @@ imports = [inputs.ankiquest.nixosModules.default];
 services.ankiquest = {
   enable = true;
   domain = "anki.example.com";
+  weekTimezone = "Europe/Berlin";
   ntfy = "https://ntfy.sh";
   users.hill = {
     tokenFile = "/etc/nixos/secrets/ankiquest-hill";

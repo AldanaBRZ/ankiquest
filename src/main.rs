@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use game::{Clock, Profile, Review};
+use game::{Clock, Profile, Review, Week};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,8 +37,20 @@ struct Config {
     #[serde(default = "default_remind_hour")]
     remind_hour: i64,
     public_url: Option<String>,
+    #[serde(default = "default_week_timezone")]
+    week_timezone: String,
+    #[serde(default = "default_week_rollover_hour")]
+    week_rollover_hour: u32,
     #[serde(default)]
     users: HashMap<String, UserConfig>,
+}
+
+fn default_week_timezone() -> String {
+    "UTC".into()
+}
+
+fn default_week_rollover_hour() -> u32 {
+    4
 }
 
 fn default_addr() -> String {
@@ -60,6 +72,7 @@ struct Player {
 
 struct App {
     config: Config,
+    week: Week,
     store: Mutex<Store>,
     players: RwLock<HashMap<String, Player>>,
 }
@@ -90,6 +103,7 @@ impl App {
             &self.display(user),
             &merged,
             &player.clock,
+            &self.week,
             now_ms(),
         ))
     }
@@ -218,6 +232,19 @@ async fn upload(
         }
     }
     Ok(Json(profile))
+}
+
+#[derive(Serialize)]
+struct WeekInfo {
+    ends_at: i64,
+    timezone: String,
+}
+
+async fn week_info(State(app): State<Arc<App>>) -> Json<WeekInfo> {
+    Json(WeekInfo {
+        ends_at: app.week.end_after(now_ms()),
+        timezone: app.config.week_timezone.clone(),
+    })
 }
 
 async fn index() -> Html<&'static str> {
@@ -365,7 +392,18 @@ async fn main() -> Result<(), Error> {
     for user in store.users()? {
         players.insert(user.clone(), load_player(&store, &user)?);
     }
+    let week = Week {
+        tz: config
+            .week_timezone
+            .parse()
+            .map_err(|e| format!("week_timezone {:?}: {e}", config.week_timezone))?,
+        rollover_hour: config.week_rollover_hour,
+    };
+    if week.rollover_hour > 23 {
+        return Err("week_rollover_hour must be between 0 and 23".into());
+    }
     let app = Arc::new(App {
+        week,
         config,
         players: RwLock::new(players),
         store: Mutex::new(store),
@@ -386,6 +424,7 @@ async fn main() -> Result<(), Error> {
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/api/leaderboard", get(leaderboard))
+        .route("/api/week", get(week_info))
         .route("/api/profile/{user}", get(profile))
         .route("/api/preview/{user}", post(preview))
         .route("/api/reviews/{user}", post(upload))
