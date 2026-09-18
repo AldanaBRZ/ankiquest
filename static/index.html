@@ -88,7 +88,7 @@ const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 function board(rows, me) {
   if (!rows.length) return `<p class="empty">Nobody has synced yet.</p>`;
   return `<table><tr><th>#</th><th>Player</th><th>Lvl</th><th>Week XP</th><th>Streak</th><th>Today</th></tr>${
-    rows.map((r, i) => `<tr class="${r.user === me ? "me" : ""}"><td>${i + 1}</td><td><a href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a></td><td>${r.level}</td><td>${num(r.week_xp)}</td><td>${r.streak}</td><td>${num(r.today_reviews)}</td></tr>`).join("")
+    rows.map((r, i) => `<tr class="${r.user === me ? "me" : ""}"><td>${["👑", "🥈", "🥉"][i] ?? i + 1}</td><td><a href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a></td><td>${r.level}</td><td>${num(r.week_xp)}</td><td>${r.streak}</td><td>${num(r.today_reviews)}</td></tr>`).join("")
   }</table>`;
 }
 
