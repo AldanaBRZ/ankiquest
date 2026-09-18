@@ -4,7 +4,7 @@ mod store;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use game::{Clock, Profile, Review};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store::{Error, Store};
 
 const POLL: Duration = Duration::from_secs(20);
+const MAX_PENDING: usize = 5000;
 
 #[derive(Deserialize, Clone, Default)]
 struct UserConfig {
@@ -69,12 +70,21 @@ impl App {
     }
 
     fn profile(&self, user: &str) -> Option<Profile> {
+        self.preview(user, &[])
+    }
+
+    fn preview(&self, user: &str, pending: &[Review]) -> Option<Profile> {
         let players = self.players.read().unwrap();
         let player = players.get(user)?;
+        let last = player.reviews.last().map_or(0, |r| r.id);
+        let mut fresh: Vec<Review> = pending.iter().filter(|r| r.id > last).copied().collect();
+        fresh.sort_by_key(|r| r.id);
+        fresh.dedup_by_key(|r| r.id);
+        let merged = [player.reviews.as_slice(), &fresh].concat();
         Some(game::compute(
             user,
             &self.display(user),
-            &player.reviews,
+            &merged,
             &player.clock,
             now_ms(),
         ))
@@ -126,6 +136,24 @@ async fn profile(
     UrlPath(user): UrlPath<String>,
 ) -> Result<Json<Profile>, StatusCode> {
     app.profile(&user).map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+#[derive(Deserialize)]
+struct Pending {
+    reviews: Vec<Review>,
+}
+
+async fn preview(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    Json(pending): Json<Pending>,
+) -> Result<Json<Profile>, StatusCode> {
+    if pending.reviews.len() > MAX_PENDING {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    app.preview(&user, &pending.reviews)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn index() -> Html<&'static str> {
@@ -260,6 +288,7 @@ async fn main() -> Result<(), Error> {
         .route("/icon.svg", get(icon))
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/profile/{user}", get(profile))
+        .route("/api/preview/{user}", post(preview))
         .with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;

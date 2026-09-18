@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 const SESSION_GAP_MS: i64 = 300_000;
@@ -10,7 +10,7 @@ const ALL_QUESTS_XP: u64 = 100;
 const RECENT_DAYS: usize = 14;
 const HEATMAP_DAYS: i64 = 182;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub struct Review {
     pub id: i64,
     pub cid: i64,
@@ -307,6 +307,7 @@ pub struct Profile {
     pub quests: Vec<QuestView>,
     pub achievements: Vec<AchievementView>,
     pub heatmap: Vec<HeatCell>,
+    pub last_review_id: i64,
     #[serde(skip)]
     pub day: i64,
     #[serde(skip)]
@@ -659,6 +660,7 @@ pub fn compute(
         quests: today_quests,
         achievements,
         heatmap,
+        last_review_id: reviews.last().map_or(0, |r| r.id),
         day: today,
         events,
     }
