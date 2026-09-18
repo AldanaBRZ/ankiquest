@@ -67,13 +67,21 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .ach div.got { border-color: var(--gold); }
 .ach b { display: block; font-size: 14px; }
 .ach .bar { height: 5px; }
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-td, th { padding: 8px 4px; text-align: right; border-bottom: 1px solid var(--line); }
-th { font-size: 12px; color: var(--dim); font-weight: 600; }
-td:nth-child(2), th:nth-child(2) { text-align: left; }
-tr:last-child td { border-bottom: 0; }
-td a { color: inherit; font-weight: 600; text-decoration: none; }
-tr.me td { color: var(--accent); }
+.board { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.board li { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px 10px 6px; border-radius: 14px; }
+.board li.me { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.board li.lead { background: color-mix(in srgb, var(--gold) 12%, transparent); }
+.board li.lead.me { background: color-mix(in srgb, var(--gold) 12%, color-mix(in srgb, var(--accent) 14%, transparent)); }
+.board .rank { font-size: 19px; text-align: center; color: var(--dim); font-weight: 600; font-variant-numeric: tabular-nums; }
+.board .line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.board .name { font-weight: 600; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board .name:hover { text-decoration: underline; }
+.board .streak { font-size: 12px; color: var(--fire); white-space: nowrap; }
+.board .lvl { font-size: 12px; color: var(--gold); white-space: nowrap; margin-left: auto; font-variant-numeric: tabular-nums; }
+.board .bar { height: 5px; margin-top: 7px; }
+.board .xp { text-align: right; font-variant-numeric: tabular-nums; min-width: 64px; }
+.board .xp b { display: block; font-size: 17px; color: var(--accent); }
+.board .xp span { font-size: 11px; color: var(--dim); white-space: nowrap; }
 .empty { color: var(--dim); text-align: center; padding: 24px 0; }
 </style>
 </head>
@@ -86,10 +94,22 @@ const num = n => n.toLocaleString();
 const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 
 function board(rows, me) {
-  if (!rows.length) return `<p class="empty">Nobody has synced yet.</p>`;
-  return `<table><tr><th>#</th><th>Player</th><th>Lvl</th><th>Week XP</th><th>Streak</th><th>Today</th></tr>${
-    rows.map((r, i) => `<tr class="${r.user === me ? "me" : ""}"><td>${["👑", "🥈", "🥉"][i] ?? i + 1}</td><td><a href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a></td><td>${r.level}</td><td>${num(r.week_xp)}</td><td>${r.streak}</td><td>${num(r.today_reviews)}</td></tr>`).join("")
-  }</table>`;
+  if (!rows.length) return `<p class="empty">Nobody has uploaded reviews yet.</p>`;
+  const lead = Math.max(1, rows[0].week_xp);
+  return `<ol class="board">${rows.map((r, i) => `
+    <li class="${[r.user === me && "me", i === 0 && r.week_xp > 0 && "lead"].filter(Boolean).join(" ")}">
+      <span class="rank">${["👑", "🥈", "🥉"][i] ?? i + 1}</span>
+      <div>
+        <div class="line">
+          <a class="name" href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a>
+          ${r.streak > 0 ? `<span class="streak">🔥${r.streak}</span>` : ""}
+          <span class="lvl">Lv ${r.level}</span>
+        </div>
+        <div class="bar"><i style="width:${pct(r.week_xp, lead)}%"></i></div>
+      </div>
+      <div class="xp"><b>${num(r.week_xp)}</b><span>${num(r.today_reviews)} today</span></div>
+    </li>`).join("")}
+  </ol>`;
 }
 
 function heat(cells) {
@@ -152,12 +172,15 @@ async function render() {
       if (res.ok) {
         const p = await res.json();
         document.title = `${p.display} · level ${p.level}`;
+        try { localStorage.setItem("ankiquestPlayer", p.user); } catch (e) {}
         app.innerHTML = view(p, rows);
         return;
       }
     }
+    let me = "";
+    try { me = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
     document.title = "ankiquest";
-    app.innerHTML = `<header><h1>ankiquest</h1></header><section><h2>This week</h2>${board(rows, "")}</section>`;
+    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>This week</h2>${board(rows, me)}</section>`;
   } catch (e) {
     app.innerHTML = `<p class="empty">Could not reach the server.</p>`;
   }
