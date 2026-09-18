@@ -479,7 +479,13 @@ fn collect_days(reviews: &[Review], clock: &Clock) -> BTreeMap<i64, DayStats> {
     days
 }
 
-pub fn compute(user: &str, display: &str, reviews: &[Review], clock: &Clock, now_ms: i64) -> Profile {
+pub fn compute(
+    user: &str,
+    display: &str,
+    reviews: &[Review],
+    clock: &Clock,
+    now_ms: i64,
+) -> Profile {
     let days = collect_days(reviews, clock);
     let today = clock.day(now_ms);
     let seed = seed_of(user);
@@ -750,7 +756,11 @@ mod tests {
         let p = compute("a", "a", &history(&days), &utc(), at(9));
         assert_eq!(p.streak, 8);
         assert_eq!(p.freezes, 0);
-        assert!(p.heatmap.iter().any(|c| c.frozen && c.date == date_string(8)));
+        assert!(
+            p.heatmap
+                .iter()
+                .any(|c| c.frozen && c.date == date_string(8))
+        );
     }
 
     #[test]
@@ -803,10 +813,18 @@ mod tests {
     fn achievements_unlock_with_events() {
         let reviews: Vec<Review> = reviews_on(1, 120, 0);
         let p = compute("a", "a", &reviews, &utc(), at(1));
-        let first = p.achievements.iter().find(|a| a.id == "reviews-100").unwrap();
+        let first = p
+            .achievements
+            .iter()
+            .find(|a| a.id == "reviews-100")
+            .unwrap();
         assert_eq!(first.unlocked.as_deref(), Some("1970-01-02"));
         assert!(p.events.iter().any(|e| e.key == "achievement:reviews-100"));
-        assert!(p.events.iter().any(|e| e.key == "achievement:dayreviews-100"));
+        assert!(
+            p.events
+                .iter()
+                .any(|e| e.key == "achievement:dayreviews-100")
+        );
     }
 
     #[test]
