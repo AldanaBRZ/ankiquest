@@ -39,6 +39,7 @@
     }: let
       cfg = config.services.ankiquest;
       syncMount = "/run/ankiquest-sync";
+      withToken = lib.filterAttrs (_: u: u.tokenFile != null) cfg.users;
       user = lib.types.submodule {
         options = {
           display = lib.mkOption {
@@ -49,6 +50,11 @@
             type = lib.types.nullOr lib.types.str;
             default = null;
             description = "ntfy topic for this player's notifications. Ends up in the world-readable store.";
+          };
+          tokenFile = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "File holding the bearer token this player's AnkiDroid uploads reviews with.";
           };
         };
       };
@@ -69,9 +75,10 @@
           description = "Serve through nginx with ACME on this domain.";
         };
         syncBase = lib.mkOption {
-          type = lib.types.str;
-          default = "/var/lib/private/anki-sync-server";
-          description = "SYNC_BASE of the Anki sync server, holding one folder per sync user.";
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/var/lib/private/anki-sync-server";
+          description = "SYNC_BASE of a self-hosted Anki sync server to read reviews from, instead of or besides uploads.";
         };
         ntfy = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
@@ -86,7 +93,7 @@
         users = lib.mkOption {
           type = lib.types.attrsOf user;
           default = {};
-          description = "Optional per-player settings, keyed by sync username. Every sync user is a player either way.";
+          description = "Players, keyed by name.";
         };
       };
 
@@ -97,7 +104,10 @@
           after = ["network.target" "anki-sync-server.service"];
           environment.ANKIQUEST_CONFIG = pkgs.writeText "ankiquest.json" (builtins.toJSON {
             addr = "127.0.0.1:${toString cfg.port}";
-            sync_base = syncMount;
+            sync_base =
+              if cfg.syncBase == null
+              then null
+              else syncMount;
             state_dir = "/var/lib/ankiquest";
             ntfy = cfg.ntfy;
             remind_hour = cfg.remindHour;
@@ -106,9 +116,13 @@
               then null
               else "https://${cfg.domain}";
             users =
-              lib.mapAttrs (_: u: {
+              lib.mapAttrs (name: u: {
                 display = u.display;
                 ntfy_topic = u.ntfyTopic;
+                token_file =
+                  if u.tokenFile == null
+                  then null
+                  else "/run/credentials/ankiquest.service/token-${name}";
               })
               cfg.users;
           });
@@ -116,7 +130,8 @@
             ExecStart = lib.getExe cfg.package;
             DynamicUser = true;
             StateDirectory = "ankiquest";
-            BindReadOnlyPaths = ["${cfg.syncBase}:${syncMount}"];
+            BindReadOnlyPaths = lib.optional (cfg.syncBase != null) "${cfg.syncBase}:${syncMount}";
+            LoadCredential = lib.mapAttrsToList (name: u: "token-${name}:${toString u.tokenFile}") withToken;
             Restart = "always";
             RestartSec = 5;
           };

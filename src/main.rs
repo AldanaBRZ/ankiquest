@@ -2,15 +2,15 @@ mod game;
 mod store;
 
 use axum::extract::{Path as UrlPath, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use game::{Clock, Profile, Review};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store::{Error, Store};
 
@@ -21,13 +21,15 @@ const MAX_PENDING: usize = 5000;
 struct UserConfig {
     display: Option<String>,
     ntfy_topic: Option<String>,
+    token: Option<String>,
+    token_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Clone)]
 struct Config {
     #[serde(default = "default_addr")]
     addr: String,
-    sync_base: PathBuf,
+    sync_base: Option<PathBuf>,
     #[serde(default = "default_state")]
     state_dir: PathBuf,
     ntfy: Option<String>,
@@ -57,6 +59,7 @@ struct Player {
 
 struct App {
     config: Config,
+    store: Mutex<Store>,
     players: RwLock<HashMap<String, Player>>,
 }
 
@@ -156,6 +159,64 @@ async fn preview(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+#[derive(Deserialize)]
+struct Upload {
+    reviews: Vec<Review>,
+    clock: Clock,
+    #[serde(default)]
+    silent: bool,
+}
+
+fn authorized(app: &App, user: &str, headers: &HeaderMap) -> bool {
+    let Some(expected) = app.config.users.get(user).and_then(|u| u.token.as_deref()) else {
+        return false;
+    };
+    let given = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    given.len() == expected.len()
+        && given
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+async fn upload(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Json(upload): Json<Upload>,
+) -> Result<Json<Profile>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if upload.reviews.len() > MAX_PENDING {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let reviews: Vec<Review> = upload.reviews.into_iter().filter(|r| r.kind < 4).collect();
+    let store_error = |e: Error| {
+        eprintln!("upload for {user} failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let mut store = app.store.lock().unwrap();
+    let silent = upload.silent || !store.is_known(&user).map_err(store_error)?;
+    store
+        .upsert(&user, &reviews, upload.clock)
+        .map_err(store_error)?;
+    let player = load_player(&store, &user).map_err(store_error)?;
+    app.players.write().unwrap().insert(user.clone(), player);
+    let profile = app.profile(&user).ok_or(StatusCode::NOT_FOUND)?;
+    if silent {
+        for event in &profile.events {
+            store.mark_seen(&user, &event.key).map_err(store_error)?;
+        }
+    }
+    Ok(Json(profile))
+}
+
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
@@ -200,8 +261,8 @@ fn load_player(store: &Store, user: &str) -> Result<Player, Error> {
     })
 }
 
-fn sync_users(config: &Config) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(&config.sync_base) else {
+fn sync_users(base: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(base) else {
         return Vec::new();
     };
     entries
@@ -211,10 +272,10 @@ fn sync_users(config: &Config) -> Vec<String> {
         .collect()
 }
 
-fn tick(app: &App, store: &mut Store) -> Result<(), Error> {
-    for user in sync_users(&app.config) {
+fn import(app: &App, store: &mut Store, base: &Path) -> Result<(), Error> {
+    for user in sync_users(base) {
         let first_import = !store.is_known(&user)?;
-        let changed = match store.ingest(&app.config.sync_base, &user) {
+        let changed = match store.ingest(base, &user) {
             Ok(changed) => changed,
             Err(e) => {
                 eprintln!("ingest for {user} failed: {e}");
@@ -225,11 +286,27 @@ fn tick(app: &App, store: &mut Store) -> Result<(), Error> {
             let player = load_player(store, &user)?;
             app.players.write().unwrap().insert(user.clone(), player);
         }
+        if first_import && let Some(profile) = app.profile(&user) {
+            for event in &profile.events {
+                store.mark_seen(&user, &event.key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tick(app: &App) -> Result<(), Error> {
+    let mut store = app.store.lock().unwrap();
+    if let Some(base) = &app.config.sync_base {
+        import(app, &mut store, base)?;
+    }
+    let users: Vec<String> = app.players.read().unwrap().keys().cloned().collect();
+    for user in users {
         let Some(profile) = app.profile(&user) else {
             continue;
         };
         for event in &profile.events {
-            if store.mark_seen(&user, &event.key)? && !first_import {
+            if store.mark_seen(&user, &event.key)? {
                 push(&app.config, &user, &event.title, &event.body, "tada");
             }
         }
@@ -258,11 +335,19 @@ async fn main() -> Result<(), Error> {
         .nth(1)
         .or_else(|| std::env::var("ANKIQUEST_CONFIG").ok())
         .unwrap_or_else(|| "ankiquest.json".into());
-    let config: Config = serde_json::from_slice(
+    let mut config: Config = serde_json::from_slice(
         &std::fs::read(&path).map_err(|e| format!("cannot read config {path}: {e}"))?,
     )?;
 
-    let mut store = Store::open(&config.state_dir)?;
+    for (name, user) in &mut config.users {
+        if let Some(file) = &user.token_file {
+            let token = std::fs::read_to_string(file)
+                .map_err(|e| format!("cannot read token for {name}: {e}"))?;
+            user.token = Some(token.trim().to_string());
+        }
+    }
+
+    let store = Store::open(&config.state_dir)?;
     let mut players = HashMap::new();
     for user in store.users()? {
         players.insert(user.clone(), load_player(&store, &user)?);
@@ -270,12 +355,13 @@ async fn main() -> Result<(), Error> {
     let app = Arc::new(App {
         config,
         players: RwLock::new(players),
+        store: Mutex::new(store),
     });
 
     let worker = app.clone();
     std::thread::spawn(move || {
         loop {
-            if let Err(e) = tick(&worker, &mut store) {
+            if let Err(e) = tick(&worker) {
                 eprintln!("tick failed: {e}");
             }
             std::thread::sleep(POLL);
@@ -289,6 +375,7 @@ async fn main() -> Result<(), Error> {
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/profile/{user}", get(profile))
         .route("/api/preview/{user}", post(preview))
+        .route("/api/reviews/{user}", post(upload))
         .with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;

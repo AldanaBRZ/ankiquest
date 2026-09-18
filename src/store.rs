@@ -161,13 +161,19 @@ impl Store {
         let _ = fs::remove_file(shm_of(&copy));
         let _ = fs::remove_file(&copy);
 
+        self.upsert(user, &reviews, clock)?;
+        self.signatures.insert(user.into(), before);
+        Ok(true)
+    }
+
+    pub fn upsert(&mut self, user: &str, reviews: &[Review], clock: Clock) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
         {
             let mut insert = tx.prepare(
                 "insert or ignore into reviews (user, id, cid, last_ivl, time_ms, kind)
                  values (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
-            for r in &reviews {
+            for r in reviews {
                 insert.execute(params![user, r.id, r.cid, r.last_ivl, r.time_ms, r.kind])?;
             }
             tx.execute(
@@ -179,8 +185,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        self.signatures.insert(user.into(), before);
-        Ok(true)
+        Ok(())
     }
 }
 

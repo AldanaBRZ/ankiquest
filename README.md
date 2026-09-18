@@ -1,6 +1,6 @@
 # ankiquest
 
-XP, levels, streaks, daily quests, achievements and a leaderboard for Anki, computed on the server from the review log of a self-hosted sync server. Works with AnkiDroid, desktop and iOS because nothing runs on the client.
+XP, levels, streaks, daily quests, achievements and a leaderboard for Anki. The server only ever sees review log rows (card id, timestamp, previous interval, time taken, review type), never card content.
 
 XP never depends on which answer button was pressed, so there is no incentive to grade dishonestly.
 
@@ -13,18 +13,35 @@ cargo run -- ankiquest.json
 ```json
 {
   "addr": "127.0.0.1:8097",
-  "sync_base": "/path/to/SYNC_BASE",
   "state_dir": "state",
   "ntfy": "https://ntfy.sh",
   "remind_hour": 20,
   "public_url": "https://anki.example.com",
-  "users": { "hill": { "display": "hill", "ntfy_topic": "some-secret-topic" } }
+  "users": {
+    "hill": { "display": "hill", "ntfy_topic": "some-secret-topic", "token_file": "hill.token" }
+  }
 }
 ```
 
-Only `sync_base` is required. Every folder in it with a `collection.anki2` becomes a player; collections are copied before reading and never written. Open `/#<user>` for a profile, `/` for the leaderboard.
+Open `/#<user>` for a profile, `/` for the leaderboard.
 
-`POST /api/preview/<user>` with `{"reviews": [{"id", "cid", "last_ivl", "time_ms", "kind"}]}` returns the profile as it would look once those reviews are synced, without storing them. The AnkiDroid fork uses it to show XP after each answer.
+## Getting reviews in
+
+The [AnkiDroid fork](https://github.com/float3/Anki-Android/tree/ankiquest) uploads new review rows after each answer and shows XP feedback while reviewing. Set the server URL, player and token under Settings → Sync → Custom sync server. Sync itself can stay on AnkiWeb.
+
+`POST /api/reviews/<user>` with `Authorization: Bearer <token>` and
+
+```json
+{
+  "reviews": [{ "id": 0, "cid": 0, "last_ivl": 0, "time_ms": 0, "kind": 0 }],
+  "clock": { "offset_west_min": -120, "rollover_hour": 4 },
+  "silent": false
+}
+```
+
+stores the rows and returns the profile. `POST /api/preview/<user>` takes the same `reviews` without storing anything.
+
+Alternatively set `sync_base` to the `SYNC_BASE` of a self-hosted Anki sync server: every folder in it with a `collection.anki2` becomes a player, and collections are copied before reading and never written.
 
 ## NixOS
 
@@ -33,29 +50,13 @@ inputs.ankiquest.url = "github:float3/ankiquest";
 
 imports = [inputs.ankiquest.nixosModules.default];
 
-services.anki-sync-server = {
-  enable = true;
-  users = [
-    {
-      username = "hill";
-      passwordFile = "/etc/nixos/secrets/anki-sync-hill";
-    }
-  ];
-};
-services.nginx.virtualHosts."ankisync.example.com" = {
-  forceSSL = true;
-  enableACME = true;
-  locations."/" = {
-    proxyPass = "http://127.0.0.1:${toString config.services.anki-sync-server.port}";
-    extraConfig = "client_max_body_size 0;";
-  };
-};
 services.ankiquest = {
   enable = true;
   domain = "anki.example.com";
   ntfy = "https://ntfy.sh";
-  users.hill.ntfyTopic = "some-secret-topic";
+  users.hill = {
+    tokenFile = "/etc/nixos/secrets/ankiquest-hill";
+    ntfyTopic = "some-secret-topic";
+  };
 };
 ```
-
-In AnkiDroid: Settings → Sync → Custom sync server → `https://ankisync.example.com/`.

@@ -19,7 +19,7 @@ pub struct Review {
     pub kind: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub struct Clock {
     pub offset_west_min: i64,
     pub rollover_hour: i64,
