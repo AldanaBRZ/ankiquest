@@ -4,6 +4,7 @@ import urllib.request
 from datetime import datetime
 
 MAX_PENDING = 5000
+UNDO_WINDOW_MS = 2 * 86_400_000
 PENDING_SQL = (
     "select id, cid, lastIvl, time, type from revlog "
     "where id > ? and ease > 0 and type < 4 order by id limit %d" % MAX_PENDING
@@ -44,8 +45,7 @@ class Client:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.load(response)
 
-
-    def upload(self, reviews, rollover_hour, silent):
+    def upload(self, reviews, rollover_hour, silent, deleted=()):
         return self._request(
             "/api/reviews/" + self.user,
             {
@@ -55,8 +55,16 @@ class Client:
                     "rollover_hour": rollover_hour,
                 },
                 "silent": silent,
+                "deleted": list(deleted),
             },
         )
+
+
+def reconcile(window_rows, recent, known, mark):
+    present = {r[0] for r in window_rows}
+    deleted = sorted(recent - present) if mark else []
+    restored = [r for r in window_rows if r[0] <= known and r[0] not in recent]
+    return present, deleted, restored
 
 
 def snapshot(profile):
@@ -74,8 +82,12 @@ def snapshot(profile):
 
 def describe(before, after):
     gained = after["xp"] - before["xp"]
-    if gained <= 0:
+    if gained == 0:
         return None
+    if gained < 0:
+        status = "−%d XP  ·  combo %d" % (-gained, after["combo"])
+        status += "  ·  Lv %d  %d/%d" % (after["level"], after["into"], after["need"])
+        return status, False
     lines = []
     if after["level"] > before["level"]:
         lines.append("Level %d!" % after["level"])

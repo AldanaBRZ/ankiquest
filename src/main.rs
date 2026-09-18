@@ -162,6 +162,8 @@ async fn preview(
 #[derive(Deserialize)]
 struct Upload {
     reviews: Vec<Review>,
+    #[serde(default)]
+    deleted: Vec<i64>,
     clock: Clock,
     #[serde(default)]
     silent: bool,
@@ -193,7 +195,7 @@ async fn upload(
     if !authorized(&app, &user, &headers) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if upload.reviews.len() > MAX_PENDING {
+    if upload.reviews.len() > MAX_PENDING || upload.deleted.len() > MAX_PENDING {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     let reviews: Vec<Review> = upload.reviews.into_iter().filter(|r| r.kind < 4).collect();
@@ -204,7 +206,7 @@ async fn upload(
     let mut store = app.store.lock().unwrap();
     let silent = upload.silent || !store.is_known(&user).map_err(store_error)?;
     store
-        .upsert(&user, &reviews, upload.clock)
+        .upsert(&user, &reviews, &upload.deleted, upload.clock)
         .map_err(store_error)?;
     let player = load_player(&store, &user).map_err(store_error)?;
     app.players.write().unwrap().insert(user.clone(), player);
