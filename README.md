@@ -24,6 +24,8 @@ cargo run -- ankiquest.json
 
 Only `sync_base` is required. Every folder in it with a `collection.anki2` becomes a player; collections are copied before reading and never written. Open `/#<user>` for a profile, `/` for the leaderboard.
 
+`POST /api/preview/<user>` with `{"reviews": [{"id", "cid", "last_ivl", "time_ms", "kind"}]}` returns the profile as it would look once those reviews are synced, without storing them. The AnkiDroid fork uses it to show XP after each answer.
+
 ## NixOS
 
 ```nix
