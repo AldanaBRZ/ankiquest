@@ -97,6 +97,7 @@ dialog.deck-sharing::backdrop { background: #0008; }
 .deck-sharing label { display: block; margin: 8px 0; overflow-wrap: anywhere; }
 .deck-sharing input[type=checkbox] { margin-right: 8px; accent-color: var(--accent); }
 .deck-sharing .recipients { margin: 12px 0 0 20px; }
+.deck-sharing .apply-subdecks { margin-top: 8px; }
 .deck-sharing .error { color: var(--fire); }
 </style>
 </head>
@@ -232,6 +233,7 @@ function openDeckSharing(user, display) {
       content.innerHTML = `<p>No decks have been uploaded yet. Open an updated AnkiQuest client and sync your reviews, then reopen this window.</p>`;
       return;
     }
+    const subdecks = deck => data.decks.map((other, i) => other.name.startsWith(deck.name + "::") ? i : -1).filter(i => i >= 0);
     content.innerHTML = `<form id="deck-settings">
       ${data.decks.map((deck, index) => `<fieldset data-deck="${index}">
         <legend>${esc(deck.name)}</legend>
@@ -240,6 +242,7 @@ function openDeckSharing(user, display) {
           <span class="sub">Notify these people:</span>
           ${data.recipients.map((person, i) => `<label><input type="checkbox" data-recipient="${i}" ${deck.recipients.includes(person.user) ? "checked" : ""}>${esc(person.display)}${person.display !== person.user ? ` <span class="sub">(${esc(person.user)})</span>` : ""}</label>`).join("") || `<p class="sub">No other players are available yet.</p>`}
         </div>
+        ${subdecks(deck).length ? `<button type="button" class="apply-subdecks">Apply to ${subdecks(deck).length === 1 ? "its subdeck" : `all ${subdecks(deck).length} subdecks`}</button>` : ""}
       </fieldset>`).join("")}
       <p class="sub">Only selected people receive your name and the deck name. Changes apply to future completions.</p>
       <button type="submit">Save preferences</button>
@@ -251,6 +254,18 @@ function openDeckSharing(user, display) {
         say("Unsaved changes.");
       });
       field.querySelectorAll("[data-recipient]").forEach(input => input.addEventListener("change", () => say("Unsaved changes.")));
+      field.querySelector(".apply-subdecks")?.addEventListener("click", () => {
+        const enabled = field.querySelector(".deck-enabled").checked;
+        const chosen = [...field.querySelectorAll("[data-recipient]")].map(input => input.checked);
+        const fields = form.querySelectorAll("fieldset");
+        for (const i of subdecks(data.decks[Number(field.dataset.deck)])) {
+          const target = fields[i];
+          target.querySelector(".deck-enabled").checked = enabled;
+          target.querySelector(".recipients").hidden = !enabled;
+          target.querySelectorAll("[data-recipient]").forEach((input, r) => { input.checked = chosen[r]; });
+        }
+        say("Copied to subdecks. Save to keep it.");
+      });
     });
     form.addEventListener("submit", async event => {
       event.preventDefault();
