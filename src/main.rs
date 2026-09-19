@@ -273,13 +273,15 @@ fn push(config: &Config, user: &str, title: &str, body: &str, tag: &str) {
         return;
     };
     let mut request = ureq::post(&format!("{}/{topic}", base.trim_end_matches('/')))
-        .timeout(Duration::from_secs(10))
-        .set("Title", title)
-        .set("Tags", tag);
+        .config()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .header("Title", title)
+        .header("Tags", tag);
     if let Some(url) = &config.public_url {
-        request = request.set("Click", &format!("{}/#{user}", url.trim_end_matches('/')));
+        request = request.header("Click", format!("{}/#{user}", url.trim_end_matches('/')));
     }
-    if let Err(e) = request.send_string(body) {
+    if let Err(e) = request.send(body) {
         eprintln!("ntfy push for {user} failed: {e}");
     }
 }
