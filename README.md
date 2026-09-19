@@ -1,6 +1,6 @@
 # ankiquest
 
-XP, levels, streaks, daily quests, achievements and a leaderboard for Anki. The server only ever sees review log rows (card id, timestamp, previous interval, time taken, review type), never card content.
+XP, levels, streaks, daily quests, achievements and a leaderboard for Anki. Clients send review log rows (card id, timestamp, previous interval, time taken, review type) and private deck metadata (IDs, names, daily remaining counts and review counts), never card content.
 
 XP never depends on which answer button was pressed, so there is no incentive to grade dishonestly.
 
@@ -47,6 +47,20 @@ Both clients upload new review rows after each answer and show XP feedback while
 stores the rows and returns the profile. `POST /api/preview/<user>` takes the same `reviews` without storing anything.
 
 Alternatively set `sync_base` to the `SYNC_BASE` of a self-hosted Anki sync server: every folder in it with a `collection.anki2` becomes a player, and collections are copied before reading and never written.
+
+## Deck completion notifications
+
+Notifications are off by default for every deck. With an updated client, open your profile on the dashboard, choose **Manage deck notifications**, and enter your existing AnkiQuest upload token. Enable the decks you want to share and select the people to notify for each deck, then save. Recipients must have a configured token for their private inbox or a configured ntfy topic and server. AnkiDroid also offers these controls under **Settings → ankiquest → Deck completion notifications**.
+
+After you review at least one card in a deck and finish its scheduled work for the day, selected people receive a message such as “cerro has finished their Spanish studies for today.” A parent deck includes its subdecks. Daily limits are respected, and learning cards due later that day still count as unfinished work. Each deck is announced at most once per Anki day, using your Anki day rollover, even across retries or a server restart. Turning sharing on after finishing a deck does not send a retrospective announcement.
+
+Recipients receive announcements through the updated AnkiDroid client's background notification checks (roughly every 15 minutes, subject to Android's background limits), and through their configured ntfy topic when available (the server checks every 20 seconds). Deck names and recipient preferences are private to the authenticated player; only selected recipients receive the completion message. The dashboard keeps the token only while the settings window is open.
+
+The server and the client used to study must both be updated. Review-log-only sync imports and older clients cannot detect deck completion. Opening the updated client uploads the deck list so it can appear in the settings.
+
+Clients may include a `decks` array in the review upload. Each entry has `id` (a string), `name`, `remaining`, `reviewed_today`, and `day` (the local Anki day number, days since the Unix epoch after applying timezone and rollover). Omit this field when a reliable snapshot is unavailable. Initial silent uploads populate the deck list without announcing completions.
+
+`GET /api/decks/<user>` with the user's bearer token returns private deck preferences and available recipients. `POST` to the same endpoint accepts `{"decks":[{"id":"123","enabled":true,"recipients":["hill"]}]}`. `GET /api/notifications/<user>` with the recipient's bearer token returns their recent completion announcements, with `id`, `title`, `body`, `day`, and `created_at` (Unix seconds). These endpoints never expose another player's deck settings or notification inbox without that player's token.
 
 ## NixOS
 

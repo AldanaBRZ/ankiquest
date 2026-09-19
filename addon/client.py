@@ -45,18 +45,21 @@ class Client:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.load(response)
 
-    def upload(self, reviews, rollover_hour, silent, deleted=()):
+    def upload(self, reviews, rollover_hour, silent, deleted=(), decks=None, clock_offset=None):
+        body = {
+            "reviews": reviews,
+            "clock": {
+                "offset_west_min": offset_west_min() if clock_offset is None else clock_offset,
+                "rollover_hour": rollover_hour,
+            },
+            "silent": silent,
+            "deleted": list(deleted),
+        }
+        if decks is not None:
+            body["decks"] = decks
         return self._request(
             "/api/reviews/" + self.user,
-            {
-                "reviews": reviews,
-                "clock": {
-                    "offset_west_min": offset_west_min(),
-                    "rollover_hour": rollover_hour,
-                },
-                "silent": silent,
-                "deleted": list(deleted),
-            },
+            body,
         )
 
 

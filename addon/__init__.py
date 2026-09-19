@@ -9,13 +9,16 @@ from .client import (
     UNDO_WINDOW_MS,
     Client,
     describe,
+    offset_west_min,
     reconcile,
     rows_to_reviews,
     snapshot,
 )
+from .deck_completion import deck_snapshots, study_day
 
 MARK_KEY = "ankiquestUploadedThrough"
 RECENT_KEY = "ankiquestRecentUploads"
+BASELINE_KEY = "ankiquestBaselineAccount"
 RESYNC_WINDOW_MS = 7 * 86_400_000
 
 state = {"previous": None, "busy": False, "again": False}
@@ -38,6 +41,8 @@ def refresh(show_feedback, resync=False):
     state["busy"] = True
     rollover = int(mw.col.get_config("rollover", 4))
     mark = int(mw.pm.profile.get(MARK_KEY, 0))
+    account = [api.base, api.user]
+    initial_sync = mark == 0 and mw.pm.profile.get(BASELINE_KEY) != account
     start = max(0, mark - RESYNC_WINDOW_MS) if resync else mark
     window_start = int(time.time() * 1000) - UNDO_WINDOW_MS
     recent = {i for i in mw.pm.profile.get(RECENT_KEY, []) if i > window_start}
@@ -53,8 +58,23 @@ def refresh(show_feedback, resync=False):
             if rows:
                 known = rows[-1][0]
             sent = rows + restored if first else rows
+            decks = None
+            clock_offset = offset_west_min()
+            if not full:
+                try:
+                    now_ms = int(time.time() * 1000)
+                    decks = deck_snapshots(mw.col, now_ms, clock_offset, rollover)
+                    # Do not send mixed-day counts if a rollover occurred while
+                    # reading them. The next refresh will collect the new day.
+                    if study_day(int(time.time() * 1000), clock_offset, rollover) != study_day(
+                        now_ms, clock_offset, rollover
+                    ):
+                        decks = None
+                except Exception as e:
+                    print("ankiquest deck progress:", e)
             profile = api.upload(
-                rows_to_reviews(sent), rollover, mark == 0 or full, deleted if first else ()
+                rows_to_reviews(sent), rollover, initial_sync or full, deleted if first else (),
+                decks=decks, clock_offset=clock_offset,
             )
             first = False
             if not full:
@@ -64,6 +84,7 @@ def refresh(show_feedback, resync=False):
         state["busy"] = False
         try:
             mw.pm.profile[MARK_KEY], mw.pm.profile[RECENT_KEY], profile = future.result()
+            mw.pm.profile[BASELINE_KEY] = account
         except Exception as e:
             print("ankiquest:", e)
             return
@@ -77,7 +98,7 @@ def refresh(show_feedback, resync=False):
             state["again"] = False
             refresh(True)
 
-    mw.taskman.run_in_background(work, done)
+    mw.taskman.run_in_background(work, done, uses_collection=True)
 
 
 def on_operation(changes, handler):
