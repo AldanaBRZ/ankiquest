@@ -7,7 +7,7 @@ def study_day(now_ms, offset_west_min, rollover_hour):
     return (now_ms - offset_west_min * 60_000 - rollover_hour * 3_600_000) // DAY_MS
 
 
-def deck_snapshots(col, now_ms, offset_west_min, rollover_hour):
+def deck_snapshots(col, now_ms, offset_west_min, rollover_hour, only=None):
     """Call on Anki's serialized collection worker, together with review reads.
 
     The scheduler supplies daily-limit-aware counts, including subdecks. Its
@@ -63,6 +63,8 @@ def deck_snapshots(col, now_ms, offset_west_min, rollover_hour):
 
     snapshots = []
     for deck in names:
+        if only is not None and str(deck.id) not in only:
+            continue
         reviews, intraday, filtered_due = totals[deck.id]
         node = nodes.get(deck.id)
         # Anki omits an empty Default deck from the tree. Keep its catalog entry

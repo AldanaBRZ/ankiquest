@@ -1,7 +1,8 @@
 import time
 
 from aqt import gui_hooks, mw
-from aqt.utils import tooltip
+from aqt.qt import QAction
+from aqt.utils import openLink, tooltip
 
 from .client import (
     MAX_PENDING,
@@ -19,6 +20,7 @@ from .deck_completion import deck_snapshots, study_day
 MARK_KEY = "ankiquestUploadedThrough"
 RECENT_KEY = "ankiquestRecentUploads"
 BASELINE_KEY = "ankiquestBaselineAccount"
+SHARED_KEY = "ankiquestSharedDecks"
 RESYNC_WINDOW_MS = 7 * 86_400_000
 
 state = {"previous": None, "busy": False, "again": False}
@@ -46,6 +48,7 @@ def refresh(show_feedback, resync=False):
     start = max(0, mark - RESYNC_WINDOW_MS) if resync else mark
     window_start = int(time.time() * 1000) - UNDO_WINDOW_MS
     recent = {i for i in mw.pm.profile.get(RECENT_KEY, []) if i > window_start}
+    shared = set(mw.pm.profile.get(SHARED_KEY, []))
 
     def work():
         window = mw.col.db.all(PENDING_SQL, window_start)
@@ -60,10 +63,10 @@ def refresh(show_feedback, resync=False):
             sent = rows + restored if first else rows
             decks = None
             clock_offset = offset_west_min()
-            if not full:
+            if not full and shared:
                 try:
                     now_ms = int(time.time() * 1000)
-                    decks = deck_snapshots(mw.col, now_ms, clock_offset, rollover)
+                    decks = deck_snapshots(mw.col, now_ms, clock_offset, rollover, only=shared)
                     # Do not send mixed-day counts if a rollover occurred while
                     # reading them. The next refresh will collect the new day.
                     if study_day(int(time.time() * 1000), clock_offset, rollover) != study_day(
@@ -101,6 +104,44 @@ def refresh(show_feedback, resync=False):
     mw.taskman.run_in_background(work, done, uses_collection=True)
 
 
+def refresh_shared_decks():
+    api = client()
+    if not api.configured:
+        return
+
+    def done(future):
+        try:
+            mw.pm.profile[SHARED_KEY] = future.result()
+        except Exception as e:
+            print("ankiquest shared decks:", e)
+
+    mw.taskman.run_in_background(api.shared_decks, done)
+
+
+def open_deck_notifications():
+    api = client()
+    if mw.col is None or not api.configured:
+        tooltip("Set url, user and token in the ankiquest add-on config first.")
+        return
+    rollover = int(mw.col.get_config("rollover", 4))
+
+    def work():
+        clock_offset = offset_west_min()
+        catalog = deck_snapshots(mw.col, int(time.time() * 1000), clock_offset, rollover)
+        api.upload([], rollover, False, decks=catalog, clock_offset=clock_offset, catalog=True)
+        return api.shared_decks()
+
+    def done(future):
+        try:
+            mw.pm.profile[SHARED_KEY] = future.result()
+        except Exception as e:
+            tooltip("ankiquest: could not send your deck list (%s)" % e)
+            return
+        openLink("%s/#%s" % (api.base, api.user))
+
+    mw.taskman.run_in_background(work, done, uses_collection=True)
+
+
 def on_operation(changes, handler):
     if handler is mw.reviewer:
         return
@@ -110,10 +151,21 @@ def on_operation(changes, handler):
 
 def on_profile_open():
     state["previous"] = None
+    refresh_shared_decks()
     refresh(False, resync=True)
+
+
+def on_sync():
+    refresh_shared_decks()
+    refresh(False, resync=True)
+
+
+deck_action = QAction("ankiquest deck notifications…", mw)
+deck_action.triggered.connect(open_deck_notifications)
+mw.form.menuTools.addAction(deck_action)
 
 
 gui_hooks.reviewer_did_answer_card.append(lambda *_: refresh(True))
 gui_hooks.operation_did_execute.append(on_operation)
-gui_hooks.sync_did_finish.append(lambda: refresh(False, resync=True))
+gui_hooks.sync_did_finish.append(on_sync)
 gui_hooks.profile_did_open.append(on_profile_open)

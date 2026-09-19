@@ -74,6 +74,10 @@ class DeckSnapshotTests(unittest.TestCase):
     def snapshots(self):
         return {d["id"]: d for d in progress.deck_snapshots(self.col, self.now, -120, 4)}
 
+    def test_only_limits_reported_decks_but_keeps_subdeck_totals(self):
+        decks = progress.deck_snapshots(self.col, self.now, -120, 4, only={"1"})
+        self.assertEqual([d["id"] for d in decks], ["1"])
+
     def test_complete_decks_are_independent_and_parents_include_descendants(self):
         self.card(10, 2)
         self.review(10)
@@ -181,8 +185,9 @@ class RefreshTests(unittest.TestCase):
         self.pending = [[(101, 1, 1, 1000, 1)]]
         self.mw = SimpleNamespace(
             col=SimpleNamespace(get_config=lambda *args: 4, db=SimpleNamespace(all=self.read_rows)),
-            pm=SimpleNamespace(profile={"ankiquestUploadedThrough": 100}),
+            pm=SimpleNamespace(profile={"ankiquestUploadedThrough": 100, "ankiquestSharedDecks": ["1"]}),
             taskman=SimpleNamespace(run_in_background=self.run_task),
+            form=SimpleNamespace(menuTools=SimpleNamespace(addAction=Mock())),
         )
         aqt = ModuleType("aqt")
         aqt.mw = self.mw
@@ -191,7 +196,10 @@ class RefreshTests(unittest.TestCase):
         )})
         utils = ModuleType("aqt.utils")
         utils.tooltip = Mock()
-        with patch.dict(sys.modules, {"aqt": aqt, "aqt.utils": utils}):
+        utils.openLink = Mock()
+        qt = ModuleType("aqt.qt")
+        qt.QAction = Mock()
+        with patch.dict(sys.modules, {"aqt": aqt, "aqt.utils": utils, "aqt.qt": qt}):
             self.addon = load_module("ankiquest_test_addon", ADDON / "__init__.py", package=True)
         self.addon.client = lambda: self.api
         self.addon.snapshot = lambda _: {}
@@ -213,6 +221,24 @@ class RefreshTests(unittest.TestCase):
         except Exception as error:
             future.set_exception(error)
         done(future)
+
+    def test_no_shared_decks_skips_deck_progress(self):
+        self.mw.pm.profile["ankiquestSharedDecks"] = []
+        self.addon.refresh(False)
+        self.addon.deck_snapshots.assert_not_called()
+        self.assertIsNone(self.api.upload.call_args.kwargs["decks"])
+
+    def test_only_shared_decks_are_reported(self):
+        self.addon.refresh(False)
+        self.assertEqual(self.addon.deck_snapshots.call_args.kwargs, {"only": {"1"}})
+
+    def test_deck_notifications_menu_sends_full_catalog_and_opens_dashboard(self):
+        self.api.shared_decks = Mock(return_value=["1", "3"])
+        self.addon.open_deck_notifications()
+        self.assertEqual(self.addon.deck_snapshots.call_args.kwargs, {})
+        self.assertTrue(self.api.upload.call_args.kwargs["catalog"])
+        self.assertEqual(self.mw.pm.profile["ankiquestSharedDecks"], ["1", "3"])
+        self.addon.openLink.assert_called_once_with("https://example.test/#cerro")
 
     def test_snapshot_uses_same_clock_as_upload(self):
         self.addon.refresh(False)

@@ -250,6 +250,28 @@ impl Store {
         Ok(())
     }
 
+    /// A full deck list from the client replaces the stored one, so deleted decks disappear.
+    pub fn prune_decks(&mut self, user: &str, catalog: &[Snapshot]) -> Result<(), Error> {
+        let keep: HashSet<&str> = catalog.iter().map(|deck| deck.id.as_str()).collect();
+        let tx = self.conn.transaction()?;
+        let stored: Vec<String> = tx
+            .prepare("select id from decks where owner = ?1")?
+            .query_map([user], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for id in stored.iter().filter(|id| !keep.contains(id.as_str())) {
+            tx.execute(
+                "delete from decks where owner = ?1 and id = ?2",
+                params![user, id],
+            )?;
+            tx.execute(
+                "delete from deck_recipients where owner = ?1 and deck_id = ?2",
+                params![user, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn notifications(&self, user: &str, now_ms: i64) -> Result<Vec<Notification>, Error> {
         let mut stmt = self.conn.prepare(
             "select id, title, body, day, created_at / 1000 from (
@@ -353,6 +375,30 @@ pub(crate) mod tests {
                 }],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn full_catalog_removes_deleted_decks_and_their_recipients() {
+        let (mut store, path) = temporary_store();
+        save(&mut store, snapshot("1", 2, 0, DAY), false, NOW);
+        save(&mut store, snapshot("2", 2, 0, DAY), false, NOW);
+        enable(&mut store, "2", &["hill"]);
+        store
+            .prune_decks("cerro", &[snapshot("1", 2, 0, DAY)])
+            .unwrap();
+        let decks = store.decks("cerro").unwrap();
+        assert_eq!(decks.len(), 1);
+        assert_eq!(decks[0].id, "1");
+        save(&mut store, snapshot("2", 2, 0, DAY), false, NOW);
+        assert!(
+            store
+                .decks("cerro")
+                .unwrap()
+                .iter()
+                .all(|d| !d.enabled && d.recipients.is_empty())
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

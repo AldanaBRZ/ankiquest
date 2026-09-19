@@ -184,6 +184,8 @@ struct Upload {
     #[serde(default)]
     silent: bool,
     decks: Option<Vec<decks::Snapshot>>,
+    #[serde(default)]
+    catalog: bool,
 }
 
 fn authorized(app: &App, user: &str, headers: &HeaderMap) -> bool {
@@ -252,6 +254,9 @@ async fn upload(
                 now_ms(),
             )
             .map_err(store_error)?;
+        if upload.catalog {
+            store.prune_decks(&user, decks).map_err(store_error)?;
+        }
     }
     let player = load_player(&store, &user).map_err(store_error)?;
     app.players.write().unwrap().insert(user.clone(), player);
@@ -618,6 +623,7 @@ mod tests {
             deleted: vec![],
             clock: Clock::default(),
             silent,
+            catalog: false,
             decks: Some(vec![decks::Snapshot {
                 id: "1".into(),
                 name: "Spanish".into(),
