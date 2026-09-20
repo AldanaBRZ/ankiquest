@@ -18,6 +18,8 @@ use store::{Error, Store};
 const POLL: Duration = Duration::from_secs(20);
 const MAX_PENDING: usize = 5000;
 const MAX_SEPARATE_PUSHES: usize = 3;
+/// How many people a record names: the holder and whoever came closest.
+const PODIUM: usize = 3;
 
 #[derive(Deserialize, Clone, Default)]
 struct UserConfig {
@@ -391,7 +393,6 @@ async fn notifications(
 
 #[derive(Debug, Serialize)]
 struct RecordHolder {
-    window: String,
     user: String,
     display: String,
     xp: u64,
@@ -399,26 +400,38 @@ struct RecordHolder {
     at: i64,
 }
 
-/// The best hour, day, week, month and year anyone here has ever had.
-async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordHolder>> {
+#[derive(Debug, Serialize)]
+struct RecordBoard {
+    window: String,
+    holders: Vec<RecordHolder>,
+}
+
+/// The best hour, day, week, month and year anyone here has ever had, with
+/// whoever came closest, so a near miss is visible rather than hidden.
+async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordBoard>> {
     let profiles = app.profiles();
     Json(
         Records::NAMES
             .iter()
-            .filter_map(|window| {
-                profiles
+            .map(|window| {
+                let mut holders: Vec<RecordHolder> = profiles
                     .iter()
                     .map(|player| (player, player.records.get(window)))
                     .filter(|(_, record)| record.xp > 0)
-                    .max_by_key(|(_, record)| (record.xp, record.reviews))
                     .map(|(player, record)| RecordHolder {
-                        window: (*window).to_string(),
                         user: player.user.clone(),
                         display: player.display.clone(),
                         xp: record.xp,
                         reviews: record.reviews,
                         at: record.at,
                     })
+                    .collect();
+                holders.sort_by_key(|holder| std::cmp::Reverse((holder.xp, holder.reviews)));
+                holders.truncate(PODIUM);
+                RecordBoard {
+                    window: (*window).to_string(),
+                    holders,
+                }
             })
             .collect(),
     )
@@ -1110,12 +1123,25 @@ mod tests {
             board.iter().map(|r| r.window.as_str()).collect::<Vec<_>>(),
             Records::NAMES
         );
-        for holder in &board {
-            assert_eq!(holder.user, "cerro", "{} should be cerro's", holder.window);
-            assert_eq!(holder.display, "Cerro");
-            assert!(holder.xp > 0 && holder.reviews > 0);
+        for window in &board {
+            assert_eq!(
+                window
+                    .holders
+                    .iter()
+                    .map(|h| h.user.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["cerro", "hill"],
+                "{} lists the holder and whoever came closest",
+                window.window
+            );
+            assert_eq!(window.holders[0].display, "Cerro");
+            assert!(window.holders[0].xp > window.holders[1].xp);
+            assert!(window.holders[1].reviews > 0);
         }
-        assert_eq!(board[0].reviews, 30, "all thirty land inside one hour");
+        assert_eq!(
+            board[0].holders[0].reviews, 30,
+            "all thirty land inside one hour"
+        );
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }

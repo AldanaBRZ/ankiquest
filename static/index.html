@@ -96,6 +96,7 @@ dialog.deck-sharing::backdrop { background: #0008; }
 .deck-sharing .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
 .deck-sharing input[type=password] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
 .deck-sharing fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 14px 0; padding: 12px; min-width: 0; }
+.behind { color: var(--dim); }
 .deck-sharing .fold { background: none; border: 0; color: inherit; cursor: pointer; font: inherit; padding: 0 4px; }
 .deck-sharing legend { font-weight: 600; overflow-wrap: anywhere; }
 .deck-sharing label { display: block; margin: 8px 0; overflow-wrap: anywhere; }
@@ -138,19 +139,22 @@ function tabs(active) {
 }
 
 function records(rows) {
-  if (!rows.length) return `<p class="empty">Nobody has earned any XP yet.</p>`;
-  const held = Object.fromEntries(rows.map(row => [row.window, row]));
+  const held = Object.fromEntries(rows.map(row => [row.window, row.holders ?? []]));
+  if (!Object.values(held).some(holders => holders.length)) return `<p class="empty">Nobody has earned any XP yet.</p>`;
   return `<ol class="board">${Object.entries(WINDOWS).map(([window, label]) => {
-    const row = held[window];
-    if (!row) return "";
-    const when = new Date(row.at).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+    const [best, ...rest] = held[window] ?? [];
+    if (!best) return "";
+    const when = new Date(best.at).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+    const chasing = rest.map((row, index) =>
+      `${index + 2}. <a href="#${encodeURIComponent(row.user)}">${esc(row.display)}</a> ${num(row.xp)} <span class="behind">−${num(best.xp - row.xp)}</span>`
+    ).join("  ·  ");
     return `<li>
       <span class="rank">🏆</span>
       <div>
-        <div class="line"><a class="name" href="#${encodeURIComponent(row.user)}">${esc(row.display)}</a><span class="lvl">${label}</span></div>
-        <div class="sub">${when}</div>
+        <div class="line"><a class="name" href="#${encodeURIComponent(best.user)}">${esc(best.display)}</a><span class="lvl">${label}</span></div>
+        <div class="sub">${when}${chasing ? `  ·  ${chasing}` : ""}</div>
       </div>
-      <div class="xp"><b>${num(row.xp)}</b><span>${num(row.reviews)} reviews</span></div>
+      <div class="xp"><b>${num(best.xp)}</b><span>${num(best.reviews)} reviews</span></div>
     </li>`;
   }).join("")}</ol>`;
 }
