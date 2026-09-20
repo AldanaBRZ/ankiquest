@@ -2,12 +2,12 @@ mod decks;
 mod game;
 mod store;
 
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use game::{Clock, Profile, Review, Week};
+use game::{Clock, Periods, Profile, Review, Week};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -128,11 +128,26 @@ struct Standing {
     level: u64,
     xp_total: u64,
     week_xp: u64,
+    xp: u64,
+    period: String,
+    periods: Periods,
     streak: u64,
     today_reviews: u64,
 }
 
-async fn leaderboard(State(app): State<Arc<App>>) -> Json<Vec<Standing>> {
+#[derive(Deserialize)]
+struct BoardQuery {
+    period: Option<String>,
+}
+
+async fn leaderboard(
+    State(app): State<Arc<App>>,
+    Query(query): Query<BoardQuery>,
+) -> Json<Vec<Standing>> {
+    let period = query
+        .period
+        .filter(|name| Periods::NAMES.contains(&name.as_str()))
+        .unwrap_or_else(|| "week".into());
     let mut standings: Vec<Standing> = app
         .profiles()
         .into_iter()
@@ -142,11 +157,14 @@ async fn leaderboard(State(app): State<Arc<App>>) -> Json<Vec<Standing>> {
             level: p.level,
             xp_total: p.xp_total,
             week_xp: p.week_xp,
+            xp: p.periods.get(&period),
+            period: period.clone(),
+            periods: p.periods,
             streak: p.streak,
             today_reviews: p.today.reviews,
         })
         .collect();
-    standings.sort_by_key(|s| std::cmp::Reverse((s.week_xp, s.xp_total)));
+    standings.sort_by_key(|s| std::cmp::Reverse((s.xp, s.xp_total)));
     Json(standings)
 }
 
@@ -383,6 +401,15 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
 
+/// The dashboard is one page; `/day`, `/month` and the rest pick a leaderboard period.
+async fn period_page(UrlPath(period): UrlPath<String>) -> Result<Html<&'static str>, StatusCode> {
+    if Periods::NAMES.contains(&period.as_str()) {
+        Ok(index().await)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
 async fn manifest() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/manifest+json")],
@@ -566,6 +593,7 @@ async fn main() -> Result<(), Error> {
 
     let router = Router::new()
         .route("/", get(index))
+        .route("/{period}", get(period_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/api/leaderboard", get(leaderboard))

@@ -25,7 +25,7 @@ cargo run -- ankiquest.json
 }
 ```
 
-Open `/#<user>` for a profile, `/` for the leaderboard. The leaderboard week runs Monday to Sunday in `week_timezone` and turns over at `week_rollover_hour` for everyone at once; each Anki day counts towards the week it started in. Streaks, quests and "today" still follow each player's own Anki day.
+Open `/#<user>` for a profile, `/` for the leaderboard. `/hour`, `/day`, `/week`, `/month`, `/year` and `/all` show the same board for another period, as does `GET /api/leaderboard?period=<name>`; each standing carries `xp` for the requested period and `periods` with all of them. The hour is the last 60 minutes and counts review XP only, the day is each player's own Anki day, and month and year follow the calendar in `week_timezone`. The leaderboard week runs Monday to Sunday in `week_timezone` and turns over at `week_rollover_hour` for everyone at once; each Anki day counts towards the week it started in. Streaks, quests and "today" still follow each player's own Anki day.
 
 ## Getting reviews in
 
