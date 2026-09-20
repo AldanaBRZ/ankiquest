@@ -13,6 +13,17 @@ const RECENT_DAYS: usize = 14;
 /// Each further answer of the same card on the same day is worth this much of the
 /// last one, so repeating a card you keep failing cannot out-earn learning it once.
 const REPEAT_DECAY: f64 = 0.5;
+/// How close something has to be before a nudge mentions it, in XP.
+const WITHIN_REACH: u64 = 150;
+const NUDGE_FROM_HOUR: i64 = 9;
+const NUDGE_UNTIL_HOUR: i64 = 22;
+const CHEERS: [&str; 5] = [
+    "Keep going",
+    "You're doing great",
+    "Almost there",
+    "Nearly there",
+    "One more push",
+];
 const HEATMAP_DAYS: i64 = 182;
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
@@ -469,6 +480,152 @@ pub struct HeatCell {
     pub frozen: bool,
 }
 
+/// One encouraging message, with the key that keeps it to once a day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Nudge {
+    pub key: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// What is within reach right now: a place on the board, a personal best, a level.
+/// Silent outside waking hours and on days without a single review, so nothing
+/// here ever tells someone to start studying.
+pub fn nudges(profile: &Profile, ahead: Option<(&str, u64)>) -> Vec<Nudge> {
+    if profile.today.reviews == 0
+        || profile.local_hour < NUDGE_FROM_HOUR
+        || profile.local_hour >= NUDGE_UNTIL_HOUR
+    {
+        return Vec::new();
+    }
+    let cheer = |offset: usize| {
+        CHEERS[(seed_of(&profile.user) as usize + profile.day as usize + offset) % CHEERS.len()]
+    };
+    let per_review = (profile.today.xp as f64 / profile.today.reviews as f64).max(1.0);
+    let reviews_for = |xp: u64| (xp as f64 / per_review).ceil() as u64;
+    let mut nudges = Vec::new();
+
+    if let Some((who, their_xp)) = ahead {
+        let gap = their_xp.saturating_sub(profile.week_xp);
+        if (1..=WITHIN_REACH).contains(&gap) {
+            nudges.push(Nudge {
+                key: format!("nudge:place:{}", profile.day),
+                title: cheer(0).into(),
+                body: format!(
+                    "{gap} XP behind {who} this week, about {} more {}.",
+                    reviews_for(gap),
+                    plural(reviews_for(gap), "review", "reviews")
+                ),
+            });
+        }
+    }
+
+    let best = profile.records.day.xp;
+    let short_of_best = best.saturating_sub(profile.today.xp);
+    if (1..=WITHIN_REACH).contains(&short_of_best) {
+        nudges.push(Nudge {
+            key: format!("nudge:record:{}", profile.day),
+            title: cheer(1).into(),
+            body: format!(
+                "{short_of_best} XP from your best day ever ({best} XP), about {} more {}.",
+                reviews_for(short_of_best),
+                plural(reviews_for(short_of_best), "review", "reviews")
+            ),
+        });
+    }
+
+    let to_level = profile.xp_for_next.saturating_sub(profile.xp_into_level);
+    if (1..=WITHIN_REACH).contains(&to_level) {
+        nudges.push(Nudge {
+            key: format!("nudge:level:{}", profile.day),
+            title: cheer(2).into(),
+            body: format!("Level {} is {to_level} XP away.", profile.level + 1),
+        });
+    }
+    nudges
+}
+
+fn plural(count: u64, one: &'static str, many: &'static str) -> &'static str {
+    if count == 1 { one } else { many }
+}
+
+/// The best a player has ever managed within one window, and when it started.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Record {
+    pub xp: u64,
+    pub reviews: u64,
+    pub at: i64,
+}
+
+/// Personal bests over the windows the leaderboard uses, the hour rolling.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Records {
+    pub hour: Record,
+    pub day: Record,
+    pub week: Record,
+    pub month: Record,
+    pub year: Record,
+}
+
+impl Records {
+    pub const NAMES: [&'static str; 5] = ["hour", "day", "week", "month", "year"];
+
+    pub fn get(&self, window: &str) -> Record {
+        match window {
+            "hour" => self.hour,
+            "week" => self.week,
+            "month" => self.month,
+            "year" => self.year,
+            _ => self.day,
+        }
+    }
+}
+
+/// The best rolling hour in a player's whole history, by the XP its reviews earned.
+fn best_hour(earned: &[(i64, f64)]) -> Record {
+    let mut best = Record::default();
+    let mut xp = 0.0;
+    let mut start = 0;
+    for (end, (at, gained)) in earned.iter().enumerate() {
+        xp += gained;
+        while earned[start].0 <= at - 3_600_000 {
+            xp -= earned[start].1;
+            start += 1;
+        }
+        let rounded = xp.round() as u64;
+        if rounded > best.xp {
+            best = Record {
+                xp: rounded,
+                reviews: (end - start + 1) as u64,
+                at: earned[start].0,
+            };
+        }
+    }
+    best
+}
+
+/// The best sum over whole days that share a key, such as a week or a month.
+fn best_span(
+    day_xp: &BTreeMap<i64, u64>,
+    days: &BTreeMap<i64, DayStats>,
+    clock: &Clock,
+    key: &dyn Fn(i64) -> i64,
+) -> Record {
+    let mut spans: BTreeMap<i64, Record> = BTreeMap::new();
+    for (day, xp) in day_xp {
+        let span = spans
+            .entry(key(clock.day_start_ms(*day)))
+            .or_insert(Record {
+                xp: 0,
+                reviews: 0,
+                at: clock.day_start_ms(*day),
+            });
+        span.xp += xp;
+        span.reviews += days.get(day).map_or(0, |d| d.reviews);
+    }
+    spans.into_values().max_by_key(|r| r.xp).unwrap_or_default()
+}
+
 /// XP earned in each leaderboard period. The hour counts review XP only, without
 /// the quest, achievement and streak bonuses that land on a whole Anki day.
 #[derive(Serialize, Clone, Debug, Default)]
@@ -534,6 +691,7 @@ pub struct Profile {
     pub xp_for_next: u64,
     pub week_xp: u64,
     pub periods: Periods,
+    pub records: Records,
     pub streak: u64,
     pub freezes: u32,
     pub at_risk: bool,
@@ -945,6 +1103,28 @@ pub fn compute(
         all: xp_total,
     };
 
+    let records = Records {
+        hour: best_hour(&earned),
+        day: day_xp
+            .iter()
+            .map(|(day, xp)| Record {
+                xp: *xp,
+                reviews: days.get(day).map_or(0, |d| d.reviews),
+                at: clock.day_start_ms(*day),
+            })
+            .max_by_key(|r| r.xp)
+            .unwrap_or_default(),
+        week: best_span(&day_xp, &days, clock, &|start| {
+            let (year, number) = week.of(start);
+            year as i64 * 100 + number as i64
+        }),
+        month: best_span(&day_xp, &days, clock, &|start| {
+            let (year, month) = week.month_of(start);
+            year as i64 * 100 + month as i64
+        }),
+        year: best_span(&day_xp, &days, clock, &|start| week.year_of(start) as i64),
+    };
+
     let now = days.get(&today).unwrap_or(&empty);
     Profile {
         user: user.into(),
@@ -955,6 +1135,7 @@ pub fn compute(
         xp_for_next,
         week_xp,
         periods,
+        records,
         streak,
         freezes,
         at_risk: streak > 0 && !days.contains_key(&today),
@@ -1319,6 +1500,125 @@ mod tests {
             relearning < earned[0].1 / 2.0,
             "picking a card back up is worth less than knowing it: {relearning} vs {}",
             earned[0].1
+        );
+    }
+
+    #[test]
+    fn records_keep_the_best_hour_day_week_month_and_year() {
+        let mut reviews = reviews_on(1, 5, 100);
+        reviews.extend(reviews_on(40, 30, 200));
+        reviews.extend(reviews_on(41, 5, 300));
+        reviews.extend(reviews_on(400, 5, 400));
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(400));
+
+        assert_eq!(p.records.day.reviews, 30, "the busiest day is the record");
+        assert_eq!(p.records.day.at, 40 * DAY_MS + 4 * 3_600_000);
+        assert!(p.records.day.xp >= p.periods.day);
+        assert_eq!(p.records.week.reviews, 35, "day 40 and 41 share a week");
+        assert!(p.records.week.xp > p.records.day.xp);
+        assert_eq!(p.records.month.reviews, 35);
+        assert_eq!(p.records.year.reviews, 40, "days 1, 40 and 41 share a year");
+        assert_eq!(p.records.hour.reviews, 30, "one sitting, one hour");
+        assert!(p.records.hour.xp > 0 && p.records.hour.xp <= p.records.day.xp);
+    }
+
+    #[test]
+    fn the_best_hour_is_any_sixty_minutes_not_a_clock_hour() {
+        let spread = |minutes: &[i64]| -> Vec<Review> {
+            minutes
+                .iter()
+                .enumerate()
+                .map(|(index, minute)| Review {
+                    id: DAY_MS + NOON + minute * 60_000,
+                    cid: 500 + index as i64,
+                    last_ivl: 0,
+                    time_ms: 5_000,
+                    kind: 1,
+                })
+                .collect()
+        };
+        let reviews = spread(&[0, 50, 55, 58, 59, 200]);
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(2));
+        assert_eq!(
+            p.records.hour.reviews, 5,
+            "a window that straddles the clock hour still counts"
+        );
+        assert_eq!(p.records.hour.at, DAY_MS + NOON);
+
+        let alone = compute("a", "a", &spread(&[0]), &utc(), &Week::default(), at(2));
+        assert_eq!(alone.records.hour.reviews, 1);
+        let none = compute("a", "a", &[], &utc(), &Week::default(), at(2));
+        assert_eq!(none.records, Records::default());
+    }
+
+    #[test]
+    fn a_nudge_only_speaks_when_something_is_within_reach() {
+        let reviews = reviews_on(1, 12, 900);
+        let mut profile = compute("a", "Ana", &reviews, &utc(), &Week::default(), at(1));
+        profile.local_hour = 12;
+        let bodies = |profile: &Profile, ahead: Option<(&str, u64)>| {
+            nudges(profile, ahead)
+                .into_iter()
+                .map(|n| n.body)
+                .collect::<Vec<_>>()
+        };
+
+        let just_ahead = profile.week_xp + 60;
+        let said = bodies(&profile, Some(("Cerro", just_ahead)));
+        assert!(
+            said.iter().any(|body| body.contains("60 XP behind Cerro")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|body| body.contains("more reviews")),
+            "the gap is also told in reviews: {said:?}"
+        );
+        assert!(bodies(&profile, Some(("Cerro", profile.week_xp + 5_000))).is_empty());
+        assert!(
+            bodies(&profile, Some(("Cerro", 0))).is_empty(),
+            "nobody chases from the front"
+        );
+
+        profile.xp_into_level = profile.xp_for_next - 40;
+        let climbing = bodies(&profile, None);
+        assert_eq!(climbing.len(), 1);
+        assert!(climbing[0].contains("40 XP away"), "{climbing:?}");
+
+        profile.records.day.xp = profile.today.xp + 30;
+        let all_three = nudges(&profile, Some(("Cerro", just_ahead)));
+        assert_eq!(all_three.len(), 3, "each rule may speak once a day");
+        let keys: Vec<&str> = all_three.iter().map(|n| n.key.as_str()).collect();
+        assert!(
+            keys.iter()
+                .all(|key| key.ends_with(&profile.day.to_string()))
+        );
+        assert_eq!(
+            all_three
+                .iter()
+                .map(|n| n.key.clone())
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_nudge_stays_quiet_at_night_and_on_a_day_without_studying() {
+        let reviews = reviews_on(1, 12, 900);
+        let mut profile = compute("a", "Ana", &reviews, &utc(), &Week::default(), at(1));
+        profile.xp_into_level = profile.xp_for_next - 40;
+        profile.local_hour = 12;
+        assert_eq!(nudges(&profile, None).len(), 1);
+
+        for hour in [0, 3, 8, 22, 23] {
+            profile.local_hour = hour;
+            assert!(nudges(&profile, None).is_empty(), "nothing at {hour}:00");
+        }
+        profile.local_hour = 12;
+        profile.today.reviews = 0;
+        assert!(
+            nudges(&profile, None).is_empty(),
+            "a nudge cheers studying on, it does not ask for it"
         );
     }
 

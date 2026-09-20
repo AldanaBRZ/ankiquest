@@ -31,6 +31,9 @@ pub struct Preference {
 #[serde(deny_unknown_fields)]
 pub struct SettingsUpdate {
     pub decks: Vec<Preference>,
+    /// Left out by clients that predate nudges, which then keep their setting.
+    #[serde(default)]
+    pub nudges: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +54,7 @@ pub struct Recipient {
 pub struct Settings {
     pub decks: Vec<Deck>,
     pub recipients: Vec<Recipient>,
+    pub nudges: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,7 +159,11 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
              created_at integer not null,
              pushed integer not null default 0
          );
-         create index if not exists notifications_recipient on notifications (recipient, id);",
+         create index if not exists notifications_recipient on notifications (recipient, id);
+         create table if not exists player_settings (
+             user text primary key,
+             nudges integer not null default 0
+         ) without rowid;",
     )?;
     // Databases from before replies exist in the wild; adding the columns is the migration.
     for (column, definition) in [
@@ -329,6 +337,27 @@ impl Store {
                 })
             })?
             .collect::<Result<_, _>>()?)
+    }
+
+    pub fn nudges_enabled(&self, user: &str) -> Result<bool, Error> {
+        Ok(self
+            .conn
+            .query_row(
+                "select nudges from player_settings where user = ?1",
+                [user],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn set_nudges(&mut self, user: &str, enabled: bool) -> Result<(), Error> {
+        self.conn.execute(
+            "insert into player_settings (user, nudges) values (?1, ?2)
+             on conflict (user) do update set nudges = excluded.nudges",
+            params![user, enabled],
+        )?;
+        Ok(())
     }
 
     /// Puts one message straight into a player's inbox, for the `message` command.

@@ -116,14 +116,49 @@ const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 let weekEnds = 0;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
-function currentPeriod() {
+const WINDOWS = { hour: "Best hour", day: "Best day", week: "Best week", month: "Best month", year: "Best year" };
+
+function currentView() {
   const name = location.pathname.replace(/\/+$/, "").split("/").pop();
+  if (name === "records") return "records";
   return name in PERIODS ? name : "week";
 }
 
+function currentPeriod() {
+  const view = currentView();
+  return view === "records" ? "week" : view;
+}
+
 function tabs(active) {
-  return `<nav class="tabs">${Object.entries(PERIODS).map(([name, label]) =>
-    `<a class="${name === active ? "on" : ""}" href="/${name}${location.hash}">${label}</a>`).join("")}</nav>`;
+  const links = Object.entries(PERIODS).map(([name, label]) =>
+    `<a class="${name === active ? "on" : ""}" href="/${name}${location.hash}">${label}</a>`);
+  links.push(`<a class="${active === "records" ? "on" : ""}" href="/records${location.hash}">Records</a>`);
+  return `<nav class="tabs">${links.join("")}</nav>`;
+}
+
+function records(rows) {
+  if (!rows.length) return `<p class="empty">Nobody has earned any XP yet.</p>`;
+  const held = Object.fromEntries(rows.map(row => [row.window, row]));
+  return `<ol class="board">${Object.entries(WINDOWS).map(([window, label]) => {
+    const row = held[window];
+    if (!row) return "";
+    const when = new Date(row.at).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+    return `<li>
+      <span class="rank">🏆</span>
+      <div>
+        <div class="line"><a class="name" href="#${encodeURIComponent(row.user)}">${esc(row.display)}</a><span class="lvl">${label}</span></div>
+        <div class="sub">${when}</div>
+      </div>
+      <div class="xp"><b>${num(row.xp)}</b><span>${num(row.reviews)} reviews</span></div>
+    </li>`;
+  }).join("")}</ol>`;
+}
+
+function bests(player) {
+  return `<div class="stats">${Object.entries(WINDOWS).map(([window, label]) => {
+    const record = player.records?.[window] ?? { xp: 0, reviews: 0 };
+    return `<div class="stat"><b>${num(record.xp)}</b><span>${label.toLowerCase()} · ${num(record.reviews)} reviews</span></div>`;
+  }).join("")}</div>`;
 }
 
 function boardTitle(period) {
@@ -198,6 +233,7 @@ ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for 
 </section>
 <section><h2>Last 26 weeks</h2><div class="heat">${heat(p.heatmap)}</div></section>
 <section><h2>${boardTitle(currentPeriod())}</h2>${tabs(currentPeriod())}${board(rows, p.user)}</section>
+<section><h2>Personal bests</h2>${bests(p)}</section>
 <section><h2>Lifetime</h2><div class="stats">
   <div class="stat"><b>${num(p.lifetime.reviews)}</b><span>reviews</span></div>
   <div class="stat"><b>${num(p.lifetime.hours)}</b><span>hours</span></div>
@@ -247,12 +283,9 @@ function openDeckSharing(user, display) {
     return response.json();
   };
   const showDecks = data => {
-    if (!data.decks.length) {
-      content.innerHTML = `<p>No decks have been uploaded yet. Open an updated AnkiQuest client and sync your reviews, then reopen this window.</p>`;
-      return;
-    }
     const subdecks = deck => data.decks.map((other, i) => other.name.startsWith(deck.name + "::") ? i : -1).filter(i => i >= 0);
     content.innerHTML = `<form id="deck-settings">
+      ${data.decks.length ? "" : `<p>No decks have been uploaded yet. Open an updated AnkiQuest client and sync your reviews, then reopen this window. Nudges work without them.</p>`}
       ${data.decks.map((deck, index) => `<fieldset data-deck="${index}">
         <legend>${esc(deck.name)}</legend>
         <label><input type="checkbox" class="deck-enabled" ${deck.enabled ? "checked" : ""}>Notify people when I finish this deck</label>
@@ -262,11 +295,16 @@ function openDeckSharing(user, display) {
         </div>
         ${subdecks(deck).length ? `<button type="button" class="apply-subdecks">Apply to ${subdecks(deck).length === 1 ? "its subdeck" : `all ${subdecks(deck).length} subdecks`}</button>` : ""}
       </fieldset>`).join("")}
-      <p class="sub">Only selected people receive your name and the deck name. Changes apply to future completions.</p>
+      <fieldset id="nudge-settings">
+        <legend>Nudges</legend>
+        <label><input type="checkbox" id="nudge-enabled" ${data.nudges ? "checked" : ""}>Nudge me when a place, a personal best or a level is within reach</label>
+        <p class="sub">At most one of each a day, while you are awake and have already studied.</p>
+      </fieldset>
+      ${data.decks.length ? `<p class="sub">Only selected people receive your name and the deck name. Changes apply to future completions.</p>` : ""}
       <button type="submit">Save preferences</button>
     </form>`;
     const form = content.querySelector("form");
-    form.querySelectorAll("fieldset").forEach(field => {
+    form.querySelectorAll("fieldset[data-deck]").forEach(field => {
       field.querySelector(".deck-enabled").addEventListener("change", event => {
         field.querySelector(".recipients").hidden = !event.target.checked;
         say("Unsaved changes.");
@@ -275,7 +313,7 @@ function openDeckSharing(user, display) {
       field.querySelector(".apply-subdecks")?.addEventListener("click", () => {
         const enabled = field.querySelector(".deck-enabled").checked;
         const chosen = [...field.querySelectorAll("[data-recipient]")].map(input => input.checked);
-        const fields = form.querySelectorAll("fieldset");
+        const fields = form.querySelectorAll("fieldset[data-deck]");
         for (const i of subdecks(data.decks[Number(field.dataset.deck)])) {
           const target = fields[i];
           target.querySelector(".deck-enabled").checked = enabled;
@@ -285,9 +323,10 @@ function openDeckSharing(user, display) {
         say("Copied to subdecks. Save to keep it.");
       });
     });
+    form.querySelector("#nudge-enabled").addEventListener("change", () => say("Unsaved changes."));
     form.addEventListener("submit", async event => {
       event.preventDefault();
-      const decks = [...form.querySelectorAll("fieldset")].map((field, i) => ({
+      const decks = [...form.querySelectorAll("fieldset[data-deck]")].map((field, i) => ({
         id: data.decks[i].id,
         enabled: field.querySelector(".deck-enabled").checked,
         recipients: [...field.querySelectorAll("[data-recipient]:checked")].map(input => data.recipients[Number(input.dataset.recipient)].user),
@@ -295,14 +334,14 @@ function openDeckSharing(user, display) {
       const invalid = decks.findIndex(deck => deck.enabled && !deck.recipients.length);
       if (invalid >= 0) {
         say(`Select at least one person for ${data.decks[invalid].name}, or turn its notifications off.`, true);
-        form.querySelectorAll("fieldset")[invalid].querySelector(".deck-enabled").focus();
+        form.querySelectorAll("fieldset[data-deck]")[invalid].querySelector(".deck-enabled").focus();
         return;
       }
       const controls = [...form.querySelectorAll("input, button")];
       controls.forEach(control => { control.disabled = true; });
       say("Saving…");
       try {
-        await request({ decks });
+        await request({ decks, nudges: form.querySelector("#nudge-enabled").checked });
         if (!closed) say("Preferences saved.");
       } catch (error) {
         if (!closed) say(error.message, true);
@@ -340,6 +379,15 @@ async function render() {
   if (document.getElementById("deck-sharing").open) return;
   const user = decodeURIComponent(location.hash.slice(1));
   try {
+    let me = "";
+    try { me = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
+    if (currentView() === "records") {
+      const held = await fetch("/api/records").then(r => r.json());
+      document.title = "ankiquest · records";
+      app.innerHTML = `<header><h1>Records</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header>
+        <section><h2>The best anyone has ever had</h2>${tabs("records")}${records(held)}</section>`;
+      return;
+    }
     const period = currentPeriod();
     const [rows, week] = await Promise.all([
       fetch("/api/leaderboard?period=" + period).then(r => r.json()),
@@ -357,8 +405,6 @@ async function render() {
         return;
       }
     }
-    let me = "";
-    try { me = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
     document.title = "ankiquest";
     app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${boardTitle(period)}</h2>${tabs(period)}${board(rows, me)}</section>`;
   } catch (e) {

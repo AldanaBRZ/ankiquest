@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use game::{Clock, Periods, Profile, Review, Week};
+use game::{Clock, Periods, Profile, Records, Review, Week};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -318,6 +318,7 @@ fn deck_settings(app: &App, store: &Store, user: &str) -> Result<decks::Settings
                 user,
             })
             .collect(),
+        nudges: store.nudges_enabled(user)?,
     })
 }
 
@@ -361,6 +362,9 @@ async fn set_decks(
     store
         .set_deck_preferences(&user, &update.decks)
         .map_err(store_error)?;
+    if let Some(nudges) = update.nudges {
+        store.set_nudges(&user, nudges).map_err(store_error)?;
+    }
     deck_settings(&app, &store, &user)
         .map(Json)
         .map_err(store_error)
@@ -383,6 +387,41 @@ async fn notifications(
             eprintln!("notifications for {user} failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+#[derive(Debug, Serialize)]
+struct RecordHolder {
+    window: String,
+    user: String,
+    display: String,
+    xp: u64,
+    reviews: u64,
+    at: i64,
+}
+
+/// The best hour, day, week, month and year anyone here has ever had.
+async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordHolder>> {
+    let profiles = app.profiles();
+    Json(
+        Records::NAMES
+            .iter()
+            .filter_map(|window| {
+                profiles
+                    .iter()
+                    .map(|player| (player, player.records.get(window)))
+                    .filter(|(_, record)| record.xp > 0)
+                    .max_by_key(|(_, record)| (record.xp, record.reviews))
+                    .map(|(player, record)| RecordHolder {
+                        window: (*window).to_string(),
+                        user: player.user.clone(),
+                        display: player.display.clone(),
+                        xp: record.xp,
+                        reviews: record.reviews,
+                        at: record.at,
+                    })
+            })
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -548,6 +587,8 @@ fn tick(app: &App) -> Result<(), Error> {
         import(app, &mut store, base)?;
     }
     let users: Vec<String> = app.players.read().unwrap().keys().cloned().collect();
+    // One snapshot of the standings, so a nudge knows who is just out of reach.
+    let ranking = app.profiles();
     for user in users {
         let Some(profile) = app.profile(&user) else {
             continue;
@@ -565,6 +606,19 @@ fn tick(app: &App) -> Result<(), Error> {
         } else {
             for event in fresh {
                 push(&app.config, &user, &event.title, &event.body, "tada");
+            }
+        }
+        if store.nudges_enabled(&user)? {
+            let gap = |other: &Profile| (other.display.clone(), other.week_xp);
+            let ahead = ranking
+                .iter()
+                .filter(|other| other.week_xp > profile.week_xp)
+                .min_by_key(|other| other.week_xp)
+                .map(gap);
+            for nudge in game::nudges(&profile, ahead.as_ref().map(|(w, xp)| (w.as_str(), *xp))) {
+                if store.mark_seen(&user, &nudge.key)? {
+                    store.send(&user, "", &nudge.title, &nudge.body, profile.day, now_ms())?;
+                }
             }
         }
         if profile.at_risk
@@ -757,10 +811,12 @@ async fn main() -> Result<(), Error> {
 
     let router = Router::new()
         .route("/", get(index))
+        .route("/records", get(index))
         .route("/{period}", get(period_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/api/leaderboard", get(leaderboard))
+        .route("/api/records", get(records))
         .route("/api/week", get(week_info))
         .route("/api/profile/{user}", get(profile))
         .route("/api/preview/{user}", post(preview))
@@ -834,6 +890,7 @@ mod tests {
                 enabled: true,
                 recipients: recipients.iter().map(|r| (*r).into()).collect(),
             }],
+            nudges: None,
         }
     }
 
@@ -1013,6 +1070,97 @@ mod tests {
 
     fn words(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    fn studied(user: &str, count: i64, day: i64) -> Upload {
+        Upload {
+            reviews: (0..count)
+                .map(|index| Review {
+                    id: day * 86_400_000 + 12 * 3_600_000 + index * 60_000 + user.len() as i64,
+                    cid: index + 1,
+                    last_ivl: 30,
+                    time_ms: 5_000,
+                    kind: 1,
+                })
+                .collect(),
+            deleted: vec![],
+            clock: Clock::default(),
+            silent: true,
+            catalog: false,
+            decks: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_records_board_names_whoever_had_the_best_window() {
+        let (app, path) = fixture();
+        let day = Clock::default().day(now_ms());
+        for (user, count) in [("cerro", 30), ("hill", 8)] {
+            let _ = upload(
+                State(app.clone()),
+                UrlPath(user.into()),
+                headers(user),
+                Json(studied(user, count, day)),
+            )
+            .await
+            .unwrap();
+        }
+        let board = records(State(app.clone())).await.0;
+        assert_eq!(
+            board.iter().map(|r| r.window.as_str()).collect::<Vec<_>>(),
+            Records::NAMES
+        );
+        for holder in &board {
+            assert_eq!(holder.user, "cerro", "{} should be cerro's", holder.window);
+            assert_eq!(holder.display, "Cerro");
+            assert!(holder.xp > 0 && holder.reviews > 0);
+        }
+        assert_eq!(board[0].reviews, 30, "all thirty land inside one hour");
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nudges_are_off_until_asked_for_and_then_stay_on() {
+        let (app, path) = fixture();
+        let _ = upload(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(sample_upload(2, false)),
+        )
+        .await
+        .unwrap();
+        let save = |nudges: Option<bool>| {
+            let app = app.clone();
+            async move {
+                let mut update = preferences(&["hill"]);
+                update.nudges = nudges;
+                set_decks(
+                    State(app),
+                    UrlPath("cerro".into()),
+                    headers("cerro"),
+                    Json(update),
+                )
+                .await
+                .unwrap()
+                .0
+            }
+        };
+        assert!(!save(None).await.nudges, "off until someone asks");
+        assert!(save(Some(true)).await.nudges);
+        assert!(save(None).await.nudges, "an older client leaves it alone");
+        assert!(!save(Some(false)).await.nudges);
+        assert!(
+            !get_decks(State(app.clone()), UrlPath("hill".into()), headers("hill"))
+                .await
+                .unwrap()
+                .0
+                .nudges,
+            "the setting belongs to one player"
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -1340,6 +1488,7 @@ mod tests {
                     enabled: false,
                     recipients: vec![],
                 }],
+                nudges: None,
             },
             decks::SettingsUpdate {
                 decks: vec![
@@ -1354,6 +1503,7 @@ mod tests {
                         recipients: vec![],
                     },
                 ],
+                nudges: None,
             },
         ] {
             assert_eq!(
