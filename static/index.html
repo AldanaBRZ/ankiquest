@@ -150,7 +150,8 @@ function records(rows) {
     const days = row.unit === "days";
     const when = new Date(best.at).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
     const chasing = rest.map((other, index) =>
-      `${index + 2}. <a href="#${encodeURIComponent(other.user)}">${esc(other.display)}</a> ${num(other.value)} <span class="behind">−${num(best.value - other.value)}</span>`
+      `${index + 2}. <a href="#${encodeURIComponent(other.user)}">${esc(other.display)}</a> ${num(other.value)} ${days ? "days" : "XP"}` +
+      ` <span class="behind" title="behind ${esc(best.display)}">−${num(best.value - other.value)}</span>`
     ).join("  ·  ");
     return `<li>
       <span class="rank">🏆</span>
