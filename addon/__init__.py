@@ -387,7 +387,10 @@ def on_operation(changes, handler):
 def on_profile_open():
     state["previous"] = None
     if state["timer"] is None:
-        state["timer"] = mw.progress.timer(POLL_MS, poll, repeat=True, parent=mw)
+        try:
+            state["timer"] = mw.progress.timer(POLL_MS, poll, repeat=True, parent=mw)
+        except TypeError:
+            state["timer"] = mw.progress.timer(POLL_MS, poll, True)
     refresh_shared_decks()
     refresh(False, resync=True)
     poll(quiet=True)
