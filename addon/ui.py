@@ -10,10 +10,15 @@ from aqt.qt import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from aqt.qt import Qt
+
+from .decks import label, ordered
 from .notify import answerable
 
 MAX_MESSAGE = 200
@@ -107,31 +112,53 @@ def _values(url, user, token, rank, hours):
 
 
 def deck_dialog(parent, settings):
-    """Checkboxes for every deck and every recipient, subdecks included."""
-    decks = settings.get("decks") or []
+    """A tree of decks and a list of recipients; ticking a deck ticks its subdecks."""
+    decks = ordered(settings.get("decks") or [])
     people = settings.get("recipients") or []
-    if not decks:
-        return None
     dialog = QDialog(parent)
     dialog.setWindowTitle("Deck completion notifications")
-    dialog.resize(640, 480)
+    dialog.resize(680, 520)
     layout = QVBoxLayout(dialog)
     layout.addWidget(
         QLabel("The people you pick hear once a day when you finish a shared deck.")
     )
 
-    boxes = {}
-    for deck in decks:
-        box = QCheckBox(deck["name"])
-        box.setChecked(bool(deck.get("enabled")))
-        boxes[deck["id"]] = box
-    for deck in decks:
-        prefix = deck["name"] + "::"
-        children = [boxes[other["id"]] for other in decks if other["name"].startswith(prefix)]
-        if children:
-            boxes[deck["id"]].toggled.connect(
-                lambda checked, children=children: [child.setChecked(checked) for child in children]
-            )
+    tree = QTreeWidget()
+    tree.setHeaderHidden(True)
+    items = []
+    for index, deck in enumerate(decks):
+        item = QTreeWidgetItem([label(deck)])
+        item.setCheckState(0, _enum(Qt, "CheckState", "Checked" if deck.get("enabled") else "Unchecked"))
+        item.setToolTip(0, deck["name"])
+        items.append(item)
+        parts = deck["name"].split("::")
+        owner = None
+        for other in range(index - 1, -1, -1):
+            if decks[other]["name"] == "::".join(parts[:-1]):
+                owner = items[other]
+                break
+        if owner is None:
+            tree.addTopLevelItem(item)
+        else:
+            owner.addChild(item)
+    tree.expandAll()
+
+    guard = {"busy": False}
+
+    def spread(item, _column):
+        """A branch shares one answer, without the change bouncing back up."""
+        if guard["busy"]:
+            return
+        guard["busy"] = True
+        state = item.checkState(0)
+        stack = [item.child(i) for i in range(item.childCount())]
+        while stack:
+            child = stack.pop()
+            child.setCheckState(0, state)
+            stack.extend(child.child(i) for i in range(child.childCount()))
+        guard["busy"] = False
+
+    tree.itemChanged.connect(spread)
 
     chosen = set()
     for deck in decks:
@@ -144,29 +171,35 @@ def deck_dialog(parent, settings):
         recipients[person["user"]] = box
 
     columns = QHBoxLayout()
-    columns.addWidget(_titled("Decks", _scroller(list(boxes.values()))), 2)
+    columns.addWidget(_titled("Decks", tree), 2)
     columns.addWidget(
         _titled("Notify", _scroller(list(recipients.values()) or [QLabel("Nobody else plays yet.")])),
         1,
     )
     layout.addLayout(columns)
 
+    nudges = QCheckBox("Nudge me when a place, my best day or the next level is within reach")
+    nudges.setChecked(bool(settings.get("nudges")))
+    layout.addWidget(nudges)
+
     every = QPushButton("All / none")
 
     def toggle_all():
-        select = any(not box.isChecked() for box in boxes.values())
-        for box in boxes.values():
-            box.setChecked(select)
+        checked = _enum(Qt, "CheckState", "Checked")
+        select = any(item.checkState(0) != checked for item in items)
+        for item in items:
+            item.setCheckState(0, _enum(Qt, "CheckState", "Checked" if select else "Unchecked"))
 
     every.clicked.connect(toggle_all)
     layout.addLayout(_buttons(dialog, "Save", (every,)))
 
     if not dialog.exec():
         return None
-    shared = [deck_id for deck_id, box in boxes.items() if box.isChecked()]
-    unshared = [deck_id for deck_id, box in boxes.items() if not box.isChecked()]
+    checked = _enum(Qt, "CheckState", "Checked")
+    shared = [deck["id"] for deck, item in zip(decks, items) if item.checkState(0) == checked]
+    unshared = [deck["id"] for deck, item in zip(decks, items) if item.checkState(0) != checked]
     picked = [user for user, box in recipients.items() if box.isChecked()]
-    return shared, unshared, picked
+    return shared, unshared, picked, nudges.isChecked()
 
 
 def _titled(title, widget):

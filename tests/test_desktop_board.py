@@ -18,6 +18,7 @@ def load_module(name, path):
 
 board = load_module("ankiquest_board", ADDON / "board.py")
 notify = load_module("ankiquest_notify", ADDON / "notify.py")
+tree = load_module("ankiquest_decks", ADDON / "decks.py")
 
 
 def player(user, week, level=1, streak=0, **periods):
@@ -129,6 +130,32 @@ class NotifyTests(unittest.TestCase):
         self.assertTrue(notify.answerable({"sender": "cerro"}))
         self.assertFalse(notify.answerable({"sender": "cerro", "replied": True}))
         self.assertFalse(notify.answerable({"sender": ""}))
+
+
+class DeckTreeTests(unittest.TestCase):
+    def decks(self, *names):
+        return tree.ordered([{"id": str(i + 1), "name": name} for i, name in enumerate(names)])
+
+    def test_a_subdeck_follows_its_parent_indented_by_its_depth(self):
+        decks = self.decks("Spanish::Verbs::Irregular", "German", "Spanish", "Spanish::Nouns")
+        self.assertEqual(
+            ["German", "Spanish", "Spanish::Nouns", "Spanish::Verbs::Irregular"],
+            [deck["name"] for deck in decks],
+        )
+        self.assertEqual([0, 0, 1, 2], [tree.depth(deck) for deck in decks])
+        self.assertEqual(["German", "Spanish", "Nouns", "Irregular"], [tree.label(deck) for deck in decks])
+
+    def test_a_deck_that_merely_starts_with_the_same_letters_is_not_a_subdeck(self):
+        decks = self.decks("Spanish", "Spanish::Verbs", "Spanishly", "Spanish Extra")
+        spanish = [deck["name"] for deck in decks].index("Spanish")
+        self.assertEqual(["Spanish::Verbs"], [decks[i]["name"] for i in tree.descendants(decks, spanish)])
+        self.assertEqual([spanish] + tree.descendants(decks, spanish), tree.branch(decks, spanish))
+        last = len(decks) - 1
+        self.assertEqual([], tree.descendants(decks, last))
+
+    def test_sorting_ignores_case_but_keeps_families_together(self):
+        decks = self.decks("spanish::verbs", "Spanish", "SPANISH::nouns")
+        self.assertEqual(["Spanish", "SPANISH::nouns", "spanish::verbs"], [deck["name"] for deck in decks])
 
 
 if __name__ == "__main__":

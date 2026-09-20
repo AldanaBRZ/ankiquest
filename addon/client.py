@@ -65,12 +65,15 @@ class Client:
     def deck_settings(self):
         return self._request("/api/decks/" + self.user)
 
-    def save_deck_settings(self, shared, unshared, recipients):
+    def save_deck_settings(self, shared, unshared, recipients, nudges=None):
         decks = [
             {"id": deck, "enabled": True, "recipients": list(recipients)} for deck in shared
         ]
         decks += [{"id": deck, "enabled": False, "recipients": []} for deck in unshared]
-        return self._request("/api/decks/" + self.user, {"decks": decks})
+        body = {"decks": decks}
+        if nudges is not None:
+            body["nudges"] = bool(nudges)
+        return self._request("/api/decks/" + self.user, body)
 
     def shared_decks(self):
         settings = self._request("/api/decks/" + self.user)

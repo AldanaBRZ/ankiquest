@@ -344,18 +344,18 @@ def open_deck_notifications():
         choice = ui.deck_dialog(mw, settings)
         if choice is None:
             return
-        shared, unshared, recipients = choice
+        shared, unshared, recipients, nudges = choice
         if shared and not recipients:
             tooltip("Pick at least one person to notify, or share no decks.")
             return
-        save_deck_choice(api, shared, unshared, recipients)
+        save_deck_choice(api, shared, unshared, recipients, nudges)
 
     mw.taskman.run_in_background(work, done, uses_collection=True)
 
 
-def save_deck_choice(api, shared, unshared, recipients):
+def save_deck_choice(api, shared, unshared, recipients, nudges):
     def work():
-        api.save_deck_settings(shared, unshared, recipients)
+        api.save_deck_settings(shared, unshared, recipients, nudges)
         return api.shared_decks()
 
     def done(future):

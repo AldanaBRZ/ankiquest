@@ -263,18 +263,18 @@ class RefreshTests(unittest.TestCase):
         self.api.shared_decks = Mock(return_value=["1", "3"])
         self.api.deck_settings = Mock(return_value={"decks": [], "recipients": []})
         self.api.save_deck_settings = Mock()
-        self.addon.ui.deck_dialog.return_value = (["1", "3"], ["2"], ["hill"])
+        self.addon.ui.deck_dialog.return_value = (["1", "3"], ["2"], ["hill"], True)
         self.addon.open_deck_notifications()
         self.assertEqual(self.addon.deck_snapshots.call_args.kwargs, {})
         self.assertTrue(self.api.upload.call_args.kwargs["catalog"])
         self.assertTrue(self.api.upload.call_args.args[2], "a catalog upload never announces")
-        self.api.save_deck_settings.assert_called_once_with(["1", "3"], ["2"], ["hill"])
+        self.api.save_deck_settings.assert_called_once_with(["1", "3"], ["2"], ["hill"], True)
         self.assertEqual(self.mw.pm.profile["ankiquestSharedDecks"], ["1", "3"])
 
     def test_sharing_without_anyone_to_tell_is_refused(self):
         self.api.deck_settings = Mock(return_value={"decks": [], "recipients": []})
         self.api.save_deck_settings = Mock()
-        self.addon.ui.deck_dialog.return_value = (["1"], [], [])
+        self.addon.ui.deck_dialog.return_value = (["1"], [], [], False)
         self.addon.open_deck_notifications()
         self.api.save_deck_settings.assert_not_called()
 

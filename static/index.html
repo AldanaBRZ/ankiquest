@@ -96,6 +96,7 @@ dialog.deck-sharing::backdrop { background: #0008; }
 .deck-sharing .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
 .deck-sharing input[type=password] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
 .deck-sharing fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 14px 0; padding: 12px; min-width: 0; }
+.deck-sharing .fold { background: none; border: 0; color: inherit; cursor: pointer; font: inherit; padding: 0 4px; }
 .deck-sharing legend { font-weight: 600; overflow-wrap: anywhere; }
 .deck-sharing label { display: block; margin: 8px 0; overflow-wrap: anywhere; }
 .deck-sharing input[type=checkbox] { margin-right: 8px; accent-color: var(--accent); }
@@ -283,11 +284,20 @@ function openDeckSharing(user, display) {
     return response.json();
   };
   const showDecks = data => {
+    data.decks.sort((a, b) => {
+      const left = a.name.split("::"), right = b.name.split("::");
+      for (let i = 0; i < Math.min(left.length, right.length); i++) {
+        const order = left[i].localeCompare(right[i], undefined, { sensitivity: "base" });
+        if (order) return order;
+      }
+      return left.length - right.length;
+    });
     const subdecks = deck => data.decks.map((other, i) => other.name.startsWith(deck.name + "::") ? i : -1).filter(i => i >= 0);
+    const collapsed = new Set();
     content.innerHTML = `<form id="deck-settings">
       ${data.decks.length ? "" : `<p>No decks have been uploaded yet. Open an updated AnkiQuest client and sync your reviews, then reopen this window. Nudges work without them.</p>`}
-      ${data.decks.map((deck, index) => `<fieldset data-deck="${index}">
-        <legend>${esc(deck.name)}</legend>
+      ${data.decks.map((deck, index) => `<fieldset data-deck="${index}" style="margin-left:${(deck.name.split("::").length - 1) * 14}px">
+        <legend>${subdecks(deck).length ? `<button type="button" class="fold" aria-expanded="true">▾</button> ` : ""}<span title="${esc(deck.name)}">${esc(deck.name.split("::").pop())}</span></legend>
         <label><input type="checkbox" class="deck-enabled" ${deck.enabled ? "checked" : ""}>Notify people when I finish this deck</label>
         <div class="recipients" ${deck.enabled ? "" : "hidden"}>
           <span class="sub">Notify these people:</span>
@@ -304,6 +314,20 @@ function openDeckSharing(user, display) {
       <button type="submit">Save preferences</button>
     </form>`;
     const form = content.querySelector("form");
+    const fields = form.querySelectorAll("fieldset[data-deck]");
+    const refold = () => fields.forEach((field, i) => {
+      field.hidden = [...collapsed].some(name => data.decks[i].name.startsWith(name + "::"));
+      const fold = field.querySelector(".fold");
+      if (!fold) return;
+      const folded = collapsed.has(data.decks[i].name);
+      fold.textContent = folded ? "▸" : "▾";
+      fold.setAttribute("aria-expanded", folded ? "false" : "true");
+    });
+    fields.forEach((field, i) => field.querySelector(".fold")?.addEventListener("click", () => {
+      const name = data.decks[i].name;
+      if (!collapsed.delete(name)) collapsed.add(name);
+      refold();
+    }));
     form.querySelectorAll("fieldset[data-deck]").forEach(field => {
       field.querySelector(".deck-enabled").addEventListener("change", event => {
         field.querySelector(".recipients").hidden = !event.target.checked;
