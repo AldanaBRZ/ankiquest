@@ -1,12 +1,13 @@
 use crate::game::Clock;
 use crate::store::{Error, Store};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const MAX_DECKS: usize = 2000;
 const MAX_RECIPIENTS: usize = 100;
 const INBOX_AGE_MS: i64 = 7 * 86_400_000;
+pub const MAX_MESSAGE: usize = 200;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +60,16 @@ pub struct Notification {
     pub body: String,
     pub day: i64,
     pub created_at: i64,
+    /// Who this is about, and so who a reply goes to. Empty for older rows.
+    pub sender: String,
+    pub replied: bool,
+}
+
+/// A completion that was just announced, echoed back so the client can say so locally.
+#[derive(Debug, Serialize)]
+pub struct Announcement {
+    pub deck: String,
+    pub recipients: usize,
 }
 
 pub struct Delivery {
@@ -68,6 +79,10 @@ pub struct Delivery {
 
 fn valid_text(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+pub fn valid_message(message: &str) -> bool {
+    valid_text(message, MAX_MESSAGE)
 }
 
 pub fn valid_clock(clock: Clock) -> bool {
@@ -142,6 +157,21 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
          );
          create index if not exists notifications_recipient on notifications (recipient, id);",
     )?;
+    // Databases from before replies exist in the wild; adding the columns is the migration.
+    for (column, definition) in [
+        ("sender", "text not null default ''"),
+        ("replied", "integer not null default 0"),
+    ] {
+        let present = conn
+            .prepare("select 1 from pragma_table_info('notifications') where name = ?1")?
+            .exists([column])?;
+        if !present {
+            conn.execute(
+                &format!("alter table notifications add column {column} {definition}"),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -207,8 +237,9 @@ impl Store {
         clock: Clock,
         silent: bool,
         now_ms: i64,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Announcement>, Error> {
         let today = clock.day(now_ms);
+        let mut announced = Vec::new();
         let tx = self.conn.transaction()?;
         for deck in snapshots {
             // Delayed and future snapshots cannot rename a deck or complete today.
@@ -239,15 +270,21 @@ impl Store {
                 "{display} has finished their {} studies for today.",
                 deck.name
             );
-            tx.execute(
-                "insert into notifications (recipient, title, body, day, created_at)
-                 select recipient, 'Deck complete', ?3, ?4, ?5 from deck_recipients
+            let recipients = tx.execute(
+                "insert into notifications (recipient, sender, title, body, day, created_at)
+                 select recipient, ?1, 'Deck complete', ?3, ?4, ?5 from deck_recipients
                  where owner = ?1 and deck_id = ?2 and recipient != ?1",
                 params![user, deck.id, body, today, now_ms],
             )?;
+            if recipients > 0 {
+                announced.push(Announcement {
+                    deck: deck.name.clone(),
+                    recipients,
+                });
+            }
         }
         tx.commit()?;
-        Ok(())
+        Ok(announced)
     }
 
     /// A full deck list from the client replaces the stored one, so deleted decks disappear.
@@ -274,8 +311,8 @@ impl Store {
 
     pub fn notifications(&self, user: &str, now_ms: i64) -> Result<Vec<Notification>, Error> {
         let mut stmt = self.conn.prepare(
-            "select id, title, body, day, created_at / 1000 from (
-                 select id, title, body, day, created_at from notifications
+            "select id, title, body, day, created_at / 1000, sender, replied from (
+                 select id, title, body, day, created_at, sender, replied from notifications
                  where recipient = ?1 and created_at >= ?2 order by id desc limit 500
              ) order by id",
         )?;
@@ -287,9 +324,46 @@ impl Store {
                     body: r.get(2)?,
                     day: r.get(3)?,
                     created_at: r.get(4)?,
+                    sender: r.get(5)?,
+                    replied: r.get(6)?,
                 })
             })?
             .collect::<Result<_, _>>()?)
+    }
+
+    /// Answers one notification, once, and lets the answer be answered in turn.
+    /// Returns who heard it, or `None` when there is nothing left to reply to.
+    pub fn reply(
+        &mut self,
+        user: &str,
+        display: &str,
+        id: i64,
+        message: &str,
+        now_ms: i64,
+    ) -> Result<Option<String>, Error> {
+        let tx = self.conn.transaction()?;
+        let target = tx
+            .query_row(
+                "select sender, day from notifications
+                 where id = ?1 and recipient = ?2 and replied = 0 and sender not in ('', ?2)",
+                params![id, user],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((sender, day)) = target else {
+            return Ok(None);
+        };
+        tx.execute(
+            "update notifications set replied = 1 where id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "insert into notifications (recipient, sender, title, body, day, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![sender, user, format!("💬 {display}"), message, day, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(Some(sender))
     }
 
     /// Claim each push before network I/O, matching existing notification behavior:
@@ -302,7 +376,7 @@ impl Store {
         )?;
         let deliveries = {
             let mut stmt = tx.prepare(
-                "select recipient, id, title, body, day, created_at / 1000 from notifications where pushed = 0 order by id limit 100",
+                "select recipient, id, title, body, day, created_at / 1000, sender, replied from notifications where pushed = 0 order by id limit 100",
             )?;
             stmt.query_map([], |r| {
                 Ok(Delivery {
@@ -313,6 +387,8 @@ impl Store {
                         body: r.get(3)?,
                         day: r.get(4)?,
                         created_at: r.get(5)?,
+                        sender: r.get(6)?,
+                        replied: r.get(7)?,
                     },
                 })
             })?
@@ -375,6 +451,44 @@ pub(crate) mod tests {
                 }],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn an_inbox_from_before_replies_keeps_working() {
+        let (store, path) = temporary_store();
+        drop(store);
+        let conn = Connection::open(path.join("ankiquest.db")).unwrap();
+        conn.execute_batch(
+            "drop table notifications;
+             create table notifications (
+                 id integer primary key autoincrement,
+                 recipient text not null,
+                 title text not null,
+                 body text not null,
+                 day integer not null,
+                 created_at integer not null,
+                 pushed integer not null default 0
+             );
+             insert into notifications (recipient, title, body, day, created_at)
+             values ('hill', 'Deck complete', 'Cerro finished Spanish.', 20000, 1728000000000);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut store = Store::open(&path).unwrap();
+        let inbox = store.notifications("hill", 1_728_000_000_000).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].sender, "");
+        assert!(!inbox[0].replied);
+        assert!(
+            store
+                .reply("hill", "Hill", inbox[0].id, "Good job!", NOW)
+                .unwrap()
+                .is_none(),
+            "nobody is recorded as the sender of a pre-reply notification"
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

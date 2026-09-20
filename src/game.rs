@@ -1046,7 +1046,10 @@ mod tests {
             review(now - 30 * 60_000),
         ];
         let p = compute("a", "a", &reviews, &utc(), &Week::default(), now);
-        assert!(p.periods.hour > 0, "the last review counts towards this hour");
+        assert!(
+            p.periods.hour > 0,
+            "the last review counts towards this hour"
+        );
         assert!(p.periods.day > p.periods.hour);
         assert!(p.periods.week >= p.periods.day);
         assert!(p.periods.month > p.periods.week);
@@ -1056,8 +1059,18 @@ mod tests {
         for name in Periods::NAMES {
             assert!(p.periods.get(name) > 0, "{name} should have XP");
         }
-        let quiet = compute("a", "a", &reviews, &utc(), &Week::default(), now + 5 * 3_600_000);
-        assert_eq!(quiet.periods.hour, 0, "an hour without reviews earns nothing");
+        let quiet = compute(
+            "a",
+            "a",
+            &reviews,
+            &utc(),
+            &Week::default(),
+            now + 5 * 3_600_000,
+        );
+        assert_eq!(
+            quiet.periods.hour, 0,
+            "an hour without reviews earns nothing"
+        );
         assert_eq!(quiet.periods.day, p.periods.day);
     }
 

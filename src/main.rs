@@ -229,7 +229,7 @@ async fn upload(
     UrlPath(user): UrlPath<String>,
     headers: HeaderMap,
     Json(upload): Json<Upload>,
-) -> Result<Json<Profile>, StatusCode> {
+) -> Result<Json<UploadResponse>, StatusCode> {
     if !authorized(&app, &user, &headers) {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -261,8 +261,9 @@ async fn upload(
     store
         .upsert(&user, &reviews, &upload.deleted, upload.clock)
         .map_err(store_error)?;
+    let mut announced = Vec::new();
     if let Some(decks) = &upload.decks {
-        store
+        announced = store
             .record_decks(
                 &user,
                 &app.display(&user),
@@ -284,7 +285,7 @@ async fn upload(
             store.mark_seen(&user, &event.key).map_err(store_error)?;
         }
     }
-    Ok(Json(profile))
+    Ok(Json(UploadResponse { profile, announced }))
 }
 
 fn deck_settings(app: &App, store: &Store, user: &str) -> Result<decks::Settings, Error> {
@@ -382,6 +383,61 @@ async fn notifications(
             eprintln!("notifications for {user} failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyRequest {
+    notification: i64,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplyResponse {
+    sent_to: String,
+}
+
+/// Answers a deck completion, so finishing a deck starts a conversation.
+async fn reply(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<ReplyRequest>,
+) -> Result<Json<ReplyResponse>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let message = request.message.trim();
+    if !decks::valid_message(message) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let sender = app
+        .store
+        .lock()
+        .unwrap()
+        .reply(
+            &user,
+            &app.display(&user),
+            request.notification,
+            message,
+            now_ms(),
+        )
+        .map_err(|e| {
+            eprintln!("reply from {user} failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(ReplyResponse {
+        sent_to: app.display(&sender),
+    }))
+}
+
+/// The player's profile, plus any deck completion this upload just announced.
+#[derive(Debug, Serialize)]
+struct UploadResponse {
+    #[serde(flatten)]
+    profile: Profile,
+    announced: Vec<decks::Announcement>,
 }
 
 #[derive(Serialize)]
@@ -603,6 +659,7 @@ async fn main() -> Result<(), Error> {
         .route("/api/reviews/{user}", post(upload))
         .route("/api/decks/{user}", get(get_decks).post(set_decks))
         .route("/api/notifications/{user}", get(notifications))
+        .route("/api/reply/{user}", post(reply))
         .with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;
@@ -777,6 +834,20 @@ mod tests {
                 StatusCode::UNAUTHORIZED
             );
             assert_eq!(
+                reply(
+                    State(app.clone()),
+                    UrlPath("cerro".into()),
+                    auth.clone(),
+                    Json(ReplyRequest {
+                        notification: 1,
+                        message: "Good job!".into()
+                    })
+                )
+                .await
+                .unwrap_err(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
                 upload(
                     State(app.clone()),
                     UrlPath("cerro".into()),
@@ -789,6 +860,150 @@ mod tests {
             );
         }
         assert!(app.store.lock().unwrap().decks("cerro").unwrap().is_empty());
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_upload_reports_what_it_just_announced() {
+        let (app, path) = fixture();
+        let send = |body: Upload| {
+            let app = app.clone();
+            async move {
+                upload(
+                    State(app),
+                    UrlPath("cerro".into()),
+                    headers("cerro"),
+                    Json(body),
+                )
+                .await
+                .unwrap()
+                .0
+            }
+        };
+        assert!(send(sample_upload(2, false)).await.announced.is_empty());
+        let _ = set_decks(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(preferences(&["hill"])),
+        )
+        .await
+        .unwrap();
+
+        let announced = send(sample_upload(0, false)).await.announced;
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].deck, "Spanish");
+        assert_eq!(announced[0].recipients, 1);
+        assert!(
+            send(sample_upload(0, false)).await.announced.is_empty(),
+            "a deck is only announced once a day"
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_completion_can_be_answered_once_and_the_answer_answered_back() {
+        let (app, path) = fixture();
+        let post = |app: Arc<App>, body: Upload| async move {
+            let _ = upload(
+                State(app),
+                UrlPath("cerro".into()),
+                headers("cerro"),
+                Json(body),
+            )
+            .await
+            .unwrap();
+        };
+        let inbox = |app: Arc<App>, user: &'static str| async move {
+            notifications(State(app), UrlPath(user.into()), headers(user))
+                .await
+                .unwrap()
+                .0
+        };
+        let say = |app: Arc<App>, user: &'static str, notification: i64, message: &str| {
+            let message = message.to_string();
+            async move {
+                reply(
+                    State(app),
+                    UrlPath(user.into()),
+                    headers(user),
+                    Json(ReplyRequest {
+                        notification,
+                        message,
+                    }),
+                )
+                .await
+            }
+        };
+
+        post(app.clone(), sample_upload(2, false)).await;
+        let _ = set_decks(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(preferences(&["hill"])),
+        )
+        .await
+        .unwrap();
+        post(app.clone(), sample_upload(0, false)).await;
+
+        let completion = inbox(app.clone(), "hill").await.remove(0);
+        assert_eq!(completion.sender, "cerro");
+        assert!(!completion.replied);
+        let id = completion.id;
+        assert_eq!(
+            say(app.clone(), "hill", id, "  Good job!  ")
+                .await
+                .unwrap()
+                .0
+                .sent_to,
+            "Cerro"
+        );
+        assert!(
+            inbox(app.clone(), "hill").await[0].replied,
+            "a reply is only sent once"
+        );
+
+        let answer = inbox(app.clone(), "cerro").await.remove(0);
+        assert_eq!(answer.title, "\u{1f4ac} Hill");
+        assert_eq!(answer.body, "Good job!");
+        assert_eq!(answer.sender, "hill");
+        assert_eq!(
+            say(app.clone(), "cerro", answer.id, "thanks!")
+                .await
+                .unwrap()
+                .0
+                .sent_to,
+            "Hill"
+        );
+        assert_eq!(inbox(app.clone(), "hill").await[1].body, "thanks!");
+
+        for (user, notification, message) in [
+            ("hill", id, "already answered"),
+            ("friend", id, "not my notification"),
+            ("cerro", answer.id, "answered by me"),
+            ("hill", id + 999, "no such notification"),
+        ] {
+            assert_eq!(
+                say(app.clone(), user, notification, message)
+                    .await
+                    .unwrap_err(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        for message in [
+            "",
+            "   ",
+            "line\nbreak",
+            &"x".repeat(decks::MAX_MESSAGE + 1),
+        ] {
+            assert_eq!(
+                say(app.clone(), "hill", id, message).await.unwrap_err(),
+                StatusCode::BAD_REQUEST
+            );
+        }
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }
