@@ -67,6 +67,9 @@ pub struct Notification {
     /// Who this is about, and so who a reply goes to. Empty for older rows.
     pub sender: String,
     pub replied: bool,
+    /// What put this here: "completion", "reply", "nudge" or "message". Clients
+    /// choose how loudly to announce each.
+    pub kind: String,
 }
 
 /// A completion that was just announced, echoed back so the client can say so locally.
@@ -74,6 +77,16 @@ pub struct Notification {
 pub struct Announcement {
     pub deck: String,
     pub recipients: usize,
+}
+
+/// A notification written by the server itself: a nudge, or a message sent by hand.
+pub struct Outgoing<'a> {
+    pub to: &'a str,
+    /// Empty when nobody can be answered.
+    pub from: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub kind: &'a str,
 }
 
 pub struct Delivery {
@@ -169,6 +182,7 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
     for (column, definition) in [
         ("sender", "text not null default ''"),
         ("replied", "integer not null default 0"),
+        ("kind", "text not null default 'message'"),
     ] {
         let present = conn
             .prepare("select 1 from pragma_table_info('notifications') where name = ?1")?
@@ -279,8 +293,8 @@ impl Store {
                 deck.name
             );
             let recipients = tx.execute(
-                "insert into notifications (recipient, sender, title, body, day, created_at)
-                 select recipient, ?1, 'Deck complete', ?3, ?4, ?5 from deck_recipients
+                "insert into notifications (recipient, sender, title, body, day, created_at, kind)
+                 select recipient, ?1, 'Deck complete', ?3, ?4, ?5, 'completion' from deck_recipients
                  where owner = ?1 and deck_id = ?2 and recipient != ?1",
                 params![user, deck.id, body, today, now_ms],
             )?;
@@ -319,8 +333,8 @@ impl Store {
 
     pub fn notifications(&self, user: &str, now_ms: i64) -> Result<Vec<Notification>, Error> {
         let mut stmt = self.conn.prepare(
-            "select id, title, body, day, created_at / 1000, sender, replied from (
-                 select id, title, body, day, created_at, sender, replied from notifications
+            "select id, title, body, day, created_at / 1000, sender, replied, kind from (
+                 select id, title, body, day, created_at, sender, replied, kind from notifications
                  where recipient = ?1 and created_at >= ?2 order by id desc limit 500
              ) order by id",
         )?;
@@ -334,6 +348,7 @@ impl Store {
                     created_at: r.get(4)?,
                     sender: r.get(5)?,
                     replied: r.get(6)?,
+                    kind: r.get(7)?,
                 })
             })?
             .collect::<Result<_, _>>()?)
@@ -362,19 +377,19 @@ impl Store {
 
     /// Puts one message straight into a player's inbox, for the `message` command.
     /// The delivery loop pushes it like any other notification.
-    pub fn send(
-        &mut self,
-        recipient: &str,
-        sender: &str,
-        title: &str,
-        body: &str,
-        day: i64,
-        now_ms: i64,
-    ) -> Result<i64, Error> {
+    pub fn send(&mut self, message: &Outgoing<'_>, day: i64, now_ms: i64) -> Result<i64, Error> {
         self.conn.execute(
-            "insert into notifications (recipient, sender, title, body, day, created_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![recipient, sender, title, body, day, now_ms],
+            "insert into notifications (recipient, sender, title, body, day, created_at, kind)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                message.to,
+                message.from,
+                message.title,
+                message.body,
+                day,
+                now_ms,
+                message.kind
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -406,8 +421,8 @@ impl Store {
             params![id],
         )?;
         tx.execute(
-            "insert into notifications (recipient, sender, title, body, day, created_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            "insert into notifications (recipient, sender, title, body, day, created_at, kind)
+             values (?1, ?2, ?3, ?4, ?5, ?6, 'reply')",
             params![sender, user, format!("💬 {display}"), message, day, now_ms],
         )?;
         tx.commit()?;
@@ -424,7 +439,7 @@ impl Store {
         )?;
         let deliveries = {
             let mut stmt = tx.prepare(
-                "select recipient, id, title, body, day, created_at / 1000, sender, replied from notifications where pushed = 0 order by id limit 100",
+                "select recipient, id, title, body, day, created_at / 1000, sender, replied, kind from notifications where pushed = 0 order by id limit 100",
             )?;
             stmt.query_map([], |r| {
                 Ok(Delivery {
@@ -437,6 +452,7 @@ impl Store {
                         created_at: r.get(5)?,
                         sender: r.get(6)?,
                         replied: r.get(7)?,
+                        kind: r.get(8)?,
                     },
                 })
             })?

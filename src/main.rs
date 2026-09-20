@@ -654,7 +654,17 @@ fn tick(app: &App) -> Result<(), Error> {
                 .map(gap);
             for nudge in game::nudges(&profile, ahead.as_ref().map(|(w, xp)| (w.as_str(), *xp))) {
                 if store.mark_seen(&user, &nudge.key)? {
-                    store.send(&user, "", &nudge.title, &nudge.body, profile.day, now_ms())?;
+                    store.send(
+                        &decks::Outgoing {
+                            to: &user,
+                            from: "",
+                            title: &nudge.title,
+                            body: &nudge.body,
+                            kind: "nudge",
+                        },
+                        profile.day,
+                        now_ms(),
+                    )?;
                 }
             }
         }
@@ -771,10 +781,13 @@ fn send_message(config: &Config, message: &Message) -> Result<(), Error> {
     let now = now_ms();
     let day = store.clock(&message.to)?.day(now);
     let id = store.send(
-        &message.to,
-        message.from.as_deref().unwrap_or(""),
-        &title,
-        &message.text,
+        &decks::Outgoing {
+            to: &message.to,
+            from: message.from.as_deref().unwrap_or(""),
+            title: &title,
+            body: &message.text,
+            kind: "message",
+        },
         day,
         now,
     )?;
@@ -1313,6 +1326,7 @@ mod tests {
             .0;
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].title, "\u{1f4ac} Cerro");
+        assert_eq!(inbox[0].kind, "message", "written by hand, not by the game");
         assert_eq!(inbox[0].body, "you're doing great, keep going");
         assert_eq!(inbox[0].sender, "cerro");
         assert_eq!(
