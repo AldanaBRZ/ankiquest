@@ -669,8 +669,9 @@ fn review_base_xp(r: &Review) -> f64 {
         return 1.0;
     }
     let base = match r.kind {
+        0 => 9.0,
         1 => 10.0,
-        0 | 2 => 6.0,
+        2 => 6.0,
         _ => 2.0,
     };
     if r.last_ivl >= MATURE_IVL {
@@ -1276,6 +1277,30 @@ mod tests {
 
         let (_, _, fresh) = collect_days(&[answer(1, 0, 7), answer(2, 0, 7)], &utc());
         assert_eq!(fresh[0].1, fresh[1].1, "a new day starts the card over");
+    }
+
+    #[test]
+    fn learning_a_new_card_is_worth_about_as_much_as_knowing_an_old_one() {
+        let answer = |index: i64, kind: u8, last_ivl: i64| Review {
+            id: DAY_MS + NOON + index * 600_000,
+            cid: 7,
+            last_ivl,
+            time_ms: 5_000,
+            kind,
+        };
+        let steps = [answer(0, 0, 0), answer(1, 0, 0), answer(2, 0, 0)];
+        let (_, _, learning) = collect_days(&steps, &utc());
+        let learned: f64 = learning.iter().map(|(_, xp)| xp).sum();
+        let (_, _, review) = collect_days(&[answer(0, 1, 30)], &utc());
+        let known = review[0].1;
+        assert!(
+            (learned - known).abs() < 2.0,
+            "learning a card pays {learned}, knowing one pays {known}"
+        );
+        assert!(
+            learning[0].1 < known,
+            "a single learning step is not a whole review"
+        );
     }
 
     #[test]
