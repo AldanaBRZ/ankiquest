@@ -40,6 +40,32 @@
       cfg = config.services.ankiquest;
       syncMount = "/run/ankiquest-sync";
       withToken = lib.filterAttrs (_: u: u.tokenFile != null) cfg.users;
+      configFile = pkgs.writeText "ankiquest.json" (builtins.toJSON {
+        addr = "127.0.0.1:${toString cfg.port}";
+        sync_base =
+          if cfg.syncBase == null
+          then null
+          else syncMount;
+        state_dir = "/var/lib/ankiquest";
+        ntfy = cfg.ntfy;
+        remind_hour = cfg.remindHour;
+        week_timezone = cfg.weekTimezone;
+        week_rollover_hour = cfg.weekRolloverHour;
+        public_url =
+          if cfg.domain == null
+          then null
+          else "https://${cfg.domain}";
+        users =
+          lib.mapAttrs (name: u: {
+            display = u.display;
+            ntfy_topic = u.ntfyTopic;
+            token_file =
+              if u.tokenFile == null
+              then null
+              else "/run/credentials/ankiquest.service/token-${name}";
+          })
+          cfg.users;
+      });
       user = lib.types.submodule {
         options = {
           display = lib.mkOption {
@@ -113,32 +139,7 @@
           description = "ankiquest";
           wantedBy = ["multi-user.target"];
           after = ["network.target" "anki-sync-server.service"];
-          environment.ANKIQUEST_CONFIG = pkgs.writeText "ankiquest.json" (builtins.toJSON {
-            addr = "127.0.0.1:${toString cfg.port}";
-            sync_base =
-              if cfg.syncBase == null
-              then null
-              else syncMount;
-            state_dir = "/var/lib/ankiquest";
-            ntfy = cfg.ntfy;
-            remind_hour = cfg.remindHour;
-            week_timezone = cfg.weekTimezone;
-            week_rollover_hour = cfg.weekRolloverHour;
-            public_url =
-              if cfg.domain == null
-              then null
-              else "https://${cfg.domain}";
-            users =
-              lib.mapAttrs (name: u: {
-                display = u.display;
-                ntfy_topic = u.ntfyTopic;
-                token_file =
-                  if u.tokenFile == null
-                  then null
-                  else "/run/credentials/ankiquest.service/token-${name}";
-              })
-              cfg.users;
-          });
+          environment.ANKIQUEST_CONFIG = configFile;
           serviceConfig = {
             ExecStart = lib.getExe cfg.package;
             DynamicUser = true;
@@ -149,6 +150,14 @@
             RestartSec = 5;
           };
         };
+
+        # The state directory belongs to the service's dynamic user, so writing a
+        # message by hand needs root: sudo ankiquest-message aldanita "well done".
+        environment.systemPackages = [
+          (pkgs.writeShellScriptBin "ankiquest-message" ''
+            exec ${lib.getExe cfg.package} ${configFile} message "$@"
+          '')
+        ];
 
         services.nginx.virtualHosts = lib.mkIf (cfg.domain != null) {
           ${cfg.domain} = {

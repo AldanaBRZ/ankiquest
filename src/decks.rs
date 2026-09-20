@@ -331,6 +331,25 @@ impl Store {
             .collect::<Result<_, _>>()?)
     }
 
+    /// Puts one message straight into a player's inbox, for the `message` command.
+    /// The delivery loop pushes it like any other notification.
+    pub fn send(
+        &mut self,
+        recipient: &str,
+        sender: &str,
+        title: &str,
+        body: &str,
+        day: i64,
+        now_ms: i64,
+    ) -> Result<i64, Error> {
+        self.conn.execute(
+            "insert into notifications (recipient, sender, title, body, day, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![recipient, sender, title, body, day, now_ms],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     /// Answers one notification, once, and lets the answer be answered in turn.
     /// Returns who heard it, or `None` when there is nothing left to reply to.
     pub fn reply(
