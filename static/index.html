@@ -83,6 +83,29 @@ h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .board .xp { text-align: right; font-variant-numeric: tabular-nums; min-width: 64px; }
 .board .xp b { display: block; font-size: 17px; color: var(--accent); }
 .board .xp span { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.records { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 10px; }
+.record { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 13px; }
+.record h3 {
+  margin: 0 0 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--dim); display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+}
+.record h3 em { font-style: normal; text-transform: none; letter-spacing: 0; font-weight: 400; white-space: nowrap; }
+.record .entry { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto auto; gap: 8px; align-items: baseline; }
+.record .entry + .entry { margin-top: 7px; }
+.record .place { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; text-align: center; }
+.record .entry a { color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.record .entry a:hover { text-decoration: underline; }
+.record .value { font-variant-numeric: tabular-nums; }
+.record .value small { color: var(--dim); font-size: 11px; margin-left: 3px; }
+.record .lead { font-size: 17px; font-weight: 700; }
+.record .lead .place { font-size: 15px; }
+.record .lead .value { color: var(--gold); }
+.record .lead .value small { font-weight: 400; }
+.record .chase { font-size: 13px; color: var(--dim); }
+.record .chase .value { color: var(--ink); font-weight: 600; }
+.record .bar { grid-column: 1 / -1; height: 6px; margin-top: 5px; }
+.record .detail { color: var(--dim); font-size: 12px; margin-top: 3px; padding-left: 28px; }
+.record .mine a { color: var(--accent); font-weight: 700; }
 .empty { color: var(--dim); text-align: center; padding: 24px 0; }
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
 .tabs a { font-size: 12px; padding: 5px 11px; border-radius: 999px; background: var(--h0); color: var(--dim); text-decoration: none; }
@@ -140,28 +163,30 @@ function tabs(active) {
   return `<nav class="tabs">${links.join("")}</nav>`;
 }
 
-function records(rows) {
+function records(rows, me) {
   const held = Object.fromEntries(rows.map(row => [row.window, row]));
   if (!rows.some(row => (row.holders ?? []).length)) return `<p class="empty">Nobody has earned any XP yet.</p>`;
-  return `<ol class="board">${Object.entries(RECORDS).map(([window, label]) => {
+  return `<div class="records">${Object.entries(RECORDS).map(([window, label]) => {
     const row = held[window];
     const [best, ...rest] = row?.holders ?? [];
     if (!best) return "";
-    const days = row.unit === "days";
+    const unit = row.unit === "days" ? "days" : "XP";
     const when = new Date(best.at).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
-    const chasing = rest.map((other, index) =>
-      `${index + 2}. <a href="#${encodeURIComponent(other.user)}">${esc(other.display)}</a> ${num(other.value)} ${days ? "days" : "XP"}` +
-      ` <span class="behind" title="behind ${esc(best.display)}">−${num(best.value - other.value)}</span>`
-    ).join("  ·  ");
-    return `<li>
-      <span class="rank">🏆</span>
-      <div>
-        <div class="line"><a class="name" href="#${encodeURIComponent(best.user)}">${esc(best.display)}</a><span class="lvl">${label}</span></div>
-        <div class="sub">${SINCE[window] ? `${SINCE[window]} ${when}` : when}${chasing ? `  ·  ${chasing}` : ""}</div>
-      </div>
-      <div class="xp"><b>${num(best.value)}</b><span>${days ? "days" : `${num(best.detail)} reviews`}</span></div>
-    </li>`;
-  }).join("")}</ol>`;
+    const entry = (holder, place, lead) => `
+      <div class="entry ${lead ? "lead" : "chase"}${holder.user === me ? " mine" : ""}">
+        <span class="place">${place}</span>
+        <a href="#${encodeURIComponent(holder.user)}">${esc(holder.display)}</a>
+        <span class="value">${num(holder.value)}${lead ? `<small>${unit}</small>` : ""}</span>
+        <span class="behind">${lead ? "" : `−${num(best.value - holder.value)}`}</span>
+        <div class="bar${lead ? " gold" : ""}"><i style="width:${pct(holder.value, best.value)}%"></i></div>
+      </div>`;
+    return `<article class="record">
+      <h3>${label}<em>${SINCE[window] ? `${SINCE[window]} ${when}` : when}</em></h3>
+      ${entry(best, "🏆", true)}
+      ${best.detail ? `<div class="detail">${num(best.detail)} reviews</div>` : ""}
+      ${rest.map((holder, index) => entry(holder, index + 2, false)).join("")}
+    </article>`;
+  }).join("")}</div>`;
 }
 
 function bests(player) {
@@ -169,7 +194,7 @@ function bests(player) {
     const record = player.records?.[window] ?? { xp: 0, reviews: 0 };
     return `<div class="stat"><b>${num(record.xp)}</b><span>${label.toLowerCase()} · ${num(record.reviews)} reviews</span></div>`;
   });
-  windows.push(`<div class="stat"><b>${player.lifetime.best_streak}</b><span>longest streak · days</span></div>`);
+  windows.push(`<div class="stat"><b>${player.lifetime.best_streak}</b><span>longest streak</span></div>`);
   windows.push(`<div class="stat"><b>${num(player.lifetime.days_active)}</b><span>days studied</span></div>`);
   return `<div class="stats">${windows.join("")}</div>`;
 }
@@ -421,7 +446,7 @@ async function render() {
       const held = await fetch("/api/records").then(r => r.json());
       document.title = "ankiquest · records";
       app.innerHTML = `<header><h1>Records</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header>
-        <section><h2>The best anyone has ever had</h2>${tabs("records")}${records(held)}</section>`;
+        <section><h2>The best anyone has ever had</h2>${tabs("records")}${records(held, me)}</section>`;
       return;
     }
     const period = currentPeriod();
