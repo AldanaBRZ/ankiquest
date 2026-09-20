@@ -669,6 +669,9 @@ pub struct Lifetime {
     pub hours: u64,
     pub days_active: u64,
     pub best_streak: u64,
+    /// When the longest streak ran out, and the first day ever studied.
+    pub best_streak_at: i64,
+    pub first_day_at: i64,
     pub best_day: u64,
     pub best_combo: u64,
     pub quests: u64,
@@ -921,6 +924,7 @@ pub fn compute(
 
     let mut totals = Totals::default();
     let mut streak = 0u64;
+    let mut best_streak_day = first;
     let mut freezes = 0u32;
     let mut frozen = BTreeSet::new();
     let mut recent: VecDeque<DayStats> = VecDeque::new();
@@ -963,7 +967,10 @@ pub fn compute(
         }
         if stats.is_some() {
             streak += 1;
-            totals.best_streak = totals.best_streak.max(streak);
+            if streak > totals.best_streak {
+                totals.best_streak = streak;
+                best_streak_day = day;
+            }
             if streak.is_multiple_of(u64::from(FREEZE_EVERY)) && freezes < MAX_FREEZES {
                 freezes += 1;
             }
@@ -1156,6 +1163,8 @@ pub fn compute(
             reviews: totals.reviews,
             hours: (totals.time_ms / 3_600_000) as u64,
             days_active: totals.days_active,
+            best_streak_at: clock.day_start_ms(best_streak_day),
+            first_day_at: clock.day_start_ms(first),
             best_streak: totals.best_streak,
             best_day: totals.best_day,
             best_combo: totals.best_combo,

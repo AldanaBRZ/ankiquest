@@ -395,46 +395,70 @@ async fn notifications(
 struct RecordHolder {
     user: String,
     display: String,
-    xp: u64,
-    reviews: u64,
+    value: u64,
+    detail: u64,
     at: i64,
 }
 
 #[derive(Debug, Serialize)]
 struct RecordBoard {
     window: String,
+    unit: &'static str,
     holders: Vec<RecordHolder>,
 }
 
-/// The best hour, day, week, month and year anyone here has ever had, with
-/// whoever came closest, so a near miss is visible rather than hidden.
+fn podium(
+    window: &str,
+    unit: &'static str,
+    profiles: &[Profile],
+    of: impl Fn(&Profile) -> (u64, u64, i64),
+) -> RecordBoard {
+    let mut holders: Vec<RecordHolder> = profiles
+        .iter()
+        .map(|player| (player, of(player)))
+        .filter(|(_, (value, _, _))| *value > 0)
+        .map(|(player, (value, detail, at))| RecordHolder {
+            user: player.user.clone(),
+            display: player.display.clone(),
+            value,
+            detail,
+            at,
+        })
+        .collect();
+    holders.sort_by_key(|holder| std::cmp::Reverse((holder.value, holder.detail)));
+    holders.truncate(PODIUM);
+    RecordBoard {
+        window: window.to_string(),
+        unit,
+        holders,
+    }
+}
+
+/// The best hour, day, week, month and year anyone here has ever had, plus the
+/// longest streak and the most days studied. Each names whoever came closest,
+/// so a near miss is visible rather than hidden.
 async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordBoard>> {
     let profiles = app.profiles();
-    Json(
-        Records::NAMES
-            .iter()
-            .map(|window| {
-                let mut holders: Vec<RecordHolder> = profiles
-                    .iter()
-                    .map(|player| (player, player.records.get(window)))
-                    .filter(|(_, record)| record.xp > 0)
-                    .map(|(player, record)| RecordHolder {
-                        user: player.user.clone(),
-                        display: player.display.clone(),
-                        xp: record.xp,
-                        reviews: record.reviews,
-                        at: record.at,
-                    })
-                    .collect();
-                holders.sort_by_key(|holder| std::cmp::Reverse((holder.xp, holder.reviews)));
-                holders.truncate(PODIUM);
-                RecordBoard {
-                    window: (*window).to_string(),
-                    holders,
-                }
+    let mut board: Vec<RecordBoard> = Records::NAMES
+        .iter()
+        .map(|window| {
+            podium(window, "xp", &profiles, |player| {
+                let record = player.records.get(window);
+                (record.xp, record.reviews, record.at)
             })
-            .collect(),
-    )
+        })
+        .collect();
+    board.push(podium("streak", "days", &profiles, |player| {
+        (
+            player.lifetime.best_streak,
+            0,
+            player.lifetime.best_streak_at,
+        )
+    }));
+    board.push(podium("days", "days", &profiles, |player| {
+        (player.lifetime.days_active, 0, player.lifetime.first_day_at)
+    }));
+    Json(board)
 }
 
 #[derive(Deserialize)]
@@ -1121,9 +1145,9 @@ mod tests {
         let board = records(State(app.clone())).await.0;
         assert_eq!(
             board.iter().map(|r| r.window.as_str()).collect::<Vec<_>>(),
-            Records::NAMES
+            [Records::NAMES.as_slice(), &["streak", "days"]].concat()
         );
-        for window in &board {
+        for window in board.iter().filter(|window| window.unit == "xp") {
             assert_eq!(
                 window
                     .holders
@@ -1135,13 +1159,39 @@ mod tests {
                 window.window
             );
             assert_eq!(window.holders[0].display, "Cerro");
-            assert!(window.holders[0].xp > window.holders[1].xp);
-            assert!(window.holders[1].reviews > 0);
+            assert!(window.holders[0].value > window.holders[1].value);
+            assert!(window.holders[1].detail > 0);
         }
         assert_eq!(
-            board[0].holders[0].reviews, 30,
+            board[0].holders[0].detail, 30,
             "all thirty land inside one hour"
         );
+        let lifetime: Vec<&RecordBoard> = board
+            .iter()
+            .filter(|window| window.unit == "days")
+            .collect();
+        assert_eq!(
+            lifetime
+                .iter()
+                .map(|w| w.window.as_str())
+                .collect::<Vec<_>>(),
+            vec!["streak", "days"]
+        );
+        for window in lifetime {
+            assert_eq!(
+                window.holders.len(),
+                2,
+                "{} names everyone who has studied",
+                window.window
+            );
+            assert!(
+                window
+                    .holders
+                    .iter()
+                    .all(|holder| holder.value == 1 && holder.detail == 0)
+            );
+            assert!(window.holders.iter().all(|holder| holder.at > 0));
+        }
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }

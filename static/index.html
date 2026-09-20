@@ -119,6 +119,8 @@ let weekEnds = 0;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
 const WINDOWS = { hour: "Best hour", day: "Best day", week: "Best week", month: "Best month", year: "Best year" };
+const RECORDS = { ...WINDOWS, streak: "Longest streak", days: "Days studied" };
+const SINCE = { streak: "ended", days: "since" };
 
 function currentView() {
   const name = location.pathname.replace(/\/+$/, "").split("/").pop();
@@ -139,31 +141,36 @@ function tabs(active) {
 }
 
 function records(rows) {
-  const held = Object.fromEntries(rows.map(row => [row.window, row.holders ?? []]));
-  if (!Object.values(held).some(holders => holders.length)) return `<p class="empty">Nobody has earned any XP yet.</p>`;
-  return `<ol class="board">${Object.entries(WINDOWS).map(([window, label]) => {
-    const [best, ...rest] = held[window] ?? [];
+  const held = Object.fromEntries(rows.map(row => [row.window, row]));
+  if (!rows.some(row => (row.holders ?? []).length)) return `<p class="empty">Nobody has earned any XP yet.</p>`;
+  return `<ol class="board">${Object.entries(RECORDS).map(([window, label]) => {
+    const row = held[window];
+    const [best, ...rest] = row?.holders ?? [];
     if (!best) return "";
+    const days = row.unit === "days";
     const when = new Date(best.at).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
-    const chasing = rest.map((row, index) =>
-      `${index + 2}. <a href="#${encodeURIComponent(row.user)}">${esc(row.display)}</a> ${num(row.xp)} <span class="behind">−${num(best.xp - row.xp)}</span>`
+    const chasing = rest.map((other, index) =>
+      `${index + 2}. <a href="#${encodeURIComponent(other.user)}">${esc(other.display)}</a> ${num(other.value)} <span class="behind">−${num(best.value - other.value)}</span>`
     ).join("  ·  ");
     return `<li>
       <span class="rank">🏆</span>
       <div>
         <div class="line"><a class="name" href="#${encodeURIComponent(best.user)}">${esc(best.display)}</a><span class="lvl">${label}</span></div>
-        <div class="sub">${when}${chasing ? `  ·  ${chasing}` : ""}</div>
+        <div class="sub">${SINCE[window] ? `${SINCE[window]} ${when}` : when}${chasing ? `  ·  ${chasing}` : ""}</div>
       </div>
-      <div class="xp"><b>${num(best.xp)}</b><span>${num(best.reviews)} reviews</span></div>
+      <div class="xp"><b>${num(best.value)}</b><span>${days ? "days" : `${num(best.detail)} reviews`}</span></div>
     </li>`;
   }).join("")}</ol>`;
 }
 
 function bests(player) {
-  return `<div class="stats">${Object.entries(WINDOWS).map(([window, label]) => {
+  const windows = Object.entries(WINDOWS).map(([window, label]) => {
     const record = player.records?.[window] ?? { xp: 0, reviews: 0 };
     return `<div class="stat"><b>${num(record.xp)}</b><span>${label.toLowerCase()} · ${num(record.reviews)} reviews</span></div>`;
-  }).join("")}</div>`;
+  });
+  windows.push(`<div class="stat"><b>${player.lifetime.best_streak}</b><span>longest streak · days</span></div>`);
+  windows.push(`<div class="stat"><b>${num(player.lifetime.days_active)}</b><span>days studied</span></div>`);
+  return `<div class="stats">${windows.join("")}</div>`;
 }
 
 function boardTitle(period) {
