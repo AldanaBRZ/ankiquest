@@ -1,7 +1,7 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 const SESSION_GAP_MS: i64 = 300_000;
 const MATURE_IVL: i64 = 21;
@@ -10,6 +10,9 @@ const FREEZE_EVERY: u32 = 7;
 const QUEST_XP: u64 = 50;
 const ALL_QUESTS_XP: u64 = 100;
 const RECENT_DAYS: usize = 14;
+/// Each further answer of the same card on the same day is worth this much of the
+/// last one, so repeating a card you keep failing cannot out-earn learning it once.
+const REPEAT_DECAY: f64 = 0.5;
 const HEATMAP_DAYS: i64 = 182;
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
@@ -687,9 +690,15 @@ fn collect_days(
     let mut combo = 0u64;
     let mut session_ms = 0i64;
     let mut prev: Option<(i64, i64)> = None;
+    let mut answers: HashMap<i64, i32> = HashMap::new();
+    let mut counted_day = None;
     for r in reviews {
         let day = clock.day(r.id);
         let hour = clock.hour(r.id);
+        if counted_day != Some(day) {
+            answers.clear();
+            counted_day = Some(day);
+        }
         let s = days.entry(day).or_default();
         let continues = prev.is_some_and(|(d, id)| d == day && r.id - id < SESSION_GAP_MS);
         if continues {
@@ -728,7 +737,10 @@ fn collect_days(
         if hour >= 23 || !morning {
             s.late = true;
         }
-        let xp = review_base_xp(r) * (1.0 + combo.min(100) as f64 / 200.0);
+        let again = answers.entry(r.cid).or_insert(0);
+        let xp =
+            review_base_xp(r) * REPEAT_DECAY.powi(*again) * (1.0 + combo.min(100) as f64 / 200.0);
+        *again += 1;
         s.review_xp += xp;
         earned.push((r.id, xp));
     }
@@ -1227,6 +1239,62 @@ mod tests {
             kind: 1,
         };
         assert_eq!(review_base_xp(&r), 15.0);
+    }
+
+    #[test]
+    fn a_card_answered_again_the_same_day_earns_less_each_time() {
+        let answer = |day: i64, index: i64, cid: i64| Review {
+            id: day * DAY_MS + NOON + index * 10_000,
+            cid,
+            last_ivl: 0,
+            time_ms: 5_000,
+            kind: 1,
+        };
+        let total = |earned: &[(i64, f64)]| earned.iter().map(|(_, xp)| xp).sum::<f64>();
+
+        let stuck: Vec<Review> = (0..6).map(|i| answer(1, i, 7)).collect();
+        let (_, _, repeated) = collect_days(&stuck, &utc());
+        for index in 1..repeated.len() {
+            assert!(
+                repeated[index].1 < repeated[index - 1].1,
+                "answer {index} should pay less than the one before it"
+            );
+        }
+        assert!(
+            total(&repeated) < 3.0 * repeated[0].1,
+            "one card cannot be farmed: {} from a first answer worth {}",
+            total(&repeated),
+            repeated[0].1
+        );
+
+        let varied: Vec<Review> = (0..6).map(|i| answer(1, i, 7 + i)).collect();
+        let (_, _, spread) = collect_days(&varied, &utc());
+        assert!(
+            total(&spread) > 2.0 * total(&repeated),
+            "studying six cards must beat answering one card six times"
+        );
+
+        let (_, _, fresh) = collect_days(&[answer(1, 0, 7), answer(2, 0, 7)], &utc());
+        assert_eq!(fresh[0].1, fresh[1].1, "a new day starts the card over");
+    }
+
+    #[test]
+    fn a_lapse_no_longer_pays_more_than_the_relearning_it_causes() {
+        let step = |index: i64, last_ivl: i64, kind: u8| Review {
+            id: DAY_MS + NOON + index * 600_000,
+            cid: 7,
+            last_ivl,
+            time_ms: 5_000,
+            kind,
+        };
+        let lapse = [step(0, 30, 1), step(1, 0, 2), step(2, 0, 2)];
+        let (_, _, earned) = collect_days(&lapse, &utc());
+        let relearning: f64 = earned[1..].iter().map(|(_, xp)| xp).sum();
+        assert!(
+            relearning < earned[0].1 / 2.0,
+            "picking a card back up is worth less than knowing it: {relearning} vs {}",
+            earned[0].1
+        );
     }
 
     #[test]
