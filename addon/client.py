@@ -26,7 +26,8 @@ def rows_to_reviews(rows):
 class Client:
     def __init__(self, url, user, token):
         self.base = url.strip().rstrip("/")
-        self.user = urllib.parse.quote(user.strip(), safe="")
+        self.name = user.strip()
+        self.user = urllib.parse.quote(self.name, safe="")
         self.token = token.strip()
 
     @property
@@ -44,6 +45,32 @@ class Client:
         )
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.load(response)
+
+    def leaderboard(self):
+        return self._request("/api/leaderboard")
+
+    def profile(self):
+        return self._request("/api/profile/" + self.user)
+
+    def notifications(self):
+        return self._request("/api/notifications/" + self.user)
+
+    def reply(self, notification, message):
+        answer = self._request(
+            "/api/reply/" + self.user,
+            {"notification": notification, "message": message},
+        )
+        return answer["sent_to"]
+
+    def deck_settings(self):
+        return self._request("/api/decks/" + self.user)
+
+    def save_deck_settings(self, shared, unshared, recipients):
+        decks = [
+            {"id": deck, "enabled": True, "recipients": list(recipients)} for deck in shared
+        ]
+        decks += [{"id": deck, "enabled": False, "recipients": []} for deck in unshared]
+        return self._request("/api/decks/" + self.user, {"decks": decks})
 
     def shared_decks(self):
         settings = self._request("/api/decks/" + self.user)
@@ -66,6 +93,18 @@ class Client:
             "/api/reviews/" + self.user,
             body,
         )
+
+
+def announcements(profile):
+    """What the last upload told other people about, straight from the response."""
+    lines = []
+    for item in profile.get("announced") or []:
+        people = item.get("recipients", 0)
+        lines.append(
+            "\U0001f4e3 %s \u2014 told %d %s"
+            % (item["deck"], people, "friend" if people == 1 else "friends")
+        )
+    return lines
 
 
 def reconcile(window_rows, recent, known, mark):
