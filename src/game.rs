@@ -85,6 +85,15 @@ impl Week {
         (week.year(), week.week())
     }
 
+    fn month_of(&self, ms: i64) -> (i32, u32) {
+        let date = self.shifted(ms).date();
+        (date.year(), date.month())
+    }
+
+    fn year_of(&self, ms: i64) -> i32 {
+        self.shifted(ms).date().year()
+    }
+
     /// When the week containing `ms` ends, in milliseconds since the epoch.
     pub fn end_after(&self, ms: i64) -> i64 {
         let date = self.shifted(ms).date();
@@ -457,6 +466,33 @@ pub struct HeatCell {
     pub frozen: bool,
 }
 
+/// XP earned in each leaderboard period. The hour counts review XP only, without
+/// the quest, achievement and streak bonuses that land on a whole Anki day.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct Periods {
+    pub hour: u64,
+    pub day: u64,
+    pub week: u64,
+    pub month: u64,
+    pub year: u64,
+    pub all: u64,
+}
+
+impl Periods {
+    pub const NAMES: [&'static str; 6] = ["hour", "day", "week", "month", "year", "all"];
+
+    pub fn get(&self, period: &str) -> u64 {
+        match period {
+            "hour" => self.hour,
+            "day" => self.day,
+            "month" => self.month,
+            "year" => self.year,
+            "all" => self.all,
+            _ => self.week,
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct Today {
     pub reviews: u64,
@@ -494,6 +530,7 @@ pub struct Profile {
     pub xp_into_level: u64,
     pub xp_for_next: u64,
     pub week_xp: u64,
+    pub periods: Periods,
     pub streak: u64,
     pub freezes: u32,
     pub at_risk: bool,
@@ -640,8 +677,12 @@ fn review_base_xp(r: &Review) -> f64 {
     }
 }
 
-fn collect_days(reviews: &[Review], clock: &Clock) -> (BTreeMap<i64, DayStats>, u64) {
+fn collect_days(
+    reviews: &[Review],
+    clock: &Clock,
+) -> (BTreeMap<i64, DayStats>, u64, Vec<(i64, f64)>) {
     let mut days: BTreeMap<i64, DayStats> = BTreeMap::new();
+    let mut earned: Vec<(i64, f64)> = Vec::new();
     let mut seen = HashSet::new();
     let mut combo = 0u64;
     let mut session_ms = 0i64;
@@ -687,9 +728,11 @@ fn collect_days(reviews: &[Review], clock: &Clock) -> (BTreeMap<i64, DayStats>, 
         if hour >= 23 || !morning {
             s.late = true;
         }
-        s.review_xp += review_base_xp(r) * (1.0 + combo.min(100) as f64 / 200.0);
+        let xp = review_base_xp(r) * (1.0 + combo.min(100) as f64 / 200.0);
+        s.review_xp += xp;
+        earned.push((r.id, xp));
     }
-    (days, combo)
+    (days, combo, earned)
 }
 
 pub fn compute(
@@ -700,7 +743,7 @@ pub fn compute(
     week: &Week,
     now_ms: i64,
 ) -> Profile {
-    let (days, last_combo) = collect_days(reviews, clock);
+    let (days, last_combo, earned) = collect_days(reviews, clock);
     let today = clock.day(now_ms);
     let seed = seed_of(user);
     let first = days.keys().next().copied().unwrap_or(today);
@@ -865,11 +908,29 @@ pub fn compute(
         .collect();
 
     let this_week = week.of(now_ms);
-    let week_xp = day_xp
-        .range(today - 9..=today)
-        .filter(|(d, _)| week.of(clock.day_start_ms(**d)) == this_week)
-        .map(|(_, xp)| xp)
-        .sum();
+    let this_month = week.month_of(now_ms);
+    let this_year = week.year_of(now_ms);
+    let in_period = |days_back: i64, matches: &dyn Fn(i64) -> bool| -> u64 {
+        day_xp
+            .range(today - days_back..=today)
+            .filter(|(d, _)| matches(clock.day_start_ms(**d)))
+            .map(|(_, xp)| xp)
+            .sum()
+    };
+    let week_xp = in_period(9, &|start| week.of(start) == this_week);
+    let periods = Periods {
+        hour: earned
+            .iter()
+            .filter(|(at, _)| *at > now_ms - 3_600_000 && *at <= now_ms)
+            .map(|(_, xp)| xp)
+            .sum::<f64>()
+            .round() as u64,
+        day: day_xp.get(&today).copied().unwrap_or(0),
+        week: week_xp,
+        month: in_period(40, &|start| week.month_of(start) == this_month),
+        year: in_period(400, &|start| week.year_of(start) == this_year),
+        all: xp_total,
+    };
 
     let now = days.get(&today).unwrap_or(&empty);
     Profile {
@@ -880,6 +941,7 @@ pub fn compute(
         xp_into_level,
         xp_for_next,
         week_xp,
+        periods,
         streak,
         freezes,
         at_risk: streak > 0 && !days.contains_key(&today),
@@ -964,6 +1026,52 @@ mod tests {
         assert_eq!(date_string(0), "1970-01-01");
         assert_eq!(date_string(20_714), "2026-09-18");
         assert_eq!(date_string(19_782), "2024-02-29");
+    }
+
+    #[test]
+    fn periods_narrow_from_lifetime_down_to_the_hour() {
+        let day = 20_022i64;
+        let now = day * DAY_MS + 12 * 3_600_000;
+        let review = |ms: i64| Review {
+            id: ms,
+            cid: ms,
+            last_ivl: 0,
+            time_ms: 5_000,
+            kind: 1,
+        };
+        let reviews = vec![
+            review((day - 200) * DAY_MS + 12 * 3_600_000),
+            review((day - 10) * DAY_MS + 12 * 3_600_000),
+            review(now - 2 * 3_600_000),
+            review(now - 30 * 60_000),
+        ];
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), now);
+        assert!(
+            p.periods.hour > 0,
+            "the last review counts towards this hour"
+        );
+        assert!(p.periods.day > p.periods.hour);
+        assert!(p.periods.week >= p.periods.day);
+        assert!(p.periods.month > p.periods.week);
+        assert!(p.periods.year > p.periods.month);
+        assert_eq!(p.periods.all, p.xp_total);
+        assert_eq!(p.periods.week, p.week_xp);
+        for name in Periods::NAMES {
+            assert!(p.periods.get(name) > 0, "{name} should have XP");
+        }
+        let quiet = compute(
+            "a",
+            "a",
+            &reviews,
+            &utc(),
+            &Week::default(),
+            now + 5 * 3_600_000,
+        );
+        assert_eq!(
+            quiet.periods.hour, 0,
+            "an hour without reviews earns nothing"
+        );
+        assert_eq!(quiet.periods.day, p.periods.day);
     }
 
     #[test]

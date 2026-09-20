@@ -84,6 +84,9 @@ h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .board .xp b { display: block; font-size: 17px; color: var(--accent); }
 .board .xp span { font-size: 11px; color: var(--dim); white-space: nowrap; }
 .empty { color: var(--dim); text-align: center; padding: 24px 0; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.tabs a { font-size: 12px; padding: 5px 11px; border-radius: 999px; background: var(--h0); color: var(--dim); text-decoration: none; }
+.tabs a.on { background: var(--accent); color: var(--card); font-weight: 600; }
 .deck-sharing button, .deck-sharing input { font: inherit; }
 .deck-sharing button { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
 .deck-sharing button:disabled { opacity: 0.55; cursor: default; }
@@ -111,7 +114,20 @@ const num = n => n.toLocaleString();
 const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 
 let weekEnds = 0;
-function weekTitle() {
+const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
+
+function currentPeriod() {
+  const name = location.pathname.replace(/\/+$/, "").split("/").pop();
+  return name in PERIODS ? name : "week";
+}
+
+function tabs(active) {
+  return `<nav class="tabs">${Object.entries(PERIODS).map(([name, label]) =>
+    `<a class="${name === active ? "on" : ""}" href="/${name}${location.hash}">${label}</a>`).join("")}</nav>`;
+}
+
+function boardTitle(period) {
+  if (period !== "week") return PERIODS[period];
   const left = weekEnds - Date.now();
   if (left <= 0) return "This week";
   const h = Math.floor(left / 3600000), d = Math.floor(h / 24);
@@ -121,7 +137,9 @@ function weekTitle() {
 
 function board(rows, me) {
   if (!rows.length) return `<p class="empty">Nobody has uploaded reviews yet.</p>`;
-  const lead = Math.max(1, rows[0].week_xp);
+  if (rows.every(row => (row.xp ?? row.week_xp) === 0)) return `<p class="empty">No XP in this period yet.</p>`;
+  const xpOf = row => row.xp ?? row.week_xp;
+  const lead = Math.max(1, xpOf(rows[0]));
   return `<ol class="board">${rows.map((r, i) => `
     <li class="${[r.user === me && "me", i === 0 && r.week_xp > 0 && "lead"].filter(Boolean).join(" ")}">
       <span class="rank">${["👑", "🥈", "🥉"][i] ?? i + 1}</span>
@@ -131,9 +149,9 @@ function board(rows, me) {
           ${r.streak > 0 ? `<span class="streak">🔥${r.streak}</span>` : ""}
           <span class="lvl">Lv ${r.level}</span>
         </div>
-        <div class="bar"><i style="width:${pct(r.week_xp, lead)}%"></i></div>
+        <div class="bar"><i style="width:${pct(xpOf(r), lead)}%"></i></div>
       </div>
-      <div class="xp"><b>${num(r.week_xp)}</b><span>${num(r.today_reviews)} today</span></div>
+      <div class="xp"><b>${num(xpOf(r))}</b><span>${num(r.today_reviews)} today</span></div>
     </li>`).join("")}
   </ol>`;
 }
@@ -179,7 +197,7 @@ ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for 
   <div class="sub">Finish all three for a +100 XP bonus.</div>
 </section>
 <section><h2>Last 26 weeks</h2><div class="heat">${heat(p.heatmap)}</div></section>
-<section><h2>${weekTitle()}</h2>${board(rows, p.user)}</section>
+<section><h2>${boardTitle(currentPeriod())}</h2>${tabs(currentPeriod())}${board(rows, p.user)}</section>
 <section><h2>Lifetime</h2><div class="stats">
   <div class="stat"><b>${num(p.lifetime.reviews)}</b><span>reviews</span></div>
   <div class="stat"><b>${num(p.lifetime.hours)}</b><span>hours</span></div>
@@ -322,8 +340,9 @@ async function render() {
   if (document.getElementById("deck-sharing").open) return;
   const user = decodeURIComponent(location.hash.slice(1));
   try {
+    const period = currentPeriod();
     const [rows, week] = await Promise.all([
-      fetch("/api/leaderboard").then(r => r.json()),
+      fetch("/api/leaderboard?period=" + period).then(r => r.json()),
       fetch("/api/week").then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
     weekEnds = week?.ends_at ?? 0;
@@ -341,7 +360,7 @@ async function render() {
     let me = "";
     try { me = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
     document.title = "ankiquest";
-    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${weekTitle()}</h2>${board(rows, me)}</section>`;
+    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${boardTitle(period)}</h2>${tabs(period)}${board(rows, me)}</section>`;
   } catch (e) {
     app.innerHTML = `<p class="empty">Could not reach the server.</p>`;
   }

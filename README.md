@@ -25,14 +25,14 @@ cargo run -- ankiquest.json
 }
 ```
 
-Open `/#<user>` for a profile, `/` for the leaderboard. The leaderboard week runs Monday to Sunday in `week_timezone` and turns over at `week_rollover_hour` for everyone at once; each Anki day counts towards the week it started in. Streaks, quests and "today" still follow each player's own Anki day.
+Open `/#<user>` for a profile, `/` for the leaderboard. `/hour`, `/day`, `/week`, `/month`, `/year` and `/all` show the same board for another period, as does `GET /api/leaderboard?period=<name>`; each standing carries `xp` for the requested period and `periods` with all of them. The hour is the last 60 minutes and counts review XP only, the day is each player's own Anki day, and month and year follow the calendar in `week_timezone`. The leaderboard week runs Monday to Sunday in `week_timezone` and turns over at `week_rollover_hour` for everyone at once; each Anki day counts towards the week it started in. Streaks, quests and "today" still follow each player's own Anki day.
 
 ## Getting reviews in
 
 Both clients upload new review rows after each answer and show XP feedback while reviewing. Sync itself can stay on AnkiWeb.
 
 - AnkiDroid: install the [fork](https://github.com/float3/Anki-Android/tree/ankiquest) and fill in Settings → ankiquest.
-- Desktop: zip the contents of `addon/` into `ankiquest.ankiaddon`, open it with Anki, then set `url`, `user` and `token` under Tools → Add-ons → ankiquest → Config.
+- Desktop: zip the contents of `addon/` into `ankiquest.ankiaddon`, open it with Anki, then fill in **Tools → ankiquest settings…**. The leaderboard appears under the deck list, with the period links it shares with the website.
 
 `POST /api/reviews/<user>` with `Authorization: Bearer <token>` and
 
@@ -50,11 +50,11 @@ Alternatively set `sync_base` to the `SYNC_BASE` of a self-hosted Anki sync serv
 
 ## Deck completion notifications
 
-Notifications are off by default for every deck. To set them up, send your deck list once: in AnkiDroid open **Settings → ankiquest → Deck completion notifications**, on desktop use **Tools → ankiquest deck notifications…**, which also opens your dashboard profile. There, choose **Manage deck notifications**, enter your upload token, enable the decks you want to share and pick the people to notify.
+Notifications are off by default for every deck. To set them up, tick the decks you want to share and the people to notify: in AnkiDroid under **Settings → ankiquest → Deck completion notifications**, on desktop under **Tools → ankiquest deck notifications…**, or on the dashboard through **Manage deck notifications** with your upload token. Ticking a deck ticks its subdecks.
 
 After you review at least one card in a deck and finish its scheduled work for the day, selected people receive a message such as “cerro has finished their Spanish studies for today.” A parent deck includes its subdecks. Daily limits are respected, and learning cards due later that day still count as unfinished work. Each deck is announced at most once per Anki day, using your Anki day rollover, even across retries or a server restart. Turning sharing on after finishing a deck does not send a retrospective announcement.
 
-Recipients receive announcements through the updated AnkiDroid client's background notification checks (roughly every 15 minutes, subject to Android's background limits), and through their configured ntfy topic when available (the server checks every 20 seconds). Deck names and recipient preferences are private to the authenticated player; only selected recipients receive the completion message. The dashboard keeps the token only while the settings window is open.
+Recipients receive announcements through the updated AnkiDroid client's background notification checks (roughly every 15 minutes, subject to Android's background limits), on desktop through the add-on's own check every five minutes, and through their configured ntfy topic when available (the server checks every 20 seconds). Each announcement can be answered once, with a cheer or your own words: from the Android notification itself, or from **Tools → ankiquest inbox…** on desktop. `POST /api/reply/<user>` with `{"notification": 1, "message": "Good job!"}` delivers the answer, which can be answered in turn. The upload response lists what it just announced, so the client that finished a deck can say who was told. Deck names and recipient preferences are private to the authenticated player; only selected recipients receive the completion message. The dashboard keeps the token only while the settings window is open.
 
 The server and the client used to study must both be updated. Clients only report progress for decks you share, so players who never enable a deck send no deck data. Sending the deck list again replaces the stored one, which removes deleted decks.
 

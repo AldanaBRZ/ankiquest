@@ -3,6 +3,7 @@
 import importlib.util
 import sqlite3
 import sys
+import time
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
@@ -183,24 +184,35 @@ class RefreshTests(unittest.TestCase):
             configured=True, base="https://example.test", user="cerro", upload=Mock(return_value={})
         )
         self.pending = [[(101, 1, 1, 1000, 1)]]
+        self.settings = {"url": "https://example.test", "user": "cerro", "token": "secret"}
         self.mw = SimpleNamespace(
             col=SimpleNamespace(get_config=lambda *args: 4, db=SimpleNamespace(all=self.read_rows)),
             pm=SimpleNamespace(profile={"ankiquestUploadedThrough": 100, "ankiquestSharedDecks": ["1"]}),
             taskman=SimpleNamespace(run_in_background=self.run_task),
             form=SimpleNamespace(menuTools=SimpleNamespace(addAction=Mock())),
+            addonManager=SimpleNamespace(
+                getConfig=lambda _: dict(self.settings), writeConfig=self.write_config
+            ),
+            progress=SimpleNamespace(timer=Mock()),
+            deckBrowser=SimpleNamespace(refresh=Mock()),
+            state="deckBrowser",
         )
         aqt = ModuleType("aqt")
         aqt.mw = self.mw
         aqt.gui_hooks = SimpleNamespace(**{name: [] for name in (
             "reviewer_did_answer_card", "operation_did_execute", "sync_did_finish", "profile_did_open",
+            "deck_browser_will_render_content", "webview_did_receive_js_message",
         )})
         utils = ModuleType("aqt.utils")
         utils.tooltip = Mock()
         utils.openLink = Mock()
         qt = ModuleType("aqt.qt")
-        qt.QAction = Mock()
+        qt.__getattr__ = lambda name: Mock()
         with patch.dict(sys.modules, {"aqt": aqt, "aqt.utils": utils, "aqt.qt": qt}):
             self.addon = load_module("ankiquest_test_addon", ADDON / "__init__.py", package=True)
+        self.addon.ui = SimpleNamespace(
+            settings_dialog=Mock(return_value=None), deck_dialog=Mock(), inbox_dialog=Mock()
+        )
         self.addon.client = lambda: self.api
         self.addon.snapshot = lambda _: {}
         self.addon.offset_west_min = lambda: -120
@@ -213,8 +225,23 @@ class RefreshTests(unittest.TestCase):
             return []
         return self.pending.pop(0) if self.pending else []
 
-    def run_task(self, work, done, uses_collection):
-        self.assertTrue(uses_collection)
+    def write_config(self, _, values):
+        self.settings = values
+
+    def with_board(self):
+        self.standings = [
+            {"user": "cerro", "display": "Cerro", "level": 3, "streak": 2, "week_xp": 90},
+        ]
+        self.inbox = [
+            {"id": 4, "title": "Deck complete", "body": "Hill finished Spanish.",
+             "created_at": int(time.time()), "sender": "hill", "replied": False},
+        ]
+        self.api.name = "cerro"
+        self.api.leaderboard = Mock(return_value=self.standings)
+        self.api.profile = Mock(return_value={"level": 3, "xp_into_level": 1, "xp_for_next": 2})
+        self.api.notifications = Mock(return_value=self.inbox)
+
+    def run_task(self, work, done, uses_collection=False):
         future = Future()
         try:
             future.set_result(work())
@@ -232,13 +259,76 @@ class RefreshTests(unittest.TestCase):
         self.addon.refresh(False)
         self.assertEqual(self.addon.deck_snapshots.call_args.kwargs, {"only": {"1"}})
 
-    def test_deck_notifications_menu_sends_full_catalog_and_opens_dashboard(self):
+    def test_deck_notifications_menu_sends_full_catalog_and_saves_the_choice(self):
         self.api.shared_decks = Mock(return_value=["1", "3"])
+        self.api.deck_settings = Mock(return_value={"decks": [], "recipients": []})
+        self.api.save_deck_settings = Mock()
+        self.addon.ui.deck_dialog.return_value = (["1", "3"], ["2"], ["hill"])
         self.addon.open_deck_notifications()
         self.assertEqual(self.addon.deck_snapshots.call_args.kwargs, {})
         self.assertTrue(self.api.upload.call_args.kwargs["catalog"])
+        self.assertTrue(self.api.upload.call_args.args[2], "a catalog upload never announces")
+        self.api.save_deck_settings.assert_called_once_with(["1", "3"], ["2"], ["hill"])
         self.assertEqual(self.mw.pm.profile["ankiquestSharedDecks"], ["1", "3"])
-        self.addon.openLink.assert_called_once_with("https://example.test/#cerro")
+
+    def test_sharing_without_anyone_to_tell_is_refused(self):
+        self.api.deck_settings = Mock(return_value={"decks": [], "recipients": []})
+        self.api.save_deck_settings = Mock()
+        self.addon.ui.deck_dialog.return_value = (["1"], [], [])
+        self.addon.open_deck_notifications()
+        self.api.save_deck_settings.assert_not_called()
+
+    def test_an_announced_completion_is_reported_locally(self):
+        self.api.upload = Mock(return_value={"announced": [{"deck": "Spanish", "recipients": 2}]})
+        self.addon.refresh(False)
+        message = self.addon.tooltip.call_args.args[0]
+        self.assertIn("Spanish", message)
+        self.assertIn("told 2 friends", message)
+
+    def test_a_quiet_upload_says_nothing(self):
+        self.addon.refresh(False)
+        self.addon.tooltip.assert_not_called()
+
+    def test_the_deck_list_shows_the_board_below_the_stats(self):
+        self.with_board()
+        self.addon.poll(quiet=True)
+        content = SimpleNamespace(stats="<div>heatmap</div>")
+        self.addon.on_deck_browser(None, content)
+        self.assertLess(content.stats.index("heatmap"), content.stats.index("Leaderboard"))
+        self.assertIn("Cerro", content.stats)
+        self.assertIn("ankiquest:inbox", content.stats)
+
+    def test_a_quiet_poll_only_remembers_what_a_loud_one_would_have_said(self):
+        self.with_board()
+        self.addon.poll(quiet=True)
+        self.addon.tooltip.assert_not_called()
+        self.assertEqual(self.mw.pm.profile["ankiquestInboxCursor"], 4)
+        self.assertEqual(self.mw.pm.profile["ankiquestLastOrder"], ["cerro"])
+
+    def test_a_new_message_is_announced_once(self):
+        self.with_board()
+        self.addon.poll(quiet=True)
+        self.addon.poll()
+        self.addon.tooltip.assert_not_called()
+        self.inbox.append({"id": 5, "title": "\U0001f4ac Hill", "body": "Good job!",
+                           "created_at": int(time.time()), "sender": "hill", "replied": False})
+        self.addon.poll()
+        self.assertIn("Good job!", self.addon.tooltip.call_args.args[0])
+
+    def test_picking_a_period_redraws_the_deck_list(self):
+        self.assertEqual((True, None), self.addon.on_js_message(False, "ankiquest:period:month", None))
+        self.assertEqual("month", self.settings["period"])
+        self.mw.deckBrowser.refresh.assert_called_once()
+        self.assertEqual(False, self.addon.on_js_message(False, "something:else", None))
+
+    def test_replying_marks_the_message_answered(self):
+        self.with_board()
+        self.api.reply = Mock(return_value="Hill")
+        status = Mock()
+        self.addon.send_reply(self.inbox[0], "Good job!", status)
+        self.api.reply.assert_called_once_with(4, "Good job!")
+        self.assertTrue(self.inbox[0]["replied"])
+        status.setText.assert_called_with("Sent to Hill")
 
     def test_snapshot_uses_same_clock_as_upload(self):
         self.addon.refresh(False)
