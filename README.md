@@ -50,6 +50,14 @@ stores the rows and returns the profile. `POST /api/preview/<user>` takes the sa
 
 Alternatively set `sync_base` to the `SYNC_BASE` of a self-hosted Anki sync server: every folder in it with a `collection.anki2` becomes a player, and collections are copied before reading and never written.
 
+## Streak freezes
+
+Streak freezes are off by default and start at zero. Open your dashboard profile, choose **Manage streak freezes**, and enter your AnkiQuest token to opt in. Complete all three daily quests while enabled to earn one freeze per Anki day, up to three stored. This replaces the automatic freeze awarded every seven study days. On an existing server, previously protected days and their streak/XP history are preserved; unused automatic freezes are cleared on the upgrade's Anki day. Enabling freezes does not award any for earlier quest completions, including earlier today; completing extra reviews or toggling the setting cannot claim that day's reward again. Completing the quests with a full inventory does not bank a fourth freeze for later.
+
+When an Anki day ends with no reviews, one available freeze automatically protects an existing streak. A protected day preserves the streak count without adding a study day. Consecutive missed days each need one freeze; once there is none available, the next missed day resets the streak. Turning freezes off pauses earning and spending, keeps stored freezes, and leaves previously protected days intact. Enabling them again cannot repair days missed while they were off. Day boundaries follow the player's Anki timezone and rollover, not midnight on the server.
+
+`GET /api/streak-freezes/<user>` and `POST` with `{"enabled":true}` or `{"enabled":false}` require that player's bearer token and return `{"enabled":true,"freezes":0,"capacity":3}`. The server calculates the balance from reviews and the saved preference timeline; clients cannot set it. The public profile includes `freezes_enabled`, `stored_freezes`, and `freeze_earned_today`. Its existing `freezes` field is the available balance (zero while disabled), so older clients do not mistake paused stock for active protection. Review previews can show a projected reward but do not save it. As with XP and quests, importing or deleting review history recalculates the result.
+
 ## Deck completion notifications
 
 Notifications are off by default for every deck. To set them up, tick the decks you want to share and the people to notify: in AnkiDroid under **Settings → ankiquest → Deck completion notifications**, on desktop under **Tools → ankiquest deck notifications…**, or on the dashboard through **Manage deck notifications** with your upload token. Ticking a deck ticks its subdecks.

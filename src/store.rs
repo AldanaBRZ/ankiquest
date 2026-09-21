@@ -73,6 +73,7 @@ impl Store {
              ) without rowid;",
         )?;
         crate::decks::initialize(&conn)?;
+        crate::freezes::initialize(&conn)?;
         Ok(Self {
             conn,
             scratch,

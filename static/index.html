@@ -127,11 +127,64 @@ dialog.deck-sharing::backdrop { background: #0008; }
 .deck-sharing .recipients { margin: 12px 0 0 20px; }
 .deck-sharing .apply-subdecks { margin-top: 8px; }
 .deck-sharing .error { color: var(--fire); }
+.freeze-panel { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.freeze-heading { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.freeze-heading h3 { display: flex; gap: 8px; align-items: center; margin: 0; font-size: 14px; }
+.freeze-badge { padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--ice) 15%, transparent); color: var(--ink); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.freeze-panel[data-state=off] .freeze-badge { color: var(--dim); background: var(--h0); }
+.freeze-main { display: flex; gap: 16px; align-items: center; margin-top: 8px; }
+.freeze-main strong { font-size: 14px; font-variant-numeric: tabular-nums; }
+.freeze-main p { margin: 3px 0 0; font-size: 12px; color: var(--dim); }
+.freeze-display { display: flex; flex-shrink: 0; gap: 4px; }
+.freeze-slot { width: 38px; height: 52px; display: grid; place-items: center; }
+.freeze-slot svg { width: 36px; height: 46px; overflow: visible; }
+.freeze-slot .shell { fill: color-mix(in srgb, var(--ice) 5%, var(--card)); stroke: var(--line); stroke-width: 1.6; stroke-dasharray: 3 3; }
+.freeze-slot .facet, .freeze-slot .flame, .freeze-slot .glint { opacity: 0; }
+.freeze-slot.filled { background: radial-gradient(ellipse, #50beef25, transparent 70%); }
+.freeze-slot.filled .shell { fill: #259dd9; stroke: #1575ae; stroke-dasharray: none; }
+.freeze-slot.filled .facet, .freeze-slot.filled .flame, .freeze-slot.filled .glint { opacity: 1; }
+.freeze-slot .facet-left { fill: #70d9fa; }
+.freeze-slot .facet-top { fill: #b3efff; }
+.freeze-slot .facet-right { fill: #1382c7; }
+.freeze-slot .flame { fill: #edfcff; }
+.freeze-slot .glint { fill: none; stroke: white; stroke-width: 1.4; stroke-linecap: round; }
+.freeze-display.off .filled { filter: saturate(0.35); opacity: 0.65; }
+.freeze-button, .freeze-settings input { font: inherit; }
+.freeze-button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.freeze-button:hover { border-color: var(--accent); }
+.freeze-button:focus-visible, .freeze-settings input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.freeze-button:disabled { cursor: default; opacity: 0.55; }
+.freeze-button.primary { background: #246bb3; border-color: #246bb3; color: #fff; }
+dialog.freeze-settings { width: min(480px, calc(100% - 32px)); max-height: 85vh; padding: 22px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--ink); }
+dialog.freeze-settings::backdrop { background: #0008; }
+.freeze-settings h3 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
+.freeze-settings .intro { margin: 4px 0 16px; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+.freeze-settings .rules { display: grid; gap: 10px; margin: 0 0 18px; padding-left: 20px; font-size: 13px; }
+.freeze-settings .rules li::marker { color: var(--ice); }
+.freeze-settings .token-label { display: block; font-size: 13px; font-weight: 600; }
+.freeze-settings input[type=password] { width: 100%; margin-top: 6px; padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); color: var(--ink); }
+.freeze-settings .token-help { margin: 8px 0 12px; font-size: 12px; color: var(--dim); }
+.freeze-settings .freeze-balance { display: flex; gap: 16px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+.freeze-settings .freeze-balance strong { display: block; font-size: 16px; }
+.freeze-settings .freeze-toggle { display: flex; gap: 12px; align-items: center; padding: 14px; margin: 6px 0 14px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.freeze-settings .freeze-toggle input { width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--accent); }
+.freeze-settings .freeze-toggle strong { display: block; font-size: 14px; }
+.freeze-settings .freeze-toggle small { display: block; margin-top: 2px; color: var(--dim); font-size: 12px; }
+.freeze-settings .actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.freeze-settings .status { min-height: 20px; margin: 12px 0 0; font-size: 13px; color: var(--dim); }
+.freeze-settings .status.error { color: var(--fire); }
+@media (max-width: 420px) {
+  .freeze-main, .freeze-settings .freeze-balance { gap: 10px; }
+  .freeze-slot { width: 30px; }
+  .freeze-slot svg { width: 30px; }
+  dialog.freeze-settings { padding: 18px; }
+}
 </style>
 </head>
 <body>
 <main id="app"><p class="empty">Loading</p></main>
 <dialog id="deck-sharing" class="deck-sharing" aria-labelledby="deck-sharing-title"></dialog>
+<dialog id="streak-freezes" class="freeze-settings" aria-labelledby="freeze-title" aria-describedby="freeze-intro"></dialog>
 <script>
 const app = document.getElementById("app");
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -139,6 +192,8 @@ const num = n => n.toLocaleString();
 const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 
 let weekEnds = 0;
+let renderId = 0;
+const settingsOpen = () => document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
 const WINDOWS = { hour: "Best hour", day: "Best day", week: "Best week", month: "Best month", year: "Best year" };
@@ -238,6 +293,41 @@ function heat(cells) {
     `<i class="${c.frozen ? "frozen" : "l" + level(c.reviews)}" title="${c.date}: ${c.frozen ? "streak freeze" : num(c.reviews) + " reviews, " + num(c.xp) + " XP"}"></i>`).join("");
 }
 
+const freezeCount = value => Math.max(0, Math.min(3, Math.floor(Number(value) || 0)));
+
+function freezeSlots(count, enabled) {
+  return `<div class="freeze-display${enabled ? "" : " off"}" role="img" aria-label="${count} of 3 streak freezes ${enabled ? "ready" : "saved; protection off"}">
+    ${Array.from({ length: 3 }, (_, i) => `<span class="freeze-slot${i < count ? " filled" : ""}">
+      <svg viewBox="0 0 40 48" aria-hidden="true" focusable="false">
+        <path class="shell" d="M20 2 33 11 36 30 26 44H14L4 30 7 11Z"/>
+        <path class="facet facet-left" d="M20 2 16 17 14 44 4 30 7 11Z"/>
+        <path class="facet facet-top" d="M20 2 33 11 25 17 16 17 7 11Z"/>
+        <path class="facet facet-right" d="m25 17 8-6 3 19-10 14-2-12Z"/>
+        <path class="flame" d="M21 13c2 7-6 9-3 14 2-1 4-4 4-6 5 4 7 7 5 12-2 5-10 7-14 2-5-6 3-11 4-15 1 2 1 3 1 4 3-3 2-7 3-11Z"/>
+        <path class="glint" d="m10 12 6-5m-6 9-1 6m18 15-3 4"/>
+      </svg>
+    </span>`).join("")}
+  </div>`;
+}
+
+function streakFreezes(player) {
+  const count = freezeCount(player.stored_freezes ?? player.freezes), enabled = player.freezes_enabled === true;
+  const state = !enabled ? "off" : count === 3 ? "full" : count ? "ready" : "empty";
+  const badge = !enabled ? "Off" : count === 3 ? "Full" : "On";
+  const title = enabled ? `${count} of 3 freezes ready` : count ? `${count} of 3 freezes saved` : "A little backup for your streak";
+  const detail = !enabled
+    ? count ? "Protection is off. Your saved freezes are kept." : "Opt in, then finish all three daily quests to earn a freeze."
+    : count === 3 ? player.freeze_earned_today ? "You earned a freeze today. You're fully stocked." : "Fully stocked. Each freeze can protect one missed Anki day."
+    : player.freeze_earned_today ? "You earned a freeze today. Earn another with tomorrow's quests."
+    : player.quests.length > 0 && player.quests.every(quest => quest.done) ? "Today's quests are already complete. Earn a freeze with tomorrow's quests."
+    : "Finish all three daily quests to earn one freeze. At most one per day.";
+  return `<div class="freeze-panel" data-state="${state}">
+    <div class="freeze-heading"><h3>Streak freezes <span class="freeze-badge">${badge}</span></h3>
+      <button type="button" id="manage-freezes" class="freeze-button">Manage streak freezes</button></div>
+    <div class="freeze-main">${freezeSlots(count, enabled)}<div><strong>${title}</strong><p>${detail}</p></div></div>
+  </div>`;
+}
+
 function view(p, rows) {
   const unlocked = p.achievements.filter(a => a.unlocked).length;
   const achievements = [...p.achievements].sort((a, b) => !!b.unlocked - !!a.unlocked || pct(b.progress, b.target) - pct(a.progress, a.target));
@@ -258,7 +348,7 @@ function view(p, rows) {
 ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for today's reviews.</section>` : ""}
 <section class="stats">
   <div class="stat fire"><b>${p.streak}</b><span>day streak</span></div>
-  <div class="stat ice"><b>${p.freezes}</b><span>freezes</span></div>
+  <div class="stat ice"><b>${freezeCount(p.stored_freezes ?? p.freezes)}/3</b><span>${p.freezes_enabled ? "freezes ready" : "freezes paused"}</span></div>
   <div class="stat"><b>${num(p.today.reviews)}</b><span>reviews today</span></div>
   <div class="stat"><b>${num(p.today.xp)}</b><span>XP today</span></div>
 </section>
@@ -268,6 +358,7 @@ ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for 
     <div class="bar ${q.done ? "ok" : ""}"><i style="width:${pct(q.progress, q.target)}%"></i></div>
   </div>`).join("")}
   <div class="sub">Finish all three for a +100 XP bonus.</div>
+  ${streakFreezes(p)}
 </section>
 <section><h2>Last 26 weeks</h2><div class="heat">${heat(p.heatmap)}</div></section>
 <section><h2>${boardTitle(currentPeriod())}</h2>${tabs(currentPeriod())}${board(rows, p.user)}</section>
@@ -286,6 +377,8 @@ ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for 
 }
 
 function openDeckSharing(user, display) {
+  if (settingsOpen()) return;
+  renderId++;
   const dialog = document.getElementById("deck-sharing");
   let token = "";
   let closed = false;
@@ -432,18 +525,141 @@ function openDeckSharing(user, display) {
     token = "";
     controller.abort();
     dialog.innerHTML = "";
+    render();
+  }, { once: true });
+  dialog.showModal();
+}
+
+function openStreakFreezes(user, display) {
+  if (settingsOpen()) return;
+  renderId++;
+  const dialog = document.getElementById("streak-freezes");
+  const controller = new AbortController();
+  let token = "", closed = false, busy = false;
+  dialog.innerHTML = `<h3 id="freeze-title">Streak protection</h3>
+    <p id="freeze-intro" class="intro">A little backup for ${esc(display)}'s study streak. Off by default.</p>
+    <ul class="rules">
+      <li><strong>Earn your ice.</strong> Start with 0 freezes. After opting in, finish all three daily quests to earn one per Anki day. Hold up to 3.</li>
+      <li><strong>Keep your streak.</strong> While protection is on, one freeze is used automatically for each ended Anki day with no reviews.</li>
+      <li><strong>Pause whenever you like.</strong> Turning it off pauses earning and use; saved freezes stay. Quests completed before you opt in do not earn freezes.</li>
+    </ul>
+    <div id="freeze-content"><form id="freeze-unlock">
+      <label class="token-label" for="freeze-token">Your AnkiQuest token</label>
+      <input id="freeze-token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="freeze-token-help">
+      <p id="freeze-token-help" class="token-help">Use the token from your AnkiQuest settings. It is kept only while this window is open.</p>
+      <button type="submit" class="freeze-button primary">Load my settings</button>
+    </form></div>
+    <p id="freeze-status" class="status" role="status" aria-live="polite"></p>
+    <div class="actions"><button type="button" id="freeze-close" class="freeze-button">Close</button></div>`;
+  const content = dialog.querySelector("#freeze-content");
+  const status = dialog.querySelector("#freeze-status");
+  const say = (message, error = false) => {
+    status.textContent = message;
+    status.className = "status" + (error ? " error" : "");
+  };
+  const request = async body => {
+    const response = await fetch("/api/streak-freezes/" + encodeURIComponent(user), {
+      method: body === undefined ? "GET" : "POST",
+      headers: { Authorization: "Bearer " + token, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      cache: "no-store", signal: controller.signal,
+    });
+    if (!response.ok) {
+      if (response.status === 401) throw new Error(body === undefined
+        ? "That token was not accepted for this player. Check it and try again."
+        : "That token is no longer accepted. Close and reopen this window to enter it again.");
+      throw new Error("Could not load or save streak protection. Please try again.");
+    }
+    const data = await response.json();
+    if (typeof data.enabled !== "boolean" || !Number.isInteger(data.freezes) || data.freezes < 0 || data.freezes > 3 || data.capacity !== 3) {
+      throw new Error("The server returned unexpected freeze settings. Please try again.");
+    }
+    return data;
+  };
+  const showSettings = data => {
+    content.innerHTML = `<form id="freeze-preferences">
+      <div class="freeze-balance">${freezeSlots(data.freezes, data.enabled)}
+        <div><strong>${data.freezes} of 3 freezes ${data.enabled ? "ready" : "saved"}</strong><span class="sub">${data.enabled ? data.freezes === 3 ? "Fully stocked" : "Earn more with daily quests" : "Protection is off"}</span></div></div>
+      <label class="freeze-toggle" for="freeze-enabled">
+        <input id="freeze-enabled" type="checkbox" role="switch" ${data.enabled ? "checked" : ""}>
+        <span><strong>Use streak protection</strong><small>Earn and automatically use your freezes while on.</small></span>
+      </label>
+      <button type="submit" class="freeze-button primary">Save preference</button>
+    </form>`;
+    const form = content.querySelector("form");
+    form.querySelector("#freeze-enabled").addEventListener("change", () => say("Unsaved change. Save to apply it."));
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (busy || closed) return;
+      busy = true;
+      const enabled = form.querySelector("#freeze-enabled").checked;
+      const controls = [...form.querySelectorAll("input, button")];
+      controls.forEach(control => { control.disabled = true; });
+      say("Saving…");
+      try {
+        const saved = await request({ enabled });
+        if (!closed) {
+          showSettings(saved);
+          say(saved.enabled ? "Streak protection is on." : "Streak protection is off. Your saved freezes are kept.");
+          content.querySelector("button").focus();
+        }
+      } catch (error) {
+        if (!closed) say(error.message, true);
+      } finally {
+        busy = false;
+        controls.forEach(control => { control.disabled = false; });
+      }
+    });
+  };
+  content.querySelector("form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (busy || closed) return;
+    const input = dialog.querySelector("#freeze-token");
+    token = input.value.trim();
+    if (!token) { input.focus(); return; }
+    input.value = "";
+    busy = true;
+    const button = event.target.querySelector("button");
+    button.disabled = true;
+    say("Loading settings…");
+    try {
+      const data = await request();
+      if (!closed) { showSettings(data); say(""); content.querySelector("#freeze-enabled").focus(); }
+    } catch (error) {
+      token = "";
+      if (!closed) { say(error.message, true); input.focus(); }
+    } finally {
+      busy = false;
+      button.disabled = false;
+    }
+  });
+  dialog.querySelector("#freeze-close").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => {
+    closed = true;
+    token = "";
+    controller.abort();
+    dialog.innerHTML = "";
+    render().then(() => {
+      if (!settingsOpen() && decodeURIComponent(location.hash.slice(1)) === user &&
+          (document.activeElement === document.body || document.activeElement?.id === "manage-freezes")) {
+        document.getElementById("manage-freezes")?.focus();
+      }
+    });
   }, { once: true });
   dialog.showModal();
 }
 
 async function render() {
-  if (document.getElementById("deck-sharing").open) return;
+  if (settingsOpen()) return;
+  const id = ++renderId;
+  const canRender = () => id === renderId && !settingsOpen();
   const user = decodeURIComponent(location.hash.slice(1));
   try {
     let me = "";
     try { me = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
     if (currentView() === "records") {
       const held = await fetch("/api/records").then(r => r.json());
+      if (!canRender()) return;
       document.title = "ankiquest · records";
       app.innerHTML = `<header><h1>Records</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header>
         <section><h2>The best anyone has ever had</h2>${tabs("records")}${records(held, me)}</section>`;
@@ -459,16 +675,20 @@ async function render() {
       const res = await fetch("/api/profile/" + encodeURIComponent(user));
       if (res.ok) {
         const p = await res.json();
+        if (!canRender()) return;
         document.title = `${p.display} · level ${p.level}`;
         try { localStorage.setItem("ankiquestPlayer", p.user); } catch (e) {}
         app.innerHTML = view(p, rows);
         document.getElementById("manage-decks").addEventListener("click", () => openDeckSharing(p.user, p.display));
+        document.getElementById("manage-freezes").addEventListener("click", () => openStreakFreezes(p.user, p.display));
         return;
       }
     }
+    if (!canRender()) return;
     document.title = "ankiquest";
     app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${boardTitle(period)}</h2>${tabs(period)}${board(rows, me)}</section>`;
   } catch (e) {
+    if (!canRender()) return;
     app.innerHTML = `<p class="empty">Could not reach the server.</p>`;
   }
 }
