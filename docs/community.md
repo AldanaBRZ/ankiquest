@@ -2,7 +2,7 @@
 
 Open **Community** from the leaderboard, or visit `/community`. On a private server, first unlock the site with a member token or the shared website password. Public servers can still be explored without signing in. Choose a player, year, and, in the daily calendar, a month. See [private access](private-site.md) for server setup.
 
-For **Reminders** or **Challenges**, select **Connect account** and use the player's existing AnkiQuest bearer token. The page keeps the token in memory only; disconnecting or leaving the page clears it. Each account can manage only its own preferences and invitations.
+For **Reminders** or **Challenges**, the updated AnkiDroid dashboard connects with the account already saved in the app. **Settings → ankiquest → Community reminders** opens the reminder controls directly. In a standalone browser, select **Connect account** and use the player's existing AnkiQuest bearer token. Bearer tokens stay in page memory only, never URLs, local storage, or session storage. Supported servers issue a secure account cookie for use across pages; older servers keep the connection only while the page is open. Disconnecting stops private requests until you explicitly connect again. Each account can manage only its own preferences and invitations.
 
 These features become available after the updated server is installed and restarted.
 

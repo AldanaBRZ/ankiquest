@@ -257,12 +257,151 @@ function closePersonalSettings() {
     const dialog=document.getElementById(id);if(dialog.open)dialog.close();
   }
 }
-addEventListener("ankiquest:locked",()=>{closePersonalSettings();app.innerHTML="";});
-addEventListener("ankiquest:identity",event=>{const user=event.detail.user;if(knownMember&&knownMember!==user)closePersonalSettings();knownMember=user;});
-addEventListener("pagehide",()=>{privatePageHidden=true;closePersonalSettings();});
+addEventListener("ankiquest:locked",()=>{settingsTokens.clear();delete window.ankiquestSession;closePersonalSettings();app.innerHTML="";});
+addEventListener("ankiquest:identity",event=>{const user=event.detail.user;if(knownMember&&knownMember!==user){settingsTokens.clear();closePersonalSettings();}knownMember=user;});
+addEventListener("pagehide",()=>{privatePageHidden=true;settingsTokens.clear();closePersonalSettings();});
 addEventListener("pageshow",()=>{privatePageHidden=false;});
 const winnerState = { data: null, scope: "shared", metric: "day", error: false, request: 0 };
 const settingsOpen = () => AnkiQuestAvatars.isOpen() || document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open || document.getElementById("notification-preferences").open;
+// Page memory only: share credentials between settings dialogs, never between players.
+const settingsTokens = new Map();
+let nativeSettingsCleared = false, previousNativeSettings = nativeSettingsIdentity();
+addEventListener("ankiquest-auth", () => {
+  const identity = nativeSettingsIdentity();
+  nativeSettingsCleared = !identity;
+  if (!identity || identity !== previousNativeSettings) {
+    settingsTokens.clear();
+    const recipientDialog = document.getElementById("notification-preferences");
+    if (recipientDialog?.open) recipientDialog.close();
+  }
+  previousNativeSettings = identity;
+});
+function nativeSettingsToken(user) {
+  const session = window.ankiquestSession;
+  return session?.user === user && typeof session.token === "string" && session.token.trim()
+    ? session.token.trim() : "";
+}
+function nativeSettingsIdentity() {
+  const session = window.ankiquestSession;
+  return typeof session?.user === "string" && session.user && typeof session.token === "string" && session.token.trim()
+    ? JSON.stringify([session.user, session.token.trim()]) : "";
+}
+function settingsToken(user) {
+  return nativeSettingsToken(user) || settingsTokens.get(user) || "";
+}
+function forgetSettingsToken(user, failedToken) {
+  if (settingsTokens.get(user) === failedToken) settingsTokens.delete(user);
+  if (nativeSettingsToken(user) === failedToken) delete window.ankiquestSession;
+}
+
+function connectSettingsAuth({ user, form, input, controller, load, clear, show, say, useSession }) {
+  let busy = false, unlocked = false, generation = 0, queued = false;
+  let activeToken = "", fromNative = false, observedNative = nativeSettingsIdentity(), cookieSession = null;
+  const content = form.parentElement;
+  const button = form.querySelector("button");
+  const reset = (message = "") => {
+    if (controller.signal.aborted) return;
+    unlocked = false;
+    activeToken = "";
+    fromNative = false;
+    cookieSession = null;
+    observedNative = nativeSettingsIdentity();
+    clear();
+    input.value = "";
+    input.required = true;
+    form.hidden = false;
+    content.replaceChildren(form);
+    say(message, Boolean(message));
+    input.focus();
+  };
+  const unlock = async (token, session = null) => {
+    if (busy || unlocked || controller.signal.aborted) return;
+    if (!token && !session) { input.focus(); return; }
+    const attempt = generation;
+    const startedNative = Boolean(token) && nativeSettingsToken(user) === token;
+    activeToken = token;
+    fromNative = startedNative;
+    busy = true;
+    input.value = "";
+    form.hidden = true;
+    button.disabled = true;
+    say("Loading settings…");
+    try {
+      const data = await load(token, session);
+      if (!controller.signal.aborted && attempt === generation) {
+        if (startedNative && nativeSettingsToken(user) !== token) { queued = true; return; }
+        // Native credentials remain owned by the host, so clearing its session
+        // cannot leave a second copy available for a later dialog.
+        if (startedNative || session || nativeSettingsToken(user) === token) {
+          settingsTokens.delete(user);
+        } else {
+          const connected = await AnkiQuestSite.connectMember(user, token, () => !controller.signal.aborted && attempt === generation);
+          if (controller.signal.aborted || attempt !== generation) return;
+          nativeSettingsCleared = false;
+          useSession(connected);
+          if (connected.token) settingsTokens.set(user, connected.token);
+          else { settingsTokens.delete(user); cookieSession = connected; }
+        }
+        show(data);
+        unlocked = true;
+        say("");
+      }
+    } catch (error) {
+      if (!controller.signal.aborted && attempt === generation && error.name !== "AbortError") {
+        form.hidden = false;
+        input.required = !settingsToken(user) && !cookieSession;
+        say(error.message, true);
+        (input.required ? input : button).focus();
+      }
+    } finally {
+      busy = false;
+      button.disabled = false;
+      if (queued || observedNative !== nativeSettingsIdentity()) {
+        queued = false;
+        autoUnlock();
+      }
+    }
+  };
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    const token = input.value.trim() || settingsToken(user);
+    unlock(token, token ? null : cookieSession);
+  });
+  const autoUnlock = () => {
+    if (controller.signal.aborted) return;
+    // An explicit host clear also revokes a cookie session loaded before the first host event.
+    if (nativeSettingsCleared && (cookieSession || activeToken)) {
+      generation++;
+      reset();
+      return;
+    }
+    const native = nativeSettingsToken(user), identity = nativeSettingsIdentity();
+    if (identity !== observedNative) {
+      observedNative = identity;
+      if (activeToken && native === activeToken) {
+        fromNative = true;
+        settingsTokens.delete(user);
+      } else if (activeToken || fromNative || native) {
+        generation++;
+        settingsTokens.delete(user);
+        reset();
+      }
+    }
+    const token = settingsToken(user);
+    if (!token || unlocked) return;
+    if (busy) queued = true;
+    else unlock(token);
+  };
+  // The native WebView can supply its saved account after the dialog has opened.
+  addEventListener("ankiquest-auth", autoUnlock, { signal: controller.signal });
+  autoUnlock();
+  AnkiQuestSite.member(user).then(session => {
+    if (controller.signal.aborted || nativeSettingsCleared || !session || busy || unlocked || settingsToken(user)) return;
+    cookieSession = session;
+    unlock("", session);
+  });
+  return reset;
+}
 let notificationDialogSession = 0;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
@@ -550,6 +689,7 @@ function openDeckSharing(user, display) {
   const dialog = document.getElementById("deck-sharing");
   let token = "", session = null;
   let closed = false;
+  let resetAuth = () => {};
   const controller = new AbortController();
   dialog.innerHTML = `<h3 id="deck-sharing-title">Deck notifications · ${esc(display)}</h3>
     <p class="sub">Notify selected people once per deck each Anki day, after you finish all scheduled cards, including learning cards due later today.</p>
@@ -568,18 +708,31 @@ function openDeckSharing(user, display) {
     status.className = error ? "error" : "sub";
   };
   const request = async (body) => {
+    const requestToken = token, requestSession = session;
     const response = await fetch("/api/decks/" + encodeURIComponent(user), {
       method: body ? "POST" : "GET",
-      headers: AnkiQuestSite.ownerHeaders(token ? {user,token} : session, body),
+      headers: AnkiQuestSite.ownerHeaders(requestToken ? {user, token: requestToken} : requestSession, body),
       ...(body ? { body: JSON.stringify(body) } : {}),
       cache: "no-store", signal: controller.signal,
     });
+    if (controller.signal.aborted || requestToken !== token || requestSession !== session) throw new DOMException("Settings changed.", "AbortError");
     if (!response.ok) {
-      if (response.status === 401) { await AnkiQuestSite.checkAccess(response); throw new Error("This account could not be verified. Close and reconnect with your own token."); }
+      if (response.status === 401 || response.status === 403) {
+        if (!requestToken) await AnkiQuestSite.checkAccess(response);
+        if (controller.signal.aborted || requestToken !== token || requestSession !== session) throw new DOMException("Settings changed.", "AbortError");
+        forgetSettingsToken(user, requestToken);
+        const message = body === undefined
+          ? "That token was not accepted for this player. Check it and try again."
+          : "That token is no longer accepted. Enter it again to reload your settings.";
+        resetAuth(message);
+        throw new Error(message);
+      }
       if (response.status === 400 || response.status === 404) throw new Error("The deck or recipient list has changed. Close and reopen this window to refresh it.");
       throw new Error("Could not save or load deck notifications. Please try again.");
     }
-    return response.json();
+    const data = await response.json();
+    if (controller.signal.aborted || requestToken !== token || requestSession !== session) throw new DOMException("Settings changed.", "AbortError");
+    return data;
   };
   const showDecks = data => {
     data.decks.sort((a, b) => {
@@ -664,30 +817,14 @@ function openDeckSharing(user, display) {
       say("Saving…");
       try {
         await request({ decks, nudges: form.querySelector("#nudge-enabled").checked });
-        if (!closed) say("Preferences saved.");
+        if (!closed && form.isConnected) say("Preferences saved.");
       } catch (error) {
-        if (!closed) say(error.message, true);
+        if (!closed && form.isConnected && error.name !== "AbortError") say(error.message, true);
       } finally {
         controls.forEach(control => { control.disabled = false; });
       }
     });
   };
-  content.querySelector("form").addEventListener("submit", async event => {
-    event.preventDefault();
-    token = dialog.querySelector("#deck-token").value.trim();
-    dialog.querySelector("#deck-token").value = "";
-    const button = event.target.querySelector("button");
-    button.disabled = true;
-    say("Loading decks…");
-    try {
-      const data = await request();
-      if (!closed) { session = await AnkiQuestSite.connectMember(user, token); token = session.token || ""; if (!closed) { showDecks(data); say(""); } }
-    } catch (error) {
-      if (!closed) say(error.message, true);
-    } finally {
-      button.disabled = false;
-    }
-  });
   dialog.querySelector("#deck-close").addEventListener("click", () => dialog.close());
   dialog.addEventListener("close", () => {
     closed = true;
@@ -698,13 +835,12 @@ function openDeckSharing(user, display) {
     render();
   }, { once: true });
   dialog.showModal();
-  AnkiQuestSite.member(user).then(async identity => {
-    if (closed || !identity || token) return;
-    session = identity;
-    content.querySelector("form").hidden = true;
-    say("Loading your deck preferences…");
-    try { const data = await request(); if (!closed) { showDecks(data); say(""); } }
-    catch (error) { if (!closed) { content.querySelector("form").hidden = false; say(error.message, true); } }
+  resetAuth = connectSettingsAuth({
+    user, form: content.querySelector("form"), input: dialog.querySelector("#deck-token"), controller,
+    load: (value, identity) => { token = value; session = identity; return request(); },
+    clear: () => { token = ""; session = null; },
+    useSession: identity => { token = identity.token || ""; session = identity; },
+    show: data => { showDecks(data); content.querySelector("input, button")?.focus(); }, say,
   });
 }
 
@@ -906,6 +1042,7 @@ function openStreakFreezes(user, display) {
   const dialog = document.getElementById("streak-freezes");
   const controller = new AbortController();
   let token = "", session = null, closed = false, busy = false;
+  let resetAuth = () => {};
   dialog.innerHTML = `<h3 id="freeze-title">Streak protection</h3>
     <p id="freeze-intro" class="intro">A little backup for ${esc(display)}'s study streak. Off by default.</p>
     <ul class="rules">
@@ -928,19 +1065,29 @@ function openStreakFreezes(user, display) {
     status.className = "status" + (error ? " error" : "");
   };
   const request = async body => {
+    const requestToken = token, requestSession = session;
     const response = await fetch("/api/streak-freezes/" + encodeURIComponent(user), {
       method: body === undefined ? "GET" : "POST",
-      headers: AnkiQuestSite.ownerHeaders(token ? {user,token} : session, body),
+      headers: AnkiQuestSite.ownerHeaders(requestToken ? {user, token: requestToken} : requestSession, body),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: "no-store", signal: controller.signal,
     });
+    if (controller.signal.aborted || requestToken !== token || requestSession !== session) throw new DOMException("Settings changed.", "AbortError");
     if (!response.ok) {
-      if (response.status === 401) { await AnkiQuestSite.checkAccess(response); throw new Error(body === undefined
-        ? "That token was not accepted for this player. Check it and try again."
-        : "Your connection has expired. Close and reconnect with your own token."); }
+      if (response.status === 401 || response.status === 403) {
+        if (!requestToken) await AnkiQuestSite.checkAccess(response);
+        if (controller.signal.aborted || requestToken !== token || requestSession !== session) throw new DOMException("Settings changed.", "AbortError");
+        forgetSettingsToken(user, requestToken);
+        const message = body === undefined
+          ? "That token was not accepted for this player. Check it and try again."
+          : "That token is no longer accepted. Enter it again to reload your settings.";
+        resetAuth(message);
+        throw new Error(message);
+      }
       throw new Error("Could not load or save streak protection. Please try again.");
     }
     const data = await response.json();
+    if (controller.signal.aborted || requestToken !== token || requestSession !== session) throw new DOMException("Settings changed.", "AbortError");
     if (typeof data.enabled !== "boolean" || !Number.isInteger(data.freezes) || data.freezes < 0 || data.freezes > 3 || data.capacity !== 3) {
       throw new Error("The server returned unexpected freeze settings. Please try again.");
     }
@@ -968,41 +1115,19 @@ function openStreakFreezes(user, display) {
       say("Saving…");
       try {
         const saved = await request({ enabled });
-        if (!closed) {
+        if (!closed && form.isConnected) {
           showSettings(saved);
           say(saved.enabled ? "Streak protection is on." : "Streak protection is off. Your saved freezes are kept.");
           content.querySelector("button").focus();
         }
       } catch (error) {
-        if (!closed) say(error.message, true);
+        if (!closed && form.isConnected && error.name !== "AbortError") say(error.message, true);
       } finally {
         busy = false;
         controls.forEach(control => { control.disabled = false; });
       }
     });
   };
-  content.querySelector("form").addEventListener("submit", async event => {
-    event.preventDefault();
-    if (busy || closed) return;
-    const input = dialog.querySelector("#freeze-token");
-    token = input.value.trim();
-    if (!token) { input.focus(); return; }
-    input.value = "";
-    busy = true;
-    const button = event.target.querySelector("button");
-    button.disabled = true;
-    say("Loading settings…");
-    try {
-      const data = await request();
-      if (!closed) { session = await AnkiQuestSite.connectMember(user, token); token = session.token || ""; if (!closed) { showSettings(data); say(""); content.querySelector("#freeze-enabled").focus(); } }
-    } catch (error) {
-      token = "";
-      if (!closed) { say(error.message, true); input.focus(); }
-    } finally {
-      busy = false;
-      button.disabled = false;
-    }
-  });
   dialog.querySelector("#freeze-close").addEventListener("click", () => dialog.close());
   dialog.addEventListener("close", () => {
     closed = true;
@@ -1018,14 +1143,12 @@ function openStreakFreezes(user, display) {
     });
   }, { once: true });
   dialog.showModal();
-  AnkiQuestSite.member(user).then(async identity => {
-    if (closed || !identity || token || busy) return;
-    session = identity; busy = true;
-    content.querySelector("form").hidden = true;
-    say("Loading your streak protection…");
-    try { const data = await request(); if (!closed) { showSettings(data); say(""); } }
-    catch (error) { if (!closed) { content.querySelector("form").hidden = false; say(error.message, true); } }
-    finally { busy = false; }
+  resetAuth = connectSettingsAuth({
+    user, form: content.querySelector("form"), input: dialog.querySelector("#freeze-token"), controller,
+    load: (value, identity) => { token = value; session = identity; return request(); },
+    clear: () => { token = ""; session = null; },
+    useSession: identity => { token = identity.token || ""; session = identity; },
+    show: data => { showSettings(data); content.querySelector("#freeze-enabled").focus(); }, say,
   });
 }
 

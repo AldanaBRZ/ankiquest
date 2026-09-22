@@ -15,20 +15,23 @@
   const kpi = (label, value, detail, tone = "") => `<div class="kpi ${escape(tone)}"><span class="kpi-label">${escape(label)}</span><strong>${escape(value)}</strong><span>${escape(detail)}</span></div>`;
   let statusPromise, lastIdentity, statusEpoch = 0;
   const memberUser = access => typeof access?.member?.user === "string" ? access.member.user : null;
-  async function status(fresh = false) {
+  function publishIdentity(access) {
+    const user = memberUser(access);
+    if (lastIdentity !== user) {
+      lastIdentity = user;
+      dispatchEvent(new CustomEvent("ankiquest:identity", {detail: {user}}));
+    }
+    if (user) setProfile(user);
+  }
+  async function status(fresh = false, notify = true) {
     if (fresh) { statusPromise = undefined; statusEpoch++; }
     if (!statusPromise) statusPromise = fetch("/auth/status", {cache: "no-store", credentials: "same-origin"})
       .then(response => response.ok ? response.json() : null).catch(() => null);
     const epoch = statusEpoch, pending = statusPromise;
     const access = await pending;
-    if (epoch !== statusEpoch) return status();
+    if (epoch !== statusEpoch) return status(false, notify);
     if (access) {
-      const user = memberUser(access);
-      if (lastIdentity !== user) {
-        lastIdentity = user;
-        dispatchEvent(new CustomEvent("ankiquest:identity", {detail: {user}}));
-      }
-      if (user) setProfile(user);
+      if (notify) publishIdentity(access);
     } else statusPromise = undefined;
     return access;
   }
@@ -40,28 +43,94 @@
     ...(session?.token ? {Authorization: "Bearer " + session.token} : {}),
     ...(body === undefined ? {} : {"Content-Type": "application/json", "X-Ankiquest-CSRF": "1"}),
   });
-  // A token is kept only for older servers which do not issue an owner session.
-  async function connectMember(user, token) {
-    const owner = await fetch("/api/community/reminders/" + encodeURIComponent(user), {cache: "no-store", headers: {Authorization: "Bearer " + token}});
-    if (!owner.ok) throw new Error("This token was not accepted for the selected player. Check the player and token.");
-    const response = await fetch("/auth/session", {method: "POST", credentials: "same-origin", headers: {Authorization: "Bearer " + token, "X-Ankiquest-CSRF": "1"}});
-    if (response.status === 404) return {user, token};
-    if (!response.ok) throw new Error("Could not connect your account. Check the token and try again.");
-    const access = await status(true), identity = memberUser(access);
-    if (identity && identity !== user) {
-      try { await disconnectMember(); }
-      finally { dispatchEvent(new Event("ankiquest:locked")); }
-      throw new Error("This token belongs to a different player. Reconnect with your own player and token.");
-    }
-    return identity ? {user: identity} : {user, token};
-  }
-  async function disconnectMember() {
-    const response = await fetch("/auth/logout", {method: "POST", headers: {"X-Ankiquest-CSRF": "1"}});
+  // Sign-in and logout both mutate the same cookie. Keep their responses in order.
+  let connectionEpoch = 0, connectionTail = Promise.resolve();
+  const serializeConnection = operation => {
+    const result = connectionTail.then(operation, operation);
+    connectionTail = result.catch(() => {});
+    return result;
+  };
+  const nativeAccount = () => {
+    const value = window.ankiquestSession;
+    return typeof value?.user === "string" && value.user && typeof value.token === "string" && value.token.trim()
+      ? {user: value.user, token: value.token.trim()} : null;
+  };
+  const nativeKey = value => value ? JSON.stringify([value.user, value.token]) : "";
+  const changedConnection = () => new DOMException("The account changed while connecting.", "AbortError");
+  const sessionRequest = (path, token) => fetch(path, {method: "POST", credentials: "same-origin", headers: {
+    ...(token ? {Authorization: "Bearer " + token} : {}), "X-Ankiquest-CSRF": "1",
+  }});
+  const invalidateStatus = () => { statusPromise = undefined; statusEpoch++; };
+  async function logoutSession() {
+    const response = await sessionRequest("/auth/logout");
     if (!response.ok && response.status !== 404) throw new Error("Could not disconnect. Check your connection and try again.");
-    statusPromise = undefined; lastIdentity = undefined; statusEpoch++;
-    try { localStorage.removeItem("ankiquestPlayer"); } catch (_) {}
-    dispatchEvent(new Event("ankiquest:locked"));
-    return refreshAccess(true);
+    invalidateStatus();
+  }
+  async function reconcileNativeAccount(epoch) {
+    // An already-sent response can install its cookie even after the caller changes
+    // account. Restore the latest host identity before allowing another mutation.
+    while (epoch === connectionEpoch) {
+      const native = nativeAccount(), key = nativeKey(native);
+      let accepted = false;
+      if (native) {
+        const owner = await fetch("/api/community/reminders/" + encodeURIComponent(native.user), {cache: "no-store", headers: {Authorization: "Bearer " + native.token}});
+        if (epoch !== connectionEpoch) return;
+        if (nativeKey(nativeAccount()) !== key) continue;
+        if (owner.ok) {
+          const response = await sessionRequest("/auth/session", native.token);
+          accepted = response.ok;
+        }
+      }
+      if (epoch !== connectionEpoch) return;
+      if (!accepted) await logoutSession();
+      if (nativeKey(nativeAccount()) !== key) continue;
+      await status(true);
+      if (nativeKey(nativeAccount()) === key) return;
+    }
+  }
+  // A token is kept only for older servers which do not issue an owner session.
+  async function connectMember(user, token, current = () => true) {
+    const started = connectionEpoch;
+    const owner = await fetch("/api/community/reminders/" + encodeURIComponent(user), {cache: "no-store", headers: {Authorization: "Bearer " + token}});
+    if (started !== connectionEpoch || !current()) throw changedConnection();
+    if (!owner.ok) throw new Error("This token was not accepted for the selected player. Check the player and token.");
+    const epoch = ++connectionEpoch;
+    const active = () => epoch === connectionEpoch && current();
+    return serializeConnection(async () => {
+      if (!active()) {
+        if (epoch === connectionEpoch) await reconcileNativeAccount(epoch);
+        throw changedConnection();
+      }
+      const response = await sessionRequest("/auth/session", token);
+      if (!active()) {
+        if (response.status !== 404 && epoch === connectionEpoch) await reconcileNativeAccount(epoch);
+        throw changedConnection();
+      }
+      if (response.status === 404) return {user, token};
+      if (!response.ok) throw new Error("Could not connect your account. Check the token and try again.");
+      const access = await status(true, false), identity = memberUser(access);
+      if (!active()) {
+        if (epoch === connectionEpoch) await reconcileNativeAccount(epoch);
+        throw changedConnection();
+      }
+      if (identity && identity !== user) {
+        try { await logoutSession(); }
+        finally { dispatchEvent(new Event("ankiquest:locked")); }
+        throw new Error("This token belongs to a different player. Reconnect with your own player and token.");
+      }
+      publishIdentity(access);
+      return identity ? {user: identity} : {user, token};
+    });
+  }
+  function disconnectMember() {
+    connectionEpoch++;
+    return serializeConnection(async () => {
+      await logoutSession();
+      lastIdentity = undefined;
+      try { localStorage.removeItem("ankiquestPlayer"); } catch (_) {}
+      dispatchEvent(new Event("ankiquest:locked"));
+      return refreshAccess(true);
+    });
   }
   const loginURL = () => "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
   async function refreshAccess(fresh = false) {

@@ -172,7 +172,7 @@
   let nativeIdentity = nativeIdentityKey();
   window.addEventListener("ankiquest-auth", () => {
     const next = nativeIdentityKey();
-    if (next !== nativeIdentity) closeEditor?.();
+    if (!next || next !== nativeIdentity) closeEditor?.();
     nativeIdentity = next;
   });
   window.addEventListener("ankiquest:locked", () => {

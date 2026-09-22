@@ -220,6 +220,12 @@ async function main() {
     assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Removing the native account clears the editor');
     assert.equal(await page.evaluate(() => activePreviewURLs.size), 0);
 
+    await open('cerro', 'qa-cerro-token'); await choose(landscape);
+    await page.evaluate(() => { window.ankiquestSession = null; dispatchEvent(new CustomEvent('ankiquest-auth')); });
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'An explicit empty native account also clears an editor opened without a native identity');
+    assert.equal(await page.evaluate(() => activePreviewURLs.size), 0, 'Explicit empty native account releases the selected picture');
+    checks.push('explicit empty native identity clears existing manual or cookie-account editor');
+
     await open('cerro', 'qa-cerro-token'); await choose(landscape); await refresh();
     const lockedMetadata = gate(); pauseMetadata = lockedMetadata;
     await page.evaluate(() => { window.lockedRefresh = AnkiQuestAvatars.refresh(); }); await lockedMetadata.reached;

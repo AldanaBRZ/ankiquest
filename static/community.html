@@ -59,7 +59,8 @@ const amount = value => Math.max(0, Number(value) || 0);
 const months = Array.from({length:12}, (_, i) => new Intl.DateTimeFormat(undefined,{month:"long",timeZone:"UTC"}).format(new Date(Date.UTC(2024,i,1))));
 const now = new Date();
 const initialPeriod = new URLSearchParams(location.search).get("period");
-const state = { data:null, view:"challenges", challengeId:null, year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:["day","week","month"].includes(initialPeriod)?initialPeriod:"day", winnerScope:"shared", winnerMetric:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, activity:null, activityError:"", activityLoading:false, activityEpoch:0, activityDays:90, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"", challengeSaving:false, challengeRequest:null, challengeStatus:"", challengeError:false };
+const state = { data:null, view:"challenges", challengeId:null, year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:["day","week","month"].includes(initialPeriod)?initialPeriod:"day", winnerScope:"shared", winnerMetric:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, nativeSession:false, nativeDisconnected:false, reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, activity:null, activityError:"", activityLoading:false, activityEpoch:0, activityDays:90, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"", challengeSaving:false, challengeRequest:null, challengeStatus:"", challengeError:false };
+let nativeAccountCleared = false;
 const reminderDefinitions = [
   ["gentle_daily","Gentle daily reminder","A friendly nudge when you haven’t studied yet."],
   ["urgent_streak","Unprotected streak warning","An urgent reminder near your cutoff when no freeze is left or freeze protection is switched off."],
@@ -301,8 +302,10 @@ function renderActivityItem(item) {
 
 async function request(url,options={},owner=null) {
   const response=await fetch(url,{cache:"no-store",...options});
-  if(owner&&state.session===owner&&(!options.method||options.method==="GET")&&[401,403].includes(response.status)) {
-    clearPrivate();state.connectionError="Your personal connection could not be verified. Reconnect to continue.";renderPrivate();
+  if(owner&&state.session===owner&&(response.status===401||((!options.method||options.method==="GET")&&response.status===403))) {
+    const saved=window.ankiquestSession;
+    if(saved?.user===owner.user&&typeof saved.token==="string"&&saved.token.trim()===owner.token)delete window.ankiquestSession;
+    state.nativeDisconnected=true;clearPrivate();state.connectionError="Your personal connection could not be verified. Reconnect to continue.";renderPrivate();
   }
   await AnkiQuestSite.checkAccess(response,options);
   if(!response.ok) { let message="";try { const body=await response.json();message=typeof body.error==="string"?body.error:typeof body.message==="string"?body.message:""; }catch(_){} const error=new Error(response.status===401?"Your account could not be verified. Connect again with your own token.":response.status===403?"This account does not have access to that action.":message||`The server could not complete this request (${response.status}). Please try again.`);error.status=response.status;throw error; }
@@ -320,17 +323,19 @@ async function loadPrivate() {
 function connect() {
   if(!state.data) return;
   if(state.session) { showView("reminders");return; }
+  state.nativeDisconnected=false;nativeAccountCleared=false;
+  if(connectNativeSession())return;
   state.authEpoch++;
   $("auth-user").innerHTML=playerOptions(state.player||state.data.players[0]?.user||"");
   $("auth-token").value="";$("auth-message").textContent="";$("auth-message").className="status";$("auth-submit").disabled=!state.data.players.length;
   if(!state.data.players.length) $("auth-message").textContent="No player accounts are available yet.";
   $("auth-dialog").showModal();
 }
-addEventListener("ankiquest:locked", clearPrivate);
+addEventListener("ankiquest:locked",()=>{state.nativeDisconnected=true;delete window.ankiquestSession;clearPrivate();});
 function clearPrivate() {
   AnkiQuestAvatars.close();
   state.authEpoch++;state.privateEpoch++;state.reminderEpoch++;state.activityEpoch++;
-  state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;
+  state.nativeSession=false;state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;
   state.challenges=null;state.activity=null;state.activityError="";state.activityLoading=false;state.privateLoading=false;state.privateError="";
   state.challengeStatus="";state.challengeError=false;state.challengeSaving=false;state.connectionError="";
   $("activity-count").hidden=true;$("connect-button").textContent="Connect account";
@@ -338,11 +343,28 @@ function clearPrivate() {
   if($("challenge-dialog").open)$("challenge-dialog").close();
   $("challenge-create-content").innerHTML="";renderPrivate();
 }
-async function disconnect() { try { await AnkiQuestSite.disconnectMember();clearPrivate(); } catch(error) { const banner=document.querySelector(".auth-status");if(banner){let status=banner.querySelector('[role="alert"]');if(!status){status=document.createElement("p");status.setAttribute("role","alert");banner.append(status);}status.textContent=error.message;} } }
+async function disconnect() { state.nativeDisconnected=true;try { await AnkiQuestSite.disconnectMember();clearPrivate(); } catch(error) { const banner=document.querySelector(".auth-status");if(banner){let status=banner.querySelector('[role="alert"]');if(!status){status=document.createElement("p");status.setAttribute("role","alert");banner.append(status);}status.textContent=error.message;} } }
+function connectNativeSession() {
+  if(!state.data||state.nativeDisconnected)return false;
+  const saved=window.ankiquestSession;
+  if(typeof saved?.user!=="string"||!saved.user||typeof saved.token!=="string"||!saved.token.trim()) {
+    if(state.nativeSession)clearPrivate();
+    return false;
+  }
+  const candidate={user:saved.user,token:saved.token.trim()};
+  if(state.session&&(!state.nativeSession||(state.session.user===candidate.user&&state.session.token===candidate.token)))return true;
+  clearPrivate();state.session=candidate;state.nativeSession=true;
+  $("connect-button").textContent=name(candidate.user);$("connect-button").className="auth-name";
+  loadPrivate();loadActivity();
+  return true;
+}
+addEventListener("ankiquest-auth",()=>{const saved=window.ankiquestSession;nativeAccountCleared=!(typeof saved?.user==="string"&&saved.user&&typeof saved.token==="string"&&saved.token.trim());if(nativeAccountCleared)clearPrivate();else connectNativeSession();});
 async function restoreMember() {
-  if(state.connecting)return;
-  const session=await AnkiQuestSite.member();
-  if(state.connecting)return;
+  if(state.connecting||nativeAccountCleared||connectNativeSession())return;
+  const saved=window.ankiquestSession;
+  if(typeof saved?.user==="string"&&saved.user&&typeof saved.token==="string"&&saved.token.trim())return;
+  const epoch=state.authEpoch,session=await AnkiQuestSite.member();
+  if(state.connecting||epoch!==state.authEpoch)return;
   if(!session){if(state.session&&!state.session.token)clearPrivate();return;}
   if(state.session?.user===session.user)return;
   clearPrivate();state.session=session;$("connect-button").textContent=name(session.user);
@@ -424,7 +446,7 @@ async function loadData() {
     updateSelectors();
     $("history-note").innerHTML=data.meta.start_date?`<strong>${data.meta.start_source==="configured"?"Server started":"History available from"} ${esc(date(data.meta.start_date))}</strong>${data.meta.start_source==="configured"?"Every study day adds to the story":"Earliest retained activity; may predate this server"}`:'<strong>Your community starts here</strong>The first study session begins the record';
     $("scoring-note").textContent=`${data.meta.scoring_note||""} Competition timezone: ${data.meta.time_zone||"server timezone"}, cutoff ${String(data.meta.rollover_hour??0).padStart(2,"0")}:00. Results finalize after a ${data.meta.grace_hours??24}-hour sync allowance.`;
-    renderAll();
+    renderAll();connectNativeSession();
   } catch(error) { if(id!==state.request)return;$("load-error").className="notice error";$("load-error").innerHTML=`${esc(error.message)} <button type="button" data-retry>Try again</button>`;$("load-error").hidden=false;if(!state.data) $("view-overview").innerHTML=empty("The community record is unavailable.","Try again to load your community’s progress.");else{state.year=Number(state.data.meta.year)||state.year;state.month=Number(state.data.meta.month)||state.month;updateSelectors();renderAll();} }
   finally { if(id===state.request){$("community-app").setAttribute("aria-busy","false");$("loading-status").hidden=true;} }
 }
@@ -473,7 +495,7 @@ $("auth-dialog").addEventListener("close",()=>{state.authEpoch++;$("auth-token")
 $("auth-form").addEventListener("submit",async event=>{
   event.preventDefault();const user=$("auth-user").value,token=$("auth-token").value.trim();if(!user||!token)return;
   const epoch=++state.authEpoch;state.connecting=true;$("auth-token").value="";$("auth-submit").disabled=true;$("auth-message").className="status";$("auth-message").textContent="Connecting…";
-  try { const candidate={user,token},reminders=await privateRequest("reminders",undefined,candidate);if(epoch!==state.authEpoch||!$("auth-dialog").open)return;const session=await AnkiQuestSite.connectMember(user,token);if(epoch!==state.authEpoch||!$("auth-dialog").open)return;state.session=session;state.reminders=reminders;$("auth-dialog").close();$("connect-button").textContent=name(user);$("connect-button").className="auth-name";await Promise.all([loadPrivate(),loadActivity()]); }
+  try { const candidate={user,token},reminders=await privateRequest("reminders",undefined,candidate);if(epoch!==state.authEpoch||!$("auth-dialog").open)return;const session=await AnkiQuestSite.connectMember(user,token,()=>epoch===state.authEpoch&&$("auth-dialog").open);if(epoch!==state.authEpoch||!$("auth-dialog").open)return;state.session=session;state.reminders=reminders;$("auth-dialog").close();$("connect-button").textContent=name(user);$("connect-button").className="auth-name";await Promise.all([loadPrivate(),loadActivity()]); }
   catch(error){if(epoch===state.authEpoch&&$("auth-dialog").open){$("auth-message").className="status error";$("auth-message").textContent=error.message.replace("Disconnect and connect again with the correct token.","Check the token and try again.");}}
   finally{state.connecting=false;$("auth-submit").disabled=false;}
 });
