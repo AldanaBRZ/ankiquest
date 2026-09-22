@@ -201,6 +201,24 @@ dialog.freeze-settings::backdrop { background: #0008; }
 .freeze-settings .actions { display: flex; justify-content: flex-end; margin-top: 12px; }
 .freeze-settings .status { min-height: 20px; margin: 12px 0 0; font-size: 13px; color: var(--dim); }
 .freeze-settings .status.error { color: var(--fire); }
+.notification-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.deck-sharing .notification-actions button { min-height: 44px; }
+.notification-settings input[type=text] { width: 100%; margin-top: 6px; padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); color: var(--ink); }
+.notification-settings .account-label { display: block; margin-bottom: 14px; font-size: 13px; font-weight: 600; }
+.notification-settings .receive-toggle, .notification-settings .mute-person { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
+.notification-settings .receive-toggle { margin-bottom: 14px; }
+.notification-settings .receive-toggle input, .notification-settings .mute-person input { width: 20px; height: 20px; flex: 0 0 20px; margin: 1px 0 0; accent-color: var(--accent); }
+.notification-settings .receive-toggle strong { display: block; font-size: 14px; }
+.notification-settings .receive-toggle small, .notification-settings .mute-person small { display: block; margin-top: 3px; font-size: 12px; color: var(--dim); }
+.notification-settings fieldset { min-width: 0; margin: 0 0 16px; padding: 0; border: 0; }
+.notification-settings legend { padding: 0; font-size: 14px; font-weight: 600; }
+.notification-settings .mute-person { margin-top: 8px; font-size: 13px; cursor: pointer; }
+.notification-settings .mute-person:has(input:disabled) { opacity: 0.65; cursor: default; }
+.notification-settings .scope-note { margin: 12px 0; font-size: 12px; color: var(--dim); }
+.notification-settings .rules { margin-bottom: 16px; }
+.notification-settings .rules li::marker { color: var(--accent); }
+.notification-settings :focus-visible, .deck-sharing .notification-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.notification-settings h3, .notification-settings .scope-note { overflow-wrap: anywhere; }
 @media (max-width: 420px) {
   .freeze-main, .freeze-settings .freeze-balance { gap: 10px; }
   .freeze-slot { width: 30px; }
@@ -213,6 +231,7 @@ dialog.freeze-settings::backdrop { background: #0008; }
 <main id="app"><p class="empty">Loading</p></main>
 <dialog id="deck-sharing" class="deck-sharing" aria-labelledby="deck-sharing-title"></dialog>
 <dialog id="streak-freezes" class="freeze-settings" aria-labelledby="freeze-title" aria-describedby="freeze-intro"></dialog>
+<dialog id="notification-preferences" class="freeze-settings notification-settings" aria-labelledby="notification-title" aria-describedby="notification-intro" data-notification-dialog></dialog>
 <script>
 const app = document.getElementById("app");
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -222,7 +241,8 @@ const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 let weekEnds = 0;
 let renderId = 0;
 const winnerState = { data: null, scope: "shared", metric: "day", error: false, request: 0 };
-const settingsOpen = () => document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open;
+const settingsOpen = () => document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open || document.getElementById("notification-preferences").open;
+let notificationDialogSession = 0;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
 const WINDOWS = { hour: "Best hour", day: "Best day", week: "Best week", month: "Best month", year: "Best year" };
@@ -449,8 +469,11 @@ function view(p, rows) {
   </div>
 </section>
 <section class="deck-sharing"><h2>Deck completion notifications</h2>
-  <p class="sub">Choose who hears when you finish a deck for the day. Off by default for every deck.</p>
-  <button type="button" id="manage-decks">Manage deck notifications</button>
+  <p class="sub">Choose who hears when you finish a deck, or whose completion alerts you receive. Sharing your own decks is off by default.</p>
+  <div class="notification-actions">
+    <button type="button" id="manage-decks">Manage deck notifications</button>
+    <button type="button" id="manage-received-notifications" data-open-notification-preferences>Notifications I receive</button>
+  </div>
 </section>
 ${p.at_risk ? `<section class="risk">Your ${p.streak} day streak is waiting for today's reviews.</section>` : ""}
 <section class="stats">
@@ -638,6 +661,198 @@ function openDeckSharing(user, display) {
   dialog.showModal();
 }
 
+function receivingNotificationsEntry() {
+  return `<section class="deck-sharing"><h2>Deck completion notifications</h2>
+    <p class="sub">Choose whose deck completion alerts you receive, even if you have not studied yet.</p>
+    <div class="notification-actions"><button type="button" id="manage-received-notifications" data-open-notification-preferences>Notifications I receive</button></div>
+  </section>`;
+}
+
+function openNotificationPreferences(user = "", display = "") {
+  if (settingsOpen()) return;
+  renderId++;
+  const dialog = document.getElementById("notification-preferences");
+  const session = ++notificationDialogSession;
+  const controller = new AbortController();
+  const fixedUser = user;
+  const opener = document.activeElement;
+  let token = "", closed = false, busy = false;
+  let remembered = "";
+  if (!fixedUser) {
+    try { remembered = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
+  }
+  const current = () => !closed && notificationDialogSession === session && dialog.open;
+  dialog.innerHTML = `<h3 id="notification-title">Notifications I receive</h3>
+    <p id="notification-intro" class="intro">${fixedUser ? `Deck completion alerts for ${esc(display || user)}.` : "Choose which deck completion alerts reach you."} These settings apply across your devices.</p>
+    <p class="scope-note">Streak reminders, messages and replies are unaffected.</p>
+    <div id="notification-content"><form id="notification-unlock" data-notification-unlock>
+      ${fixedUser ? "" : `<label class="account-label" for="notification-player">Your player name
+        <input id="notification-player" name="player" type="text" required autocomplete="off" autocapitalize="none" spellcheck="false" value="${esc(remembered)}" aria-describedby="notification-player-help" data-notification-player>
+        <small id="notification-player-help" class="sub">Use the player name from your AnkiQuest settings.</small>
+      </label>`}
+      <label class="token-label" for="notification-token">Your AnkiQuest token</label>
+      <input id="notification-token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="notification-token-help" data-notification-token>
+      <p id="notification-token-help" class="token-help">Use the token from your AnkiQuest settings. It is kept only while this window is open.</p>
+      <button type="submit" class="freeze-button primary" data-notification-load>Load my settings</button>
+    </form></div>
+    <p id="notification-status" class="status" role="status" aria-live="polite" data-notification-status></p>
+    <div class="actions"><button type="button" id="notification-close" class="freeze-button" data-notification-close>Close</button></div>`;
+  const content = dialog.querySelector("#notification-content");
+  const status = dialog.querySelector("#notification-status");
+  const say = (message, error = false) => {
+    if (!current()) return;
+    status.textContent = message;
+    status.className = "status" + (error ? " error" : "");
+  };
+  const request = async body => {
+    const loading = body === undefined;
+    const response = await fetch("/api/notification-preferences/" + encodeURIComponent(user), {
+      method: loading ? "GET" : "POST",
+      headers: { Authorization: "Bearer " + token, ...(loading ? {} : { "Content-Type": "application/json" }) },
+      ...(loading ? {} : { body: JSON.stringify(body) }),
+      cache: "no-store", signal: controller.signal,
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) throw new Error(loading
+        ? "That token was not accepted for this player. Check your player name and token, then try again."
+        : "That token is no longer accepted. Close and reopen this window to enter it again.");
+      throw new Error(loading ? "Could not load your notification settings. Please try again."
+        : "Could not save your notification settings. Your changes are still here; please try again.");
+    }
+    const data = await response.json();
+    if (!data || typeof data.enabled !== "boolean" || !Array.isArray(data.muted_senders) ||
+        !data.muted_senders.every(sender => typeof sender === "string" && sender.length > 0) ||
+        !Array.isArray(data.senders) || !data.senders.every(sender => sender && typeof sender.user === "string" && sender.user.length > 0 && typeof sender.display === "string")) {
+      throw new Error("The server returned unexpected notification settings. Please try again.");
+    }
+    return data;
+  };
+  const showSettings = data => {
+    if (!current()) return;
+    const muted = new Set(data.muted_senders);
+    const people = new Map(data.senders.map(person => [person.user, person]));
+    // Keep existing mutes editable even if a sender is no longer configured.
+    for (const sender of muted) if (!people.has(sender)) people.set(sender, { user: sender, display: sender });
+    const senders = [...people.values()].sort((a, b) => a.display.localeCompare(b.display) || a.user.localeCompare(b.user));
+    dialog.querySelector("#notification-intro").textContent = `Deck completion alerts for ${fixedUser ? display || user : user}. These settings apply across your devices.`;
+    content.innerHTML = `<form id="notification-settings" data-notification-settings>
+      <label class="receive-toggle" for="notification-enabled">
+        <input id="notification-enabled" type="checkbox" role="switch" ${data.enabled ? "checked" : ""} data-receiving-enabled>
+        <span><strong>Receive deck completion notifications</strong><small>Turn off to stop all deck completion alerts.</small></span>
+      </label>
+      <fieldset aria-describedby="notification-mute-help">
+        <legend>Mute specific people</legend>
+        <p id="notification-mute-help" class="scope-note">A checked name means their deck completion alerts are muted. Your choices are kept while all alerts are off.</p>
+        ${senders.map((person, index) => `<label class="mute-person" for="notification-sender-${index}">
+          <input id="notification-sender-${index}" type="checkbox" data-muted-sender="${esc(person.user)}" ${muted.has(person.user) ? "checked" : ""}>
+          <span>Mute ${esc(person.display || person.user)}${person.display && person.display !== person.user ? `<small>${esc(person.user)}</small>` : ""}</span>
+        </label>`).join("") || `<p class="sub">No other players are available yet. You can still turn all deck completion alerts off.</p>`}
+      </fieldset>
+      <ul class="rules">
+        <li>Saving with all alerts off cancels your pending deck completion alerts. Muting a person cancels pending completion alerts from them.</li>
+        <li>Muting also removes matching completion alerts from your inbox.</li>
+        <li>Turning alerts back on or unmuting someone applies to new completions only.</li>
+      </ul>
+      <button type="submit" class="freeze-button primary" data-notification-save>Save preferences</button>
+    </form>`;
+    const form = content.querySelector("form");
+    const enabled = form.querySelector("#notification-enabled");
+    const senderInputs = [...form.querySelectorAll("[data-muted-sender]")];
+    const saveButton = form.querySelector("[data-notification-save]");
+    const syncControls = () => {
+      form.setAttribute("aria-busy", String(busy));
+      enabled.disabled = busy;
+      saveButton.disabled = busy;
+      senderInputs.forEach(input => { input.disabled = busy || !enabled.checked; });
+    };
+    enabled.addEventListener("change", () => { syncControls(); say("Unsaved changes. Save to apply them."); });
+    senderInputs.forEach(input => input.addEventListener("change", () => say("Unsaved changes. Save to apply them.")));
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (busy || !current()) return;
+      const draft = { enabled: enabled.checked, muted_senders: senderInputs.filter(input => input.checked).map(input => input.dataset.mutedSender) };
+      busy = true;
+      syncControls();
+      say("Saving…");
+      try {
+        const saved = await request(draft);
+        if (current()) {
+          busy = false;
+          showSettings(saved);
+          say(saved.enabled ? "Preferences saved. You will receive new completion alerts from people you have not muted."
+            : "Preferences saved. All deck completion alerts are off. Your muted people are kept.");
+          content.querySelector("[data-notification-save]").focus();
+        }
+      } catch (error) {
+        if (current()) say(error.message, true);
+      } finally {
+        busy = false;
+        if (current() && form.isConnected) syncControls();
+      }
+    });
+    syncControls();
+  };
+  content.querySelector("form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (busy || !current()) return;
+    const form = event.currentTarget;
+    const input = form.querySelector("#notification-token");
+    const player = form.querySelector("#notification-player");
+    user = fixedUser || player.value.trim();
+    token = input.value.trim();
+    if (!user) { player.focus(); return; }
+    if (!token) { input.focus(); return; }
+    input.value = "";
+    busy = true;
+    form.setAttribute("aria-busy", "true");
+    const controls = [...form.querySelectorAll("input, button")];
+    controls.forEach(control => { control.disabled = true; });
+    say("Loading settings…");
+    try {
+      const data = await request();
+      if (current()) {
+        busy = false;
+        showSettings(data);
+        say("");
+        content.querySelector("#notification-enabled").focus();
+      }
+    } catch (error) {
+      token = "";
+      if (current()) say(error.message, true);
+    } finally {
+      busy = false;
+      if (current() && form.isConnected) {
+        form.setAttribute("aria-busy", "false");
+        controls.forEach(control => { control.disabled = false; });
+        input.focus();
+      }
+    }
+  });
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    token = "";
+    controller.abort();
+    dialog.removeEventListener("close", onClose);
+    dialog.removeEventListener("cancel", onCancel);
+    if (notificationDialogSession !== session) return;
+    dialog.innerHTML = "";
+    render().then(() => {
+      if (notificationDialogSession === session && !settingsOpen() &&
+          (document.activeElement === document.body || document.activeElement === opener)) {
+        document.getElementById("manage-received-notifications")?.focus();
+      }
+    });
+  };
+  const close = () => { dialog.close(); finish(); };
+  const onClose = () => { if (!dialog.open) finish(); };
+  const onCancel = event => { event.preventDefault(); close(); };
+  dialog.querySelector("#notification-close").addEventListener("click", close);
+  dialog.addEventListener("close", onClose);
+  dialog.addEventListener("cancel", onCancel);
+  dialog.showModal();
+}
+
 function openStreakFreezes(user, display) {
   if (settingsOpen()) return;
   renderId++;
@@ -770,7 +985,8 @@ async function render() {
       if (!canRender()) return;
       document.title = "ankiquest · records";
       app.innerHTML = `<header><h1>Records</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header>
-        <section><h2>The best anyone has ever had</h2>${tabs("records")}${records(held, me)}</section>`;
+        <section><h2>The best anyone has ever had</h2>${tabs("records")}${records(held, me)}</section>${receivingNotificationsEntry()}`;
+      document.getElementById("manage-received-notifications").addEventListener("click", () => openNotificationPreferences());
       return;
     }
     const period = currentPeriod();
@@ -789,13 +1005,15 @@ async function render() {
         try { localStorage.setItem("ankiquestPlayer", p.user); } catch (e) {}
         app.innerHTML = view(p, rows);
         document.getElementById("manage-decks").addEventListener("click", () => openDeckSharing(p.user, p.display));
+        document.getElementById("manage-received-notifications").addEventListener("click", () => openNotificationPreferences(p.user, p.display));
         document.getElementById("manage-freezes").addEventListener("click", () => openStreakFreezes(p.user, p.display));
         return;
       }
     }
     if (!canRender()) return;
     document.title = "ankiquest";
-    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${boardTitle(period)}</h2>${tabs(period)}${board(rows, me)}</section>${winnerSection()}`;
+    app.innerHTML = `<header><h1>ankiquest</h1>${me ? `<a href="#${encodeURIComponent(me)}">My profile</a>` : ""}</header><section><h2>${boardTitle(period)}</h2>${tabs(period)}${board(rows, me)}</section>${receivingNotificationsEntry()}${winnerSection()}`;
+    document.getElementById("manage-received-notifications").addEventListener("click", () => openNotificationPreferences());
   } catch (e) {
     if (!canRender()) return;
     app.innerHTML = `<p class="empty">Could not reach the server.</p>`;
