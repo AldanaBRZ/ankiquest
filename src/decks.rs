@@ -40,6 +40,14 @@ pub struct SettingsUpdate {
     pub nudges: Option<bool>,
 }
 
+/// Preferences owned by the recipient, independent of what senders choose to share.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncomingSettings {
+    pub enabled: bool,
+    pub muted_senders: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Deck {
     pub id: String,
@@ -147,6 +155,15 @@ pub fn valid_message(message: &str) -> bool {
     valid_text(message, MAX_MESSAGE)
 }
 
+pub fn valid_incoming_settings(settings: &IncomingSettings) -> bool {
+    let mut senders = HashSet::new();
+    settings.muted_senders.len() <= MAX_RECIPIENTS
+        && settings
+            .muted_senders
+            .iter()
+            .all(|sender| valid_text(sender, 128) && senders.insert(sender))
+}
+
 pub fn valid_clock(clock: Clock) -> bool {
     (-1440..=1440).contains(&clock.offset_west_min) && (0..=23).contains(&clock.rollover_hour)
 }
@@ -221,6 +238,15 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
          create table if not exists player_settings (
              user text primary key,
              nudges integer not null default 0
+         ) without rowid;
+         create table if not exists incoming_settings (
+             user text primary key,
+             enabled integer not null default 1
+         ) without rowid;
+         create table if not exists incoming_muted_senders (
+             recipient text not null,
+             sender text not null,
+             primary key (recipient, sender)
          ) without rowid;",
     )?;
     // Databases from before replies exist in the wild; adding the columns is the migration.
@@ -232,6 +258,7 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
         ("retry_at", "integer not null default 0"),
         ("push_attempts", "integer not null default 0"),
         ("push_cancelled", "integer not null default 0"),
+        ("completion_cancelled", "integer not null default 0"),
         ("read_at", "integer"),
         ("challenge_id", "integer"),
     ] {
@@ -268,15 +295,105 @@ fn insert_notification(
     now_ms: i64,
     push_only: bool,
 ) -> Result<i64, Error> {
+    // Keep suppressed completions permanently quiet even when another internal
+    // producer uses this insertion helper instead of record_decks.
+    let cancelled = message.kind == "completion"
+        && !conn.query_row(
+            "select not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
+             and not exists (select 1 from incoming_muted_senders where recipient = ?1 and sender = ?2)",
+            params![message.to, message.from],
+            |r| r.get::<_, bool>(0),
+        )?;
     conn.execute(
-        "insert into notifications (recipient, sender, title, body, day, created_at, kind, push_only)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![message.to, message.from, message.title, message.body, day, now_ms, message.kind, push_only],
+        "insert into notifications (recipient, sender, title, body, day, created_at, kind, push_only,
+                                    completion_cancelled, push_cancelled)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+        params![message.to, message.from, message.title, message.body, day, now_ms, message.kind, push_only, cancelled],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
 impl Store {
+    pub fn incoming_settings(&self, user: &str) -> Result<IncomingSettings, Error> {
+        let enabled = self
+            .conn
+            .query_row(
+                "select enabled from incoming_settings where user = ?1",
+                [user],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(true);
+        let muted_senders = self
+            .conn
+            .prepare(
+                "select sender from incoming_muted_senders where recipient = ?1 order by sender",
+            )?
+            .query_map([user], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(IncomingSettings {
+            enabled,
+            muted_senders,
+        })
+    }
+
+    /// Return only sender identities that this recipient already knows about.
+    /// Persisted mutes remain editable after a sender stops sharing or history expires.
+    pub fn known_incoming_senders(&self, user: &str) -> Result<Vec<String>, Error> {
+        Ok(self
+            .conn
+            .prepare(
+                "select owner as sender from deck_recipients where recipient = ?1 and owner != ?1
+                 union select sender from notifications where recipient = ?1 and kind = 'completion'
+                     and sender not in ('', ?1) and created_at >= ?2
+                 union select sender from incoming_muted_senders where recipient = ?1 and sender != ?1
+                 order by sender",
+            )?
+            .query_map(params![user, crate::now_ms() - INBOX_AGE_MS], |r| r.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// Suppression consumes existing history as well as pending pushes. Re-enabling
+    /// affects future completions; it never revives announcements cancelled here.
+    pub fn set_incoming_settings(
+        &mut self,
+        user: &str,
+        settings: &IncomingSettings,
+    ) -> Result<(), Error> {
+        if !valid_incoming_settings(settings) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid incoming notification settings",
+            )
+            .into());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "insert into incoming_settings (user, enabled) values (?1, ?2)
+             on conflict (user) do update set enabled = excluded.enabled",
+            params![user, settings.enabled],
+        )?;
+        tx.execute(
+            "delete from incoming_muted_senders where recipient = ?1",
+            [user],
+        )?;
+        for sender in &settings.muted_senders {
+            tx.execute(
+                "insert into incoming_muted_senders (recipient, sender) values (?1, ?2)",
+                params![user, sender],
+            )?;
+        }
+        tx.execute(
+            "update notifications set completion_cancelled = 1, push_cancelled = 1
+             where recipient = ?1 and kind = 'completion'
+             and (?2 = 0 or exists (select 1 from incoming_muted_senders
+                                   where recipient = ?1 and sender = notifications.sender))",
+            params![user, settings.enabled],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn decks(&self, user: &str) -> Result<Vec<Deck>, Error> {
         let mut stmt = self
             .conn
@@ -371,7 +488,11 @@ impl Store {
             let recipients: HashSet<String> = tx
                 .prepare(
                     "select recipient from deck_recipients
-                     where owner = ?1 and deck_id = ?2 and recipient != ?1",
+                     where owner = ?1 and deck_id = ?2 and recipient != ?1
+                     and not exists (select 1 from incoming_settings
+                                     where user = deck_recipients.recipient and enabled = 0)
+                     and not exists (select 1 from incoming_muted_senders
+                                     where recipient = deck_recipients.recipient and sender = ?1)",
                 )?
                 .query_map(params![user, deck.id], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
@@ -460,7 +581,12 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "select {NOTICE_COLUMNS} from notifications n where n.id in (
                  select id from notifications where recipient=?1 and push_only=0
-                 and created_at>=?3 order by id desc limit 500) order by n.id"
+                 and created_at>=?3
+                 and (kind != 'completion' or (completion_cancelled = 0
+                     and not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
+                     and not exists (select 1 from incoming_muted_senders
+                                     where recipient = ?1 and sender = notifications.sender)))
+                 order by id desc limit 500) order by n.id"
         ))?;
         Ok(stmt
             .query_map(params![user, now_ms, now_ms - INBOX_AGE_MS], notification)?
@@ -479,6 +605,10 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "select {NOTICE_COLUMNS} from notifications n
             where n.recipient=?1 and n.push_only=0 and n.created_at>=?3 and (?4 is null or n.id<?4)
+            and (n.kind != 'completion' or (n.completion_cancelled = 0
+                and not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
+                and not exists (select 1 from incoming_muted_senders
+                                where recipient = ?1 and sender = n.sender)))
             order by n.id desc limit ?5"
         ))?;
         let mut items = stmt
@@ -498,7 +628,11 @@ impl Store {
               select 1 from community_members m join community_challenges c on c.id=m.challenge
               where c.id=n.challenge_id and n.kind='challenge_invite' and m.user=n.recipient
               and m.status='invited' and c.cancelled=0 and c.end_at>?2)),0)
-             from notifications n where n.recipient=?1 and n.push_only=0 and n.created_at>=?3",
+             from notifications n where n.recipient=?1 and n.push_only=0 and n.created_at>=?3
+             and (n.kind != 'completion' or (n.completion_cancelled = 0
+                 and not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
+                 and not exists (select 1 from incoming_muted_senders
+                                 where recipient = ?1 and sender = n.sender)))",
             params![user, now_ms, cutoff],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
         )?;
@@ -655,7 +789,8 @@ impl Store {
         let target = tx
             .query_row(
                 "select sender, day from notifications
-                 where id = ?1 and recipient = ?2 and replied = 0 and sender not in ('', ?2)",
+                 where id = ?1 and recipient = ?2 and replied = 0 and sender not in ('', ?2)
+                 and completion_cancelled = 0",
                 params![id, user],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
@@ -689,6 +824,12 @@ impl Store {
                 "with ready as (
                      select *, row_number() over (partition by recipient order by retry_at, id) as turn
                      from notifications where pushed = 0 and push_cancelled = 0 and retry_at <= ?1
+                     and (kind != 'completion' or (completion_cancelled = 0
+                         and not exists (select 1 from incoming_settings
+                                         where user = notifications.recipient and enabled = 0)
+                         and not exists (select 1 from incoming_muted_senders
+                                         where recipient = notifications.recipient
+                                         and sender = notifications.sender)))
                        and created_at >= ?2
                  ), attempted as (
                      select recipient, max(retry_at) as last_retry from notifications
@@ -731,6 +872,12 @@ impl Store {
         Ok(self.conn.execute(
             "update notifications set retry_at = ?2, push_attempts = min(push_attempts + 1, 31)
              where id = ?1 and pushed = 0 and push_cancelled = 0 and retry_at <= ?3 and created_at>=?4
+             and (kind != 'completion' or (completion_cancelled = 0
+                 and not exists (select 1 from incoming_settings
+                                 where user = notifications.recipient and enabled = 0)
+                 and not exists (select 1 from incoming_muted_senders
+                                 where recipient = notifications.recipient
+                                 and sender = notifications.sender)))
              and (kind != 'nudge' or exists (select 1 from player_settings
                                             where user = notifications.recipient and nudges = 1))",
             params![id, now_ms + PUSH_LEASE_MS, now_ms, now_ms - INBOX_AGE_MS],
@@ -909,6 +1056,454 @@ pub(crate) mod tests {
 
     const DAY: i64 = 20_000;
     const NOW: i64 = DAY * 86_400_000 + 12 * 3_600_000;
+
+    fn incoming(enabled: bool, muted_senders: &[&str]) -> IncomingSettings {
+        IncomingSettings {
+            enabled,
+            muted_senders: muted_senders
+                .iter()
+                .map(|sender| (*sender).into())
+                .collect(),
+        }
+    }
+
+    fn queue_kind(store: &mut Store, to: &str, from: &str, kind: &str, at: i64) -> i64 {
+        store
+            .send(
+                &Outgoing {
+                    to,
+                    from,
+                    title: "Queued",
+                    body: "Waiting",
+                    kind,
+                },
+                DAY,
+                at,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn incoming_settings_validate_shape_and_default_to_existing_delivery() {
+        let (mut store, path) = temporary_store();
+        let settings = store.incoming_settings("hill").unwrap();
+        assert!(settings.enabled);
+        assert!(settings.muted_senders.is_empty());
+        assert!(valid_incoming_settings(&incoming(true, &[])));
+        assert!(valid_incoming_settings(&incoming(
+            false,
+            &["cerro", "friend"]
+        )));
+        for senders in [
+            vec![""],
+            vec![" "],
+            vec!["bad\nname"],
+            vec!["cerro", "cerro"],
+        ] {
+            assert!(!valid_incoming_settings(&incoming(true, &senders)));
+        }
+        assert!(!valid_incoming_settings(&incoming(
+            true,
+            &[&"x".repeat(129)]
+        )));
+        let too_many = IncomingSettings {
+            enabled: true,
+            muted_senders: (0..=MAX_RECIPIENTS)
+                .map(|id| format!("person{id}"))
+                .collect(),
+        };
+        assert!(!valid_incoming_settings(&too_many));
+        assert!(
+            serde_json::from_str::<IncomingSettings>(
+                r#"{"enabled":true,"muted_senders":[],"recipient":"someone_else"}"#
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_str::<IncomingSettings>(r#"{"enabled":true}"#).is_err());
+        assert!(
+            serde_json::from_str::<IncomingSettings>(r#"{"enabled":"false","muted_senders":[]}"#)
+                .is_err()
+        );
+        let id = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, id);
+        assert!(store.begin_push(id, NOW).unwrap());
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        assert!(
+            store
+                .set_incoming_settings("hill", &incoming(false, &["friend", "friend"]))
+                .is_err()
+        );
+        let unchanged = store.incoming_settings("hill").unwrap();
+        assert!(unchanged.enabled);
+        assert_eq!(unchanged.muted_senders, ["cerro"]);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn incoming_migration_preserves_delivery_and_saved_choices_survive_restart() {
+        let (mut store, path) = temporary_store();
+        let id = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        store
+            .conn
+            .execute_batch(
+                "drop table incoming_settings;
+             drop table incoming_muted_senders;
+             alter table notifications drop column completion_cancelled;",
+            )
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.incoming_settings("hill").unwrap().enabled);
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, id);
+        assert_eq!(
+            store.take_deck_deliveries(NOW).unwrap()[0].notification.id,
+            id
+        );
+        store
+            .set_incoming_settings("hill", &incoming(false, &["cerro"]))
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let mut settings = store.incoming_settings("hill").unwrap();
+        assert!(!settings.enabled);
+        assert_eq!(settings.muted_senders, ["cerro"]);
+        settings.enabled = true;
+        store.set_incoming_settings("hill", &settings).unwrap();
+        assert_eq!(
+            store.incoming_settings("hill").unwrap().muted_senders,
+            ["cerro"]
+        );
+        assert!(store.notifications("hill", NOW).unwrap().is_empty());
+        assert!(store.take_deck_deliveries(NOW).unwrap().is_empty());
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        assert!(!store.begin_push(id, NOW + PUSH_LEASE_MS).unwrap());
+        assert!(store.notifications("hill", NOW).unwrap().is_empty());
+        let future = queue_kind(&mut store, "hill", "cerro", "completion", NOW + 1);
+        assert_eq!(store.notifications("hill", NOW + 1).unwrap()[0].id, future);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn known_incoming_senders_exposes_only_existing_recipient_relationships() {
+        let (mut store, path) = completion_fixture(&[("1", "Private deck name", &["hill"])]);
+        let now = crate::now_ms();
+        queue_kind(&mut store, "hill", "recent", "completion", now);
+        queue_kind(
+            &mut store,
+            "hill",
+            "expired",
+            "completion",
+            now - INBOX_AGE_MS - 1,
+        );
+        queue_kind(&mut store, "hill", "reply_only", "reply", now);
+        queue_kind(&mut store, "stranger", "not_yours", "completion", now);
+        queue_kind(&mut store, "hill", "hill", "completion", now);
+        store
+            .set_incoming_settings("hill", &incoming(true, &["remembered"]))
+            .unwrap();
+        assert_eq!(
+            store.known_incoming_senders("hill").unwrap(),
+            ["cerro", "recent", "remembered"]
+        );
+        assert!(
+            store
+                .known_incoming_senders("unrelated")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.decks("cerro").unwrap()[0].recipients, ["hill"]);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn sender_mute_cancels_selected_retry_and_sent_completions_but_keeps_other_kinds() {
+        let (mut store, path) = temporary_store();
+        store.set_nudges("hill", true).unwrap();
+        let selected = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let retry = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let sent = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let other_sender = queue_kind(&mut store, "hill", "friend", "completion", NOW);
+        let other_recipient = queue_kind(&mut store, "friend", "cerro", "completion", NOW);
+        let unrelated: Vec<_> = ["reply", "message", "nudge", "event", "risk"]
+            .iter()
+            .map(|kind| queue_kind(&mut store, "hill", "cerro", kind, NOW))
+            .collect();
+        assert!(store.begin_push(retry, NOW).unwrap());
+        store.finish_push(retry, false, NOW).unwrap();
+        assert!(store.begin_push(sent, NOW).unwrap());
+        store.finish_push(sent, true, NOW).unwrap();
+        let selected_batch = store.take_deck_deliveries(NOW).unwrap();
+        assert!(
+            selected_batch
+                .iter()
+                .any(|delivery| delivery.notification.id == selected)
+        );
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        assert!(
+            !store.begin_push(selected, NOW).unwrap(),
+            "a selected batch must recheck opt-out"
+        );
+        assert!(!store.begin_push(retry, NOW + PUSH_LEASE_MS).unwrap());
+        assert!(
+            store
+                .reply("hill", "Hill", selected, "Hidden", NOW)
+                .unwrap()
+                .is_none()
+        );
+        let inbox = store.notifications("hill", NOW).unwrap();
+        assert_eq!(inbox.len(), unrelated.len() + 1);
+        assert!(inbox.iter().any(|message| message.id == other_sender));
+        assert!(
+            unrelated
+                .iter()
+                .all(|id| inbox.iter().any(|message| message.id == *id))
+        );
+        assert_eq!(
+            store.notifications("friend", NOW).unwrap()[0].id,
+            other_recipient
+        );
+        let ready = store.take_deck_deliveries(NOW + PUSH_LEASE_MS).unwrap();
+        assert_eq!(ready.len(), unrelated.len() + 2);
+        assert!(
+            ready
+                .iter()
+                .all(|delivery| ![selected, retry, sent].contains(&delivery.notification.id))
+        );
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        assert!(!store.begin_push(retry, NOW + PUSH_LEASE_MS).unwrap());
+        assert_eq!(
+            store.notifications("hill", NOW).unwrap().len(),
+            unrelated.len() + 1
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn activity_respects_completion_mutes_and_does_not_restore_cancelled_history() {
+        let (mut store, path) = temporary_store();
+        queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let allowed = queue_kind(&mut store, "hill", "friend", "completion", NOW);
+        let message = queue_kind(&mut store, "hill", "cerro", "message", NOW);
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        let activity = store.activity("hill", NOW, 30, None, 1).unwrap();
+        assert_eq!(activity.unread_count, 2);
+        assert_eq!(activity.items[0].id, message);
+        let older = store
+            .activity("hill", NOW, 30, activity.next_before, 10)
+            .unwrap();
+        assert_eq!(older.items.len(), 1);
+        assert_eq!(older.items[0].id, allowed);
+        store
+            .set_incoming_settings("hill", &incoming(false, &[]))
+            .unwrap();
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        let activity = store.activity("hill", NOW, 30, None, 10).unwrap();
+        assert_eq!(activity.unread_count, 1);
+        assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.items[0].id, message);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn global_completion_opt_out_cancels_leases_and_keeps_sender_choices_for_future() {
+        let (mut store, path) = temporary_store();
+        let leased = queue_kind(&mut store, "hill", "friend", "completion", NOW);
+        let selected = queue_kind(&mut store, "hill", "other", "completion", NOW);
+        let message = queue_kind(&mut store, "hill", "friend", "message", NOW);
+        let other_recipient = queue_kind(&mut store, "friend", "cerro", "completion", NOW);
+        assert!(store.begin_push(leased, NOW).unwrap());
+        store
+            .set_incoming_settings("hill", &incoming(false, &["cerro"]))
+            .unwrap();
+        // A response from a previously leased request must not resurrect retries.
+        store.finish_push(leased, false, NOW).unwrap();
+        assert!(!store.begin_push(selected, NOW).unwrap());
+        let during_opt_out = queue_kind(&mut store, "hill", "future_sender", "completion", NOW);
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 1);
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, message);
+        assert_eq!(
+            store.notifications("friend", NOW).unwrap()[0].id,
+            other_recipient
+        );
+        let mut settings = store.incoming_settings("hill").unwrap();
+        settings.enabled = true;
+        store.set_incoming_settings("hill", &settings).unwrap();
+        assert_eq!(settings.muted_senders, ["cerro"]);
+        for id in [leased, selected, during_opt_out] {
+            assert!(!store.begin_push(id, NOW + PUSH_LEASE_MS).unwrap());
+        }
+        let muted = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let allowed = queue_kind(&mut store, "hill", "friend", "completion", NOW);
+        assert!(!store.begin_push(muted, NOW).unwrap());
+        assert!(store.begin_push(allowed, NOW).unwrap());
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 2);
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 2);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn incoming_filter_precedes_grouping_and_counts_and_consumes_suppressed_completions() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill", "parent_only", "all_off", "other"]),
+            ("2", "Spanish::Verbs", &["hill", "all_off", "other"]),
+        ]);
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        store
+            .set_incoming_settings("parent_only", &incoming(true, &["friend"]))
+            .unwrap();
+        store
+            .set_incoming_settings("all_off", &incoming(false, &["friend"]))
+            .unwrap();
+        let mut snapshots = [
+            named_snapshot("1", "Spanish", 0, 4, DAY),
+            named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+        ];
+        assert_eq!(
+            record_completions(&mut store, &snapshots),
+            [("Spanish".into(), 1), ("Spanish::Verbs".into(), 1),]
+        );
+        assert_completion_inbox(&store, "hill", &[]);
+        assert_completion_inbox(&store, "all_off", &[]);
+        assert_completion_inbox(&store, "parent_only", &["Spanish"]);
+        assert_completion_inbox(&store, "other", &["Spanish::Verbs"]);
+        assert_eq!(
+            store.decks("cerro").unwrap()[0].recipients,
+            ["all_off", "hill", "other", "parent_only"]
+        );
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        store
+            .set_incoming_settings("all_off", &incoming(true, &["friend"]))
+            .unwrap();
+        assert!(record_completions(&mut store, &snapshots).is_empty());
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(record_completions(&mut store, &snapshots).is_empty());
+        for snapshot in &mut snapshots {
+            snapshot.day += 1;
+        }
+        let announcements = store
+            .record_decks(
+                "cerro",
+                "Cerro",
+                &snapshots,
+                Clock::default(),
+                false,
+                NOW + 86_400_000,
+            )
+            .unwrap();
+        assert_eq!(announcements.len(), 2);
+        assert_eq!(announcements[0].recipients, 1);
+        assert_eq!(announcements[1].recipients, 3);
+        assert_eq!(
+            store.notifications("hill", NOW + 86_400_000).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .notifications("all_off", NOW + 86_400_000)
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn cancelled_completions_do_not_fill_the_visible_inbox_limit() {
+        let (mut store, path) = temporary_store();
+        let visible = queue_kind(&mut store, "hill", "cerro", "reply", NOW);
+        for _ in 0..501 {
+            queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        }
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 1);
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, visible);
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, visible);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn inbox_and_pushes_recheck_preferences_even_without_cancellation_flags() {
+        let (mut store, path) = temporary_store();
+        let muted = queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let global = queue_kind(&mut store, "friend", "cerro", "completion", NOW);
+        let visible = queue_kind(&mut store, "hill", "other", "completion", NOW);
+        store
+            .conn
+            .execute_batch(
+                "insert into incoming_muted_senders (recipient, sender) values ('hill', 'cerro');
+             insert into incoming_settings (user, enabled) values ('friend', 0);",
+            )
+            .unwrap();
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, visible);
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 1);
+        assert!(store.notifications("friend", NOW).unwrap().is_empty());
+        let batch = store.take_deck_deliveries(NOW).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].notification.id, visible);
+        assert!(!store.begin_push(muted, NOW).unwrap());
+        assert!(!store.begin_push(global, NOW).unwrap());
+        assert!(store.begin_push(visible, NOW).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn cancellation_failure_rolls_back_incoming_settings_and_sender_mutes() {
+        let (mut store, path) = temporary_store();
+        let id = queue_kind(&mut store, "hill", "friend", "completion", NOW);
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        store.conn.execute_batch(
+            "create trigger prevent_cancellation before update of completion_cancelled on notifications
+             begin select raise(abort, 'failed cancellation'); end;",
+        ).unwrap();
+        assert!(
+            store
+                .set_incoming_settings("hill", &incoming(false, &["friend"]))
+                .is_err()
+        );
+        let settings = store.incoming_settings("hill").unwrap();
+        assert!(settings.enabled);
+        assert_eq!(settings.muted_senders, ["cerro"]);
+        assert_eq!(store.notifications("hill", NOW).unwrap()[0].id, id);
+        assert!(store.begin_push(id, NOW).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn taking_a_delivery_does_not_mark_an_unconfirmed_push_delivered() {
