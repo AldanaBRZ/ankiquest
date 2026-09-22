@@ -2,7 +2,7 @@ use crate::game::{Clock, Event};
 use crate::store::{Error, Store};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const MAX_DECKS: usize = 2000;
 const MAX_RECIPIENTS: usize = 100;
@@ -296,6 +296,7 @@ impl Store {
     ) -> Result<Vec<Announcement>, Error> {
         let today = clock.day(now_ms);
         let mut announced = Vec::new();
+        let mut candidates = Vec::new();
         let tx = self.conn.transaction()?;
         for deck in snapshots {
             // Delayed and future snapshots cannot rename a deck or complete today.
@@ -322,22 +323,67 @@ impl Store {
             if !fresh || silent || !enabled {
                 continue;
             }
+            let recipients: HashSet<String> = tx
+                .prepare(
+                    "select recipient from deck_recipients
+                     where owner = ?1 and deck_id = ?2 and recipient != ?1",
+                )?
+                .query_map(params![user, deck.id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            candidates.push((deck, recipients));
+        }
+
+        // Clients include subdeck reviews in their parents' totals. Equal totals
+        // therefore represent the same studied work. Coalesce only fresh eligible
+        // completions in this upload, separately for each recipient.
+        let mut by_name_and_reviews: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
+        let mut deliveries = Vec::new();
+        for (index, (deck, recipients)) in candidates.iter().enumerate() {
+            by_name_and_reviews
+                .entry((&deck.name, deck.reviewed_today))
+                .or_default()
+                .push(index);
+            deliveries.push(recipients.clone());
+        }
+        for (deck, recipients) in &candidates {
+            for (boundary, _) in deck.name.match_indices("::") {
+                let parent = &deck.name[..boundary];
+                if let Some(ancestors) = by_name_and_reviews.get(&(parent, deck.reviewed_today)) {
+                    for &index in ancestors {
+                        // Use original recipient sets so a deeper descendant can
+                        // suppress every equivalent ancestor in any upload order.
+                        deliveries[index].retain(|recipient| !recipients.contains(recipient));
+                    }
+                }
+            }
+        }
+        for ((deck, _), recipients) in candidates.iter().zip(deliveries) {
+            if recipients.is_empty() {
+                continue;
+            }
             let body = format!(
                 "{display} has finished their {} studies for today.",
                 deck.name
             );
-            let recipients = tx.execute(
-                "insert into notifications (recipient, sender, title, body, day, created_at, kind)
-                 select recipient, ?1, 'Deck complete', ?3, ?4, ?5, 'completion' from deck_recipients
-                 where owner = ?1 and deck_id = ?2 and recipient != ?1",
-                params![user, deck.id, body, today, now_ms],
-            )?;
-            if recipients > 0 {
-                announced.push(Announcement {
-                    deck: deck.name.clone(),
-                    recipients,
-                });
+            for recipient in &recipients {
+                insert_notification(
+                    &tx,
+                    &Outgoing {
+                        to: recipient,
+                        from: user,
+                        title: "Deck complete",
+                        body: &body,
+                        kind: "completion",
+                    },
+                    today,
+                    now_ms,
+                    false,
+                )?;
             }
+            announced.push(Announcement {
+                deck: deck.name.clone(),
+                recipients: recipients.len(),
+            });
         }
         tx.commit()?;
         Ok(announced)
@@ -1016,6 +1062,333 @@ pub(crate) mod tests {
                 }],
             )
             .unwrap();
+    }
+
+    fn named_snapshot(
+        id: &str,
+        name: &str,
+        remaining: u64,
+        reviewed_today: u64,
+        day: i64,
+    ) -> Snapshot {
+        Snapshot {
+            name: name.into(),
+            ..snapshot(id, remaining, reviewed_today, day)
+        }
+    }
+
+    fn completion_fixture(decks: &[(&str, &str, &[&str])]) -> (Store, std::path::PathBuf) {
+        let (mut store, path) = temporary_store();
+        for (id, name, recipients) in decks {
+            save(&mut store, named_snapshot(id, name, 1, 0, DAY), false, NOW);
+            if !recipients.is_empty() {
+                enable(&mut store, id, recipients);
+            }
+        }
+        (store, path)
+    }
+
+    fn record_completions(store: &mut Store, snapshots: &[Snapshot]) -> Vec<(String, usize)> {
+        let mut announcements: Vec<_> = store
+            .record_decks("cerro", "Cerro", snapshots, Clock::default(), false, NOW)
+            .unwrap()
+            .into_iter()
+            .map(|announcement| (announcement.deck, announcement.recipients))
+            .collect();
+        announcements.sort();
+        announcements
+    }
+
+    fn assert_completion_inbox(store: &Store, recipient: &str, decks: &[&str]) {
+        let mut bodies: Vec<_> = store
+            .notifications(recipient, NOW)
+            .unwrap()
+            .into_iter()
+            .map(|notification| {
+                assert_eq!(notification.kind, "completion");
+                assert_eq!(notification.sender, "cerro");
+                notification.body
+            })
+            .collect();
+        bodies.sort();
+        let mut expected: Vec<_> = decks
+            .iter()
+            .map(|deck| format!("Cerro has finished their {deck} studies for today."))
+            .collect();
+        expected.sort();
+        assert_eq!(bodies, expected, "completion inbox for {recipient}");
+    }
+
+    #[test]
+    fn equivalent_parent_and_child_notify_each_recipient_only_once() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill", "friend"]),
+            ("2", "Spanish::Verbs", &["hill", "friend"]),
+        ]);
+        let snapshots = [
+            named_snapshot("1", "Spanish", 0, 4, DAY),
+            named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+        ];
+        assert_eq!(
+            record_completions(&mut store, &snapshots),
+            [("Spanish::Verbs".into(), 2)]
+        );
+        for recipient in ["hill", "friend"] {
+            assert_completion_inbox(&store, recipient, &["Spanish::Verbs"]);
+        }
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn equivalent_nested_completions_keep_the_deepest_deck_in_every_upload_order() {
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let names = ["Spanish", "Spanish::Verbs", "Spanish::Verbs::Present"];
+            let (mut store, path) = completion_fixture(&[
+                ("1", names[0], &["hill"]),
+                ("2", names[1], &["hill"]),
+                ("3", names[2], &["hill"]),
+            ]);
+            let snapshots: Vec<_> = order
+                .into_iter()
+                .map(|index| named_snapshot(&(index + 1).to_string(), names[index], 0, 4, DAY))
+                .collect();
+            assert_eq!(
+                record_completions(&mut store, &snapshots),
+                [(names[2].into(), 1)],
+                "upload order {order:?}"
+            );
+            assert_completion_inbox(&store, "hill", &[names[2]]);
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn nested_completion_coalescing_respects_each_decks_recipient_choices() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill", "parent_only"]),
+            ("2", "Spanish::Verbs", &["hill", "child_only"]),
+            ("3", "Spanish::Verbs::Present", &["grandchild_only"]),
+        ]);
+        let snapshots = [
+            named_snapshot("1", "Spanish", 0, 4, DAY),
+            named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+            named_snapshot("3", "Spanish::Verbs::Present", 0, 4, DAY),
+        ];
+        assert_eq!(
+            record_completions(&mut store, &snapshots),
+            [
+                ("Spanish".into(), 1),
+                ("Spanish::Verbs".into(), 2),
+                ("Spanish::Verbs::Present".into(), 1),
+            ]
+        );
+        assert_completion_inbox(&store, "hill", &["Spanish::Verbs"]);
+        assert_completion_inbox(&store, "parent_only", &["Spanish"]);
+        assert_completion_inbox(&store, "child_only", &["Spanish::Verbs"]);
+        assert_completion_inbox(&store, "grandchild_only", &["Spanish::Verbs::Present"]);
+        assert_completion_inbox(&store, "cerro", &[]);
+        assert_completion_inbox(&store, "stranger", &[]);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_parent_with_additional_studied_cards_keeps_its_completion() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill"]),
+            ("2", "Spanish::Verbs", &["hill"]),
+        ]);
+        assert_eq!(
+            record_completions(
+                &mut store,
+                &[
+                    named_snapshot("1", "Spanish", 0, 5, DAY),
+                    named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+                ]
+            ),
+            [("Spanish".into(), 1), ("Spanish::Verbs".into(), 1)]
+        );
+        assert_completion_inbox(&store, "hill", &["Spanish", "Spanish::Verbs"]);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_child_that_cannot_announce_does_not_suppress_the_parent() {
+        for (enabled, remaining, reviewed, day) in [
+            (false, 0, 4, DAY),
+            (true, 1, 4, DAY),
+            (true, 0, 0, DAY),
+            (true, 0, 4, DAY - 1),
+            (true, 0, 4, DAY + 1),
+        ] {
+            let (mut store, path) =
+                completion_fixture(&[("1", "Spanish", &["hill"]), ("2", "Spanish::Verbs", &[])]);
+            if enabled {
+                enable(&mut store, "2", &["hill"]);
+            }
+            assert_eq!(
+                record_completions(
+                    &mut store,
+                    &[
+                        named_snapshot("1", "Spanish", 0, 4, DAY),
+                        named_snapshot("2", "Spanish::Verbs", remaining, reviewed, day),
+                    ]
+                ),
+                [("Spanish".into(), 1)],
+                "child enabled={enabled}, remaining={remaining}, reviewed={reviewed}, day={day}"
+            );
+            assert_completion_inbox(&store, "hill", &["Spanish"]);
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn previously_consumed_child_completions_do_not_suppress_a_fresh_parent() {
+        for silent in [false, true] {
+            let (mut store, path) = completion_fixture(&[
+                ("1", "Spanish", &["hill"]),
+                ("2", "Spanish::Verbs", &["hill"]),
+            ]);
+            save(
+                &mut store,
+                named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+                silent,
+                NOW,
+            );
+            assert_eq!(
+                record_completions(
+                    &mut store,
+                    &[
+                        named_snapshot("1", "Spanish", 0, 4, DAY),
+                        named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+                    ]
+                ),
+                [("Spanish".into(), 1)]
+            );
+            let expected = if silent {
+                vec!["Spanish"]
+            } else {
+                vec!["Spanish", "Spanish::Verbs"]
+            };
+            assert_completion_inbox(&store, "hill", &expected);
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn unrelated_names_prefixes_and_sibling_decks_keep_separate_completions() {
+        for names in [
+            ["Spanish", "Spanish 2"],
+            ["Spanish", "Spanish:Verbs"],
+            ["Spanish", "Spanishish::Verbs"],
+            ["Spanish::Verbs", "Spanish::Nouns"],
+            ["Spanish", "Geography::Spanish"],
+        ] {
+            let (mut store, path) =
+                completion_fixture(&[("1", names[0], &["hill"]), ("2", names[1], &["hill"])]);
+            let announcements = record_completions(
+                &mut store,
+                &[
+                    named_snapshot("1", names[0], 0, 4, DAY),
+                    named_snapshot("2", names[1], 0, 4, DAY),
+                ],
+            );
+            assert_eq!(announcements.len(), 2, "deck names {names:?}");
+            assert_completion_inbox(&store, "hill", &names);
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn overlapping_colons_follow_the_clients_left_to_right_hierarchy_boundaries() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill"]),
+            ("2", "Spanish:", &["hill"]),
+            ("3", "Spanish:::Verbs", &["hill"]),
+        ]);
+        // The clients split "Spanish:::Verbs" into "Spanish" and ":Verbs".
+        // "Spanish:" is therefore a separate deck, not this child's parent.
+        assert_eq!(
+            record_completions(
+                &mut store,
+                &[
+                    named_snapshot("1", "Spanish", 0, 4, DAY),
+                    named_snapshot("2", "Spanish:", 0, 4, DAY),
+                    named_snapshot("3", "Spanish:::Verbs", 0, 4, DAY),
+                ]
+            ),
+            [("Spanish:".into(), 1), ("Spanish:::Verbs".into(), 1)]
+        );
+        assert_completion_inbox(&store, "hill", &["Spanish:", "Spanish:::Verbs"]);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn suppressed_parent_completions_stay_consumed_after_replay_and_restart() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill"]),
+            ("2", "Spanish::Verbs", &["hill"]),
+        ]);
+        let snapshots = [
+            named_snapshot("1", "Spanish", 0, 4, DAY),
+            named_snapshot("2", "Spanish::Verbs", 0, 4, DAY),
+        ];
+        assert_eq!(
+            record_completions(&mut store, &snapshots),
+            [("Spanish::Verbs".into(), 1)]
+        );
+        assert!(record_completions(&mut store, &snapshots).is_empty());
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(record_completions(&mut store, &snapshots[..1]).is_empty());
+        assert!(record_completions(&mut store, &snapshots).is_empty());
+        assert_completion_inbox(&store, "hill", &["Spanish::Verbs"]);
+        assert_eq!(store.decks("cerro").unwrap().len(), 2);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn partial_upload_keeps_a_parent_completion_and_the_existing_deck_catalog() {
+        let (mut store, path) = completion_fixture(&[
+            ("1", "Spanish", &["hill"]),
+            ("2", "Spanish::Verbs", &["hill"]),
+        ]);
+        assert_eq!(
+            record_completions(&mut store, &[named_snapshot("1", "Spanish", 0, 4, DAY)]),
+            [("Spanish".into(), 1)]
+        );
+        assert_eq!(
+            record_completions(
+                &mut store,
+                &[named_snapshot("2", "Spanish::Verbs", 0, 4, DAY)]
+            ),
+            [("Spanish::Verbs".into(), 1)]
+        );
+        let decks = store.decks("cerro").unwrap();
+        assert_eq!(decks.len(), 2);
+        assert!(
+            decks
+                .iter()
+                .all(|deck| deck.enabled && deck.recipients == ["hill"])
+        );
+        assert_completion_inbox(&store, "hill", &["Spanish", "Spanish::Verbs"]);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
