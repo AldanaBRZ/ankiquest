@@ -35,7 +35,7 @@ All seven reminder types are **off by default**. Default timing is 20:00, quiet 
 
 Timing uses the player's synced Anki clock and day cutoff. Urgent streak and weekly-closing warnings normally use the last two hours before the relevant deadline. If quiet time covers that deadline, they can arrive in the last waking hour instead: a 04:00 cutoff with 22:00–09:00 quiet time produces a warning around 21:00. Quiet hours and the cap still apply to urgent reminders; a slot is reserved for an enabled urgent warning when an unprotected streak is at risk.
 
-Daily, milestone, and urgent reminders are rechecked against current studying before delivery. Duplicate reminders are suppressed, including across restarts. A milestone reminder replaces a generic daily nudge for that day. Enabling freeze-used notices or recaps does not announce historical events retroactively.
+Daily, milestone, and urgent reminders are rechecked against current studying before delivery. Duplicate reminders are suppressed, including across restarts. Changing preferences preserves pending reminders that remain enabled and rechecks their timing; disabling a type cancels its pending notices. A milestone reminder replaces a generic daily nudge for that day. Enabling freeze-used notices or recaps does not announce historical events retroactively.
 
 Reminders use the existing authenticated notification inbox and durable push queue. Push delivery requires the server's `ntfy` destination and the player's `ntfy_topic`; queued attempts are rechecked and retried. These preferences control server reminders. Device-only AnkiDroid and desktop add-on alarms remain independently controlled in each client's settings. The old global `remind_hour` / Nix `remindHour` setting is superseded by personal preferences.
 
@@ -44,6 +44,8 @@ Reminders use the existing authenticated notification inbox and durable push que
 The archive uses one shared competition timezone and cutoff, initially taken from `week_timezone` and `week_rollover_hour` (Nix: `weekTimezone`, `weekRolloverHour`). Each full Anki day's XP belongs to the shared date containing that Anki day's start, matching the existing weekly leaderboard. Weeks start on Monday and seasons start on the first of the month.
 
 Set `competition_start_date` to the known server start date as `YYYY-MM-DD` before initializing the archive; the Nix option is `competitionStartDate`. Otherwise, the archive uses the earliest retained review history, which can predate this server. It does not invent an exact server start date or claim missing history is complete. The archive records its original timezone and cutoff so later configuration changes cannot silently relabel finalized periods.
+
+When `sync_base` is configured, archival updates wait for a complete collection import. Unreadable collections or files changing during import defer finalization until a later successful attempt. The community endpoint temporarily returns HTTP 503 during an incomplete import, while existing notification processing continues.
 
 | Display status | Meaning |
 | --- | --- |
@@ -62,6 +64,8 @@ Choose a name, measure, target, duration, and 1–30 friends. Names allow 1–80
 Challenges start immediately. The creator is accepted automatically; invited players' activity counts only after acceptance. Review progress excludes future timestamps and activity at or after the deadline. Study days use each participant's Anki clock, and a shared goal counts each participant's study day separately.
 
 Only accepted or invited members can retrieve the challenge list. Invitees can accept or decline; accepted invitees can leave; the creator can cancel. Declining or leaving removes the challenge from that player's list and removes their contribution from the shared total. A reached goal can still be cancelled before its deadline, freeing an open-challenge slot. Cancelled and expired challenges preserve their details for remaining members.
+
+All open memberships remain accessible; the history limit applies only to the 100 most recent cancelled or expired challenges.
 
 ## API reference
 

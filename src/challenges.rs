@@ -238,13 +238,23 @@ pub fn list(
     players: &[Participant],
     now: i64,
 ) -> Result<Vec<Challenge>, Error> {
+    // Keep every open invitation actionable; only completed history is bounded.
+    // Reached goals are still open until cancelled or their deadline passes.
     let mut query = store.conn.prepare(
         "select c.id,c.title,c.kind,c.cooperative,c.creator,c.start_at,c.end_at,c.target,c.cancelled
          from community_challenges c join community_members m on m.challenge=c.id
-         where m.user=?1 and m.status in ('accepted','invited') order by c.id desc limit 100",
+         where m.user=?1 and m.status in ('accepted','invited')
+           and ((c.cancelled=0 and c.end_at>?2) or c.id in (
+             select history.id from community_challenges history
+             join community_members membership on membership.challenge=history.id
+             where membership.user=?1 and membership.status in ('accepted','invited')
+               and (history.cancelled<>0 or history.end_at<=?2)
+             order by history.id desc limit 100
+           ))
+         order by c.id desc",
     )?;
     let rows = query
-        .query_map([user], |r| {
+        .query_map(params![user, now], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -516,5 +526,67 @@ mod tests {
             create(&mut store, "owner", &request, &eligible, 100),
             Err(Error::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn recent_history_does_not_hide_an_older_open_invitation() {
+        let (mut store, _) = crate::decks::tests::temporary_store();
+        initialize(&store.conn).unwrap();
+        let eligible = BTreeSet::from(["friend".into()]);
+        let open = create(&mut store, "owner", &request(), &eligible, 100).unwrap();
+        for now in 101..206 {
+            let closed = create(&mut store, "owner", &request(), &eligible, now).unwrap();
+            act(&mut store, "owner", closed, "cancel", now + 1).unwrap();
+        }
+        let invitations = list(&store, "friend", &[], 300).unwrap();
+        assert_eq!(
+            invitations.len(),
+            101,
+            "one open invitation plus 100 historical goals"
+        );
+        assert!(invitations.iter().any(|goal| goal.id == open));
+        act(&mut store, "friend", open, "accept", 300).unwrap();
+        assert!(
+            list(&store, "friend", &[], 301)
+                .unwrap()
+                .iter()
+                .any(|goal| {
+                    goal.id == open
+                        && goal
+                            .members
+                            .iter()
+                            .any(|member| member.user == "friend" && member.status == "accepted")
+                })
+        );
+        act(&mut store, "friend", open, "leave", 302).unwrap();
+        assert_eq!(list(&store, "friend", &[], 303).unwrap().len(), 100);
+        assert!(
+            list(&store, "owner", &[], 303)
+                .unwrap()
+                .iter()
+                .any(|goal| goal.id == open)
+        );
+        act(&mut store, "owner", open, "cancel", 304).unwrap();
+        assert_eq!(list(&store, "owner", &[], 305).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn every_open_invitation_is_visible_even_above_the_history_limit() {
+        let (mut store, _) = crate::decks::tests::temporary_store();
+        initialize(&store.conn).unwrap();
+        let eligible = BTreeSet::from(["friend".into()]);
+        for index in 0..105 {
+            create(
+                &mut store,
+                &format!("owner-{index}"),
+                &request(),
+                &eligible,
+                100,
+            )
+            .unwrap();
+        }
+        let invitations = list(&store, "friend", &[], 200).unwrap();
+        assert_eq!(invitations.len(), 105);
+        assert!(invitations.iter().all(|goal| goal.status == "active"));
     }
 }

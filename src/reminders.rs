@@ -165,13 +165,27 @@ fn save_settings_at(
             }
         }
     }
-    // Keep canceled rows as budget receipts. Deleting a queued message would
-    // let a settings toggle reset the daily limit after a server restart.
-    tx.execute(
-        "update notifications set pushed = 1, push_only = 1
-         where recipient = ?1 and (kind glob 'reminder_*' or kind = 'risk')",
-        [user],
-    )?;
+    // Retain still-enabled notices and their retry state when unrelated settings
+    // change. Delivery rechecks their timing and relevance. Canceled rows remain
+    // budget receipts, so toggling preferences cannot reset the daily limit.
+    for kind in [
+        "risk",
+        "reminder_daily",
+        "reminder_urgent",
+        "reminder_freeze_used",
+        "reminder_freeze_refill",
+        "reminder_milestone",
+        "reminder_weekly_closing",
+        "reminder_weekly_recap",
+    ] {
+        if !value.enabled(kind) {
+            tx.execute(
+                "update notifications set pushed = 1, push_only = 1
+                 where recipient = ?1 and kind = ?2",
+                params![user, kind],
+            )?;
+        }
+    }
     tx.commit()?;
     Ok(())
 }
@@ -341,6 +355,13 @@ pub fn delivery_guard(
         return Ok(DeliveryGuard::Cancel);
     }
     if prefs.quiet(clock.hour(now)) {
+        return Ok(DeliveryGuard::Defer);
+    }
+    if matches!(
+        notice.kind.as_str(),
+        "reminder_daily" | "reminder_milestone" | "reminder_freeze_refill"
+    ) && !reminder_due(&prefs, clock, now)
+    {
         return Ok(DeliveryGuard::Defer);
     }
     if notice.kind == "reminder_urgent" && !urgent_window(&prefs, clock, now) {
@@ -542,9 +563,7 @@ pub fn tick(
     }
     if prefs.weekly_recap
         && let Some(recap) = previous_week.filter(|recap| {
-            recap.week_end > recap_since
-                && recap.week_end <= now_ms
-                && week.end_after(recap.week_end) == week_end
+            recap.week_end > recap_since && recap.week_end <= now_ms && now_ms < recap.valid_until
         })
     {
         let placing = recap.rank.map_or_else(
@@ -749,6 +768,109 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_settings_preserve_failed_urgent_delivery_and_its_budget() {
+        let (mut store, path) = store();
+        let clock = Clock::default();
+        let now = at(21);
+        let p = profile(&clock, now);
+        let mut prefs = Settings {
+            urgent_streak: true,
+            ..Settings::default()
+        };
+        save_settings(&mut store, "hill", &prefs).unwrap();
+        run(&mut store, &p, &clock, now);
+        let notice = store.notifications("hill", now).unwrap().remove(0);
+        assert_eq!(notice.kind, "reminder_urgent");
+        assert!(store.begin_push(notice.id, now).unwrap());
+        store.finish_push(notice.id, false, now).unwrap();
+
+        prefs.weekly_recap = true;
+        super::save_settings_at(&mut store, "hill", &prefs, now + 1000).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let retry_at = now + 20_000;
+        let inbox = store.notifications("hill", retry_at).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id, notice.id);
+        assert!(store.take_deck_deliveries(retry_at - 1).unwrap().is_empty());
+        let pending = store.take_deck_deliveries(retry_at).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].notification.id, notice.id);
+        assert_eq!(
+            delivery_guard(
+                &store,
+                "hill",
+                &notice,
+                &p,
+                &clock,
+                &Week::default(),
+                retry_at,
+            )
+            .unwrap(),
+            DeliveryGuard::Deliver
+        );
+        run(&mut store, &p, &clock, retry_at);
+        assert_eq!(store.notifications("hill", retry_at).unwrap().len(), 1);
+        assert_eq!(used_budget(&store, "hill", &clock, retry_at).unwrap(), 1);
+
+        prefs.quiet_start = 21;
+        super::save_settings_at(&mut store, "hill", &prefs, retry_at).unwrap();
+        assert_eq!(
+            delivery_guard(
+                &store,
+                "hill",
+                &notice,
+                &p,
+                &clock,
+                &Week::default(),
+                retry_at,
+            )
+            .unwrap(),
+            DeliveryGuard::Defer,
+            "retained notices still honor newly configured quiet hours"
+        );
+
+        prefs.urgent_streak = false;
+        super::save_settings_at(&mut store, "hill", &prefs, retry_at).unwrap();
+        assert!(store.notifications("hill", retry_at).unwrap().is_empty());
+        assert!(store.take_deck_deliveries(retry_at).unwrap().is_empty());
+        assert_eq!(used_budget(&store, "hill", &clock, retry_at).unwrap(), 1);
+        assert!(seen(&store, "hill", &format!("reminder:urgent:{}", p.day)).unwrap());
+        cleanup(store, path);
+    }
+
+    #[test]
+    fn retained_daily_reminder_waits_for_a_later_preferred_hour() {
+        let (mut store, path) = store();
+        let clock = Clock::default();
+        let p = profile(&clock, at(20));
+        let mut prefs = Settings {
+            gentle_daily: true,
+            ..Settings::default()
+        };
+        save_settings(&mut store, "hill", &prefs).unwrap();
+        run(&mut store, &p, &clock, at(20));
+        let notice = store.notifications("hill", at(20)).unwrap().remove(0);
+        prefs.reminder_hour = 21;
+        super::save_settings_at(&mut store, "hill", &prefs, at(20) + 60_000).unwrap();
+        for (now, expected) in [
+            (at(20) + 60_000, DeliveryGuard::Defer),
+            (at(21), DeliveryGuard::Deliver),
+        ] {
+            run(&mut store, &p, &clock, now);
+            assert_eq!(
+                delivery_guard(&store, "hill", &notice, &p, &clock, &Week::default(), now).unwrap(),
+                expected
+            );
+            let inbox = store.notifications("hill", now).unwrap();
+            assert_eq!(inbox.len(), 1);
+            assert_eq!(inbox[0].id, notice.id);
+            assert_eq!(used_budget(&store, "hill", &clock, now).unwrap(), 1);
+        }
+        cleanup(store, path);
+    }
+
+    #[test]
     fn quiet_hours_wrap_and_urgent_uses_last_allowed_window() {
         let prefs = Settings::default();
         let clock = Clock::default();
@@ -912,6 +1034,7 @@ mod tests {
         let recap = Recap {
             week_start: end - 7 * DAY,
             week_end: end,
+            valid_until: end + 7 * DAY,
             days_studied: 5,
             xp: 500,
             daily_wins: 2,
@@ -927,6 +1050,70 @@ mod tests {
             baseline(&store, "hill", "weekly_recap", true, now).unwrap(),
             end - HOUR
         );
+        cleanup(store, path);
+    }
+
+    #[test]
+    fn recap_eligibility_uses_the_archive_clock_after_configuration_changes() {
+        let (mut store, path) = store();
+        let clock = Clock::default();
+        let archive_week = Week::default();
+        let current_week = Week {
+            rollover_hour: 5,
+            ..archive_week
+        };
+        let end = archive_week.end_after(at(20));
+        let prefs = Settings {
+            weekly_recap: true,
+            quiet_start: 0,
+            quiet_end: 0,
+            ..Settings::default()
+        };
+        super::save_settings_at(&mut store, "hill", &prefs, end - HOUR).unwrap();
+        let now = end + DAY + HOUR;
+        let p = profile(&clock, now);
+        let recap = Recap {
+            week_start: end - 7 * DAY,
+            week_end: end,
+            valid_until: end + 7 * DAY,
+            days_studied: 5,
+            xp: 500,
+            daily_wins: 2,
+            rank: Some(2),
+            improvement_xp: 100,
+        };
+        for _ in 0..2 {
+            tick(
+                &mut store,
+                "hill",
+                &p,
+                &clock,
+                &current_week,
+                now,
+                Some(recap.clone()),
+            )
+            .unwrap();
+        }
+        let notices = store.notifications("hill", now).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, "reminder_weekly_recap");
+
+        // A new recipient avoids the first player's deduplication key, proving
+        // the archive deadline itself prevents a stale recap from being queued.
+        super::save_settings_at(&mut store, "friend", &prefs, end - HOUR).unwrap();
+        let expired = recap.valid_until;
+        let p = profile(&clock, expired);
+        tick(
+            &mut store,
+            "friend",
+            &p,
+            &clock,
+            &current_week,
+            expired,
+            Some(recap),
+        )
+        .unwrap();
+        assert!(store.notifications("friend", expired).unwrap().is_empty());
         cleanup(store, path);
     }
 
@@ -1163,6 +1350,7 @@ mod tests {
         let historical = Recap {
             week_start: end - 14 * DAY,
             week_end: end - 7 * DAY,
+            valid_until: end,
             days_studied: 6,
             xp: 800,
             daily_wins: 2,
@@ -1195,6 +1383,7 @@ mod tests {
         let recap = Recap {
             week_start: end - 7 * DAY,
             week_end: end,
+            valid_until: end + 7 * DAY,
             days_studied: 5,
             xp: 500,
             daily_wins: 2,

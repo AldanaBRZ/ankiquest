@@ -707,6 +707,12 @@ async fn community_dashboard(
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut store = app.store.lock().unwrap();
+    if let Some(base) = &app.config.sync_base {
+        import(&app, &mut store, base).map_err(|error| {
+            eprintln!("community sync import incomplete: {error}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    }
     let participants = app.participants();
     refresh_community(&app, &mut store, &participants, now).map_err(store_error)?;
     competition::dashboard(&store, &participants, &app.week, now, year, month)
@@ -927,38 +933,65 @@ fn load_player(store: &Store, user: &str) -> Result<Player, Error> {
     })
 }
 
-fn sync_users(base: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().join("collection.anki2").is_file())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
+fn sync_users(base: &Path) -> Result<Vec<String>, Error> {
+    let mut users = Vec::new();
+    let mut errors = Vec::new();
+    for entry in std::fs::read_dir(base)? {
+        let result = (|| -> Result<Option<String>, Error> {
+            let entry = entry?;
+            if !std::fs::metadata(entry.path())?.is_dir() {
+                return Ok(None);
+            }
+            let collection = entry.path().join("collection.anki2");
+            match std::fs::metadata(&collection) {
+                Ok(metadata) if metadata.is_file() => entry
+                    .file_name()
+                    .into_string()
+                    .map(Some)
+                    .map_err(|name| format!("invalid sync user name: {name:?}").into()),
+                Ok(_) => Err(format!("{} is not a collection file", collection.display()).into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!("{}: {error}", collection.display()).into()),
+            }
+        })();
+        match result {
+            Ok(Some(user)) => users.push(user),
+            Ok(None) => {}
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        Ok(users)
+    } else {
+        Err(errors.join("; ").into())
+    }
 }
 
 fn import(app: &App, store: &mut Store, base: &Path) -> Result<(), Error> {
-    for user in sync_users(base) {
-        let first_import = !store.is_known(&user)?;
-        let changed = match store.ingest(base, &user) {
-            Ok(changed) => changed,
-            Err(e) => {
-                eprintln!("ingest for {user} failed: {e}");
-                continue;
+    let mut errors = Vec::new();
+    for user in sync_users(base)? {
+        let result = (|| -> Result<(), Error> {
+            let first_import = !store.is_known(&user)?;
+            if store.ingest(base, &user)? {
+                let player = load_player(store, &user)?;
+                app.players.write().unwrap().insert(user.clone(), player);
             }
-        };
-        if changed {
-            let player = load_player(store, &user)?;
-            app.players.write().unwrap().insert(user.clone(), player);
-        }
-        if first_import && let Some(profile) = app.profile(&user) {
-            for event in &profile.events {
-                store.mark_seen(&user, &event.key)?;
+            if first_import && let Some(profile) = app.profile(&user) {
+                for event in &profile.events {
+                    store.mark_seen(&user, &event.key)?;
+                }
             }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            errors.push(format!("ingest for {user} failed: {error}"));
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; ").into())
+    }
 }
 
 fn streak_warning_body(profile: &Profile) -> String {
@@ -977,12 +1010,22 @@ fn streak_warning_body(profile: &Profile) -> String {
 
 fn tick(app: &App) -> Result<(), Error> {
     let mut store = app.store.lock().unwrap();
-    if let Some(base) = &app.config.sync_base {
-        import(app, &mut store, base)?;
-    }
+    let import_complete =
+        app.config
+            .sync_base
+            .as_ref()
+            .is_none_or(|base| match import(app, &mut store, base) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("competition refresh deferred until sync import succeeds: {error}");
+                    false
+                }
+            });
     let participants = app.participants();
     let now = now_ms();
-    refresh_community(app, &mut store, &participants, now)?;
+    if import_complete {
+        refresh_community(app, &mut store, &participants, now)?;
+    }
     let users: Vec<String> = app.players.read().unwrap().keys().cloned().collect();
     // One snapshot of the standings, so a nudge knows who is just out of reach.
     let ranking = app.profiles();
@@ -1613,6 +1656,191 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert!(serde_json::from_value::<challenges::Create>(serde_json::json!({"title":"No injected creator","kind":"reviews","cooperative":true,"target":10,"duration_days":7,"recipients":["hill"],"creator":"hill"})).is_err());
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    fn community_sync_fixture() -> (Arc<App>, PathBuf, PathBuf) {
+        let (mut app, path) = fixture();
+        let base = path.join("sync");
+        std::fs::create_dir_all(&base).unwrap();
+        Arc::get_mut(&mut app).unwrap().config.sync_base = Some(base.clone());
+        (app, path, base)
+    }
+
+    fn community_history(count: i64) -> (chrono::NaiveDate, Vec<Review>) {
+        let day = Week::default().competition_date(now_ms()) - chrono::Duration::days(3);
+        let at = Week::default().boundary_ms(day) + 3_600_000;
+        let reviews = (0..count)
+            .map(|index| Review {
+                id: at + index * 1000,
+                cid: at + index,
+                last_ivl: 10,
+                time_ms: 10_000,
+                kind: 1,
+            })
+            .collect();
+        (day, reviews)
+    }
+
+    fn community_collection(base: &Path, user: &str, reviews: &[Review]) {
+        std::fs::create_dir_all(base.join(user)).unwrap();
+        let mut conn =
+            rusqlite::Connection::open(base.join(user).join("collection.anki2")).unwrap();
+        conn.execute_batch(
+            "create table revlog (id integer primary key, cid integer, lastIvl integer,
+                 time integer, type integer, ease integer);",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        for review in reviews {
+            tx.execute(
+                "insert into revlog values (?1,?2,?3,?4,?5,3)",
+                rusqlite::params![
+                    review.id,
+                    review.cid,
+                    review.last_ivl,
+                    review.time_ms,
+                    review.kind
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn community_query(day: chrono::NaiveDate) -> Query<CommunityQuery> {
+        Query(CommunityQuery {
+            year: Some(day.year()),
+            month: Some(day.month()),
+        })
+    }
+
+    #[tokio::test]
+    async fn community_first_request_imports_fresh_sync_before_finalizing_stale_history() {
+        let (app, path, base) = community_sync_fixture();
+        let (day, reviews) = community_history(100);
+        {
+            let mut store = app.store.lock().unwrap();
+            for (user, count) in [("hill", 1), ("cerro", 2)] {
+                store
+                    .upsert(user, &reviews[..count], &[], Clock::default())
+                    .unwrap();
+                app.players
+                    .write()
+                    .unwrap()
+                    .insert(user.into(), load_player(&store, user).unwrap());
+            }
+        }
+        community_collection(&base, "hill", &reviews);
+
+        let board = community_dashboard(State(app.clone()), community_query(day))
+            .await
+            .unwrap()
+            .0;
+        let archived = board["calendar"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|period| period["key"] == day.to_string())
+            .unwrap();
+        assert_eq!(archived["status"], "final");
+        assert_eq!(archived["winners"], serde_json::json!(["hill"]));
+        assert_eq!(archived["standings"][0]["reviews"], 100);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn community_failed_import_defers_archive_until_every_collection_recovers() {
+        let (app, path, base) = community_sync_fixture();
+        let (day, reviews) = community_history(100);
+        community_collection(&base, "cerro", &reviews[..2]);
+        for user in ["hill", "friend"] {
+            std::fs::create_dir_all(base.join(user)).unwrap();
+            std::fs::write(
+                base.join(user).join("collection.anki2"),
+                b"invalid database",
+            )
+            .unwrap();
+        }
+        {
+            let mut store = app.store.lock().unwrap();
+            let error = import(&app, &mut store, &base).unwrap_err().to_string();
+            assert!(error.contains("hill"));
+            assert!(error.contains("friend"));
+            assert_eq!(store.reviews("cerro").unwrap().len(), 2);
+        }
+        assert_eq!(
+            community_dashboard(State(app.clone()), community_query(day))
+                .await
+                .unwrap_err(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        tick(&app).unwrap();
+        {
+            let store = app.store.lock().unwrap();
+            for table in [
+                "competition_meta",
+                "competition_periods",
+                "community_refresh",
+            ] {
+                assert_eq!(
+                    store
+                        .conn
+                        .query_row(&format!("select count(*) from {table}"), [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        for (user, count) in [("hill", 100), ("friend", 1)] {
+            std::fs::remove_file(base.join(user).join("collection.anki2")).unwrap();
+            community_collection(&base, user, &reviews[..count]);
+        }
+        let board = community_dashboard(State(app.clone()), community_query(day))
+            .await
+            .unwrap()
+            .0;
+        let archived = board["calendar"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|period| period["key"] == day.to_string())
+            .unwrap();
+        assert_eq!(archived["status"], "final");
+        assert_eq!(archived["winners"], serde_json::json!(["hill"]));
+        assert_eq!(archived["standings"][0]["reviews"], 100);
+        assert_eq!(archived["standings"].as_array().unwrap().len(), 3);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn community_unreadable_sync_directory_never_initializes_archive() {
+        let (mut app, path, base) = community_sync_fixture();
+        Arc::get_mut(&mut app).unwrap().config.sync_base = Some(base.join("missing"));
+        assert!(sync_users(&base.join("missing")).is_err());
+        assert_eq!(
+            community_dashboard(State(app.clone()), Query(CommunityQuery::default()))
+                .await
+                .unwrap_err(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        tick(&app).unwrap();
+        assert_eq!(
+            app.store
+                .lock()
+                .unwrap()
+                .conn
+                .query_row("select count(*) from competition_periods", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }

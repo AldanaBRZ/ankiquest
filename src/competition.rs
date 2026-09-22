@@ -412,6 +412,8 @@ pub fn refresh(
 pub struct WeeklyRecap {
     pub week_start: i64,
     pub week_end: i64,
+    /// End of the following week, using the persisted archive clock.
+    pub valid_until: i64,
     pub days_studied: u64,
     pub xp: u64,
     pub daily_wins: u64,
@@ -468,6 +470,7 @@ pub fn weekly_recap(
     Ok(Some(WeeklyRecap {
         week_start: archive_week.boundary_ms(start),
         week_end: archive_week.boundary_ms(end),
+        valid_until: archive_week.boundary_ms(end + Duration::days(7)),
         days_studied: score.map_or(0, |s| s.days_active),
         xp: score.map_or(0, |s| s.xp),
         daily_wins,
@@ -907,6 +910,34 @@ mod tests {
             period(db.get(), "month", "2026-09").standings[0].reviews,
             10
         );
+    }
+
+    #[test]
+    fn recap_validity_preserves_the_archived_clock_after_cutoff_changes() {
+        let mut db = Database::new();
+        let archive_week = Week::default();
+        let current_week = Week {
+            rollover_hour: 5,
+            ..archive_week
+        };
+        let players = vec![player("a", reviews("2026-09-20", 1))];
+        refresh(
+            db.get(),
+            &players,
+            &archive_week,
+            at("2026-09-20", 20),
+            None,
+        )
+        .unwrap();
+        let now = at("2026-09-22", 5);
+        refresh(db.get(), &players, &current_week, now, None).unwrap();
+        let recap = weekly_recap(db.get(), "a", &current_week, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recap.week_start, at("2026-09-14", 4));
+        assert_eq!(recap.week_end, at("2026-09-21", 4));
+        assert_eq!(recap.valid_until, at("2026-09-28", 4));
+        assert_eq!(recap.days_studied, 1);
     }
 
     #[test]

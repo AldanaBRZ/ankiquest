@@ -54,7 +54,7 @@ const number = value => Number(value || 0).toLocaleString();
 const amount = value => Math.max(0, Number(value) || 0);
 const months = Array.from({length:12}, (_, i) => new Intl.DateTimeFormat(undefined,{month:"long",timeZone:"UTC"}).format(new Date(Date.UTC(2024,i,1))));
 const now = new Date();
-const state = { data:null, view:"overview", year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, reminders:null, challenges:null, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"" };
+const state = { data:null, view:"overview", year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"" };
 const reminderDefinitions = [
   ["gentle_daily","Gentle daily reminder","A friendly nudge when you haven’t studied yet."],
   ["urgent_streak","Unprotected streak warning","An urgent reminder near your cutoff when no freeze is left or freeze protection is switched off."],
@@ -178,21 +178,30 @@ function renderAll() {
   if(!state.data) return;
   renderOverview();renderCalendar();renderTrophies();renderRecords();renderYear();renderPrivate();showView(state.view);
 }
+function accountBanner() { return `<div class="auth-status"><span>Connected as <strong>${esc(name(state.session.user))}</strong></span><button type="button" data-disconnect>Disconnect</button></div>`; }
 function renderPrivate() {
   const panels=["challenges","reminders"];
   if(!state.session) {
     panels.forEach(panel=>$("view-"+panel).innerHTML=`<article class="card gate"><span class="symbol" aria-hidden="true">${panel==="challenges"?"⚑":"◷"}</span><h2>${panel==="challenges"?"A little encouragement from your friends":"Reminders that fit your day"}</h2><p>${panel==="challenges"?"Invite study buddies to a personal challenge, work toward a shared goal, and see your progress together.":"Choose the nudges you want, set quiet hours, and protect your study routine."}</p><button class="primary" type="button" data-connect>Connect your account</button><p class="settings-hint">Use your AnkiQuest token. Your private settings stay private.</p></article>`);
     return;
   }
-  const banner=`<div class="auth-status"><span>Connected as <strong>${esc(name(state.session.user))}</strong></span><button type="button" data-disconnect>Disconnect</button></div>`;
+  const banner=accountBanner();
   if(state.privateLoading) { panels.forEach(panel=>$("view-"+panel).innerHTML=banner+'<p class="loading-copy" role="status">Loading your account…</p>');return; }
   if(state.privateError) { panels.forEach(panel=>$("view-"+panel).innerHTML=banner+`<div class="notice error" role="alert">${esc(state.privateError)} <button type="button" data-private-retry>Try again</button></div>`);return; }
   renderReminderForm(banner);renderChallenges(banner);
 }
 function hourOptions(selected) { return Array.from({length:24},(_,hour)=>`<option value="${hour}" ${hour===Number(selected)?"selected":""}>${String(hour).padStart(2,"0")}:00</option>`).join(""); }
 function renderReminderForm(banner) {
-  const prefs=state.reminders;if(!prefs) { $("view-reminders").innerHTML=banner;return; }
+  const prefs=state.reminderDraft||state.reminders;if(!prefs) { $("view-reminders").innerHTML=banner;return; }
   $("view-reminders").innerHTML=banner+`<article class="card"><div class="card-head"><div><h2>A nudge when it helps</h2><p>Choose each reminder. You’re in control of the frequency.</p></div><span class="symbol" aria-hidden="true">◷</span></div><form id="reminder-form"><div class="settings-list">${reminderDefinitions.map(([key,title,description])=>`<label class="check"><input type="checkbox" name="${key}" ${prefs[key]?"checked":""}><span><strong>${title}</strong><small>${description}</small></span></label>`).join("")}</div><div class="settings-timing"><label class="field"><span>Daily reminder at</span><select name="reminder_hour">${hourOptions(prefs.reminder_hour)}</select></label><label class="field"><span>Quiet hours start</span><select name="quiet_start">${hourOptions(prefs.quiet_start)}</select></label><label class="field"><span>Quiet hours end</span><select name="quiet_end">${hourOptions(prefs.quiet_end)}</select></label><label class="field"><span>Daily limit</span><select name="daily_limit">${[1,2,3,4,5].map(value=>`<option value="${value}" ${value===prefs.daily_limit?"selected":""}>${value} notification${value===1?"":"s"}</option>`).join("")}</select></label></div><p class="settings-hint">Reminder times use your AnkiQuest timezone. Streak warnings follow your Anki day cutoff and stop after studying is recorded. Quiet hours and your daily limit apply to these reminders, including urgent ones. Set the same quiet start and end to disable quiet hours.</p><p class="settings-hint">These preferences control server reminders. Device-only AnkiDroid and desktop add-on alarms are managed separately in each client's settings. Delivery uses the notification channel configured for your AnkiQuest account. Freeze refill reminders apply when quest-earned freezes are enabled.</p><p id="reminder-status" class="status" role="status"></p><div class="form-actions"><button class="primary" type="submit">Save reminder preferences</button></div></form></article>`;
+  $("reminder-status").textContent=state.reminderStatus;
+  $("reminder-status").className=state.reminderError?"status error":"status";
+  $("reminder-form").querySelectorAll("input,select,button").forEach(control=>control.disabled=state.reminderSaving);
+}
+function reminderFormValues(form) {
+  const values={};reminderDefinitions.forEach(([key])=>values[key]=form.elements[key].checked);
+  ["reminder_hour","quiet_start","quiet_end","daily_limit"].forEach(key=>values[key]=Number(form.elements[key].value));
+  return values;
 }
 function dateTime(value) { if(value===null||value===undefined) return "—"; const parsed=new Date(value);return Number.isNaN(parsed.getTime())?String(value):parsed.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}); }
 function progressBar(progress,target) { const percent=target?Math.min(100,amount(progress)/amount(target)*100):0;return `<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${amount(target)}" aria-valuenow="${Math.min(amount(target),amount(progress))}" aria-label="Challenge progress"><i style="width:${percent}%"></i></div>`; }
@@ -217,8 +226,8 @@ async function request(url,options={}) {
 function privateRequest(path,body,session=state.session) { if(!session) return Promise.reject(new Error("Connect your account first."));return request(`/api/community/${path}/${encodeURIComponent(session.user)}`,{method:body===undefined?"GET":"POST",headers:{Authorization:"Bearer "+session.token,...(body===undefined?{}:{"Content-Type":"application/json"})},...(body===undefined?{}:{body:JSON.stringify(body)})}); }
 async function loadPrivate() {
   if(!state.session) return;
-  const session=state.session,epoch=++state.privateEpoch;state.privateLoading=true;state.privateError="";renderPrivate();
-  try { const [reminders,challenges]=await Promise.all([privateRequest("reminders",undefined,session),privateRequest("challenges",undefined,session)]);if(state.session!==session||epoch!==state.privateEpoch)return;state.reminders=reminders;state.challenges=challenges; }
+  const session=state.session,epoch=++state.privateEpoch,reminderEpoch=state.reminderEpoch,reminderSaving=state.reminderSaving;state.privateLoading=true;state.privateError="";renderPrivate();
+  try { const [reminders,challenges]=await Promise.all([privateRequest("reminders",undefined,session),privateRequest("challenges",undefined,session)]);if(state.session!==session||epoch!==state.privateEpoch)return;if(reminderEpoch===state.reminderEpoch&&!reminderSaving&&!state.reminderSaving)state.reminders=reminders;state.challenges=challenges; }
   catch(error) { if(state.session!==session||epoch!==state.privateEpoch)return;state.privateError=error.message; }
   finally { if(state.session===session&&epoch===state.privateEpoch){state.privateLoading=false;renderPrivate();} }
 }
@@ -231,7 +240,7 @@ function connect() {
   if(!state.data.players.length) $("auth-message").textContent="No player accounts are available yet.";
   $("auth-dialog").showModal();
 }
-function disconnect() { state.privateEpoch++;state.session=null;state.reminders=null;state.challenges=null;state.privateLoading=false;state.privateError="";$("connect-button").textContent="Connect account";renderPrivate(); }
+function disconnect() { state.privateEpoch++;state.reminderEpoch++;state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;state.challenges=null;state.privateLoading=false;state.privateError="";$("connect-button").textContent="Connect account";renderPrivate(); }
 function updateSelectors() {
   const earliest=Number(String(state.data.meta.start_date||state.year).slice(0,4)), latest=Math.max(now.getFullYear(),state.year);
   $("year-filter").innerHTML=Array.from({length:Math.max(1,Math.min(150,latest-Math.min(earliest,state.year)+1))},(_,index)=>latest-index).map(year=>`<option value="${year}" ${year===state.year?"selected":""}>${year}</option>`).join("");
@@ -273,6 +282,7 @@ $("player-filter").addEventListener("change",event=>{state.player=event.target.v
 $("year-filter").addEventListener("change",event=>{state.year=Number(event.target.value);loadData();});
 $("month-filter").addEventListener("change",event=>{state.month=Number(event.target.value);loadData();});
 document.addEventListener("change",event=>{
+  if(event.target.form?.id==="reminder-form"&&!state.reminderSaving){state.reminderDraft=reminderFormValues(event.target.form);state.reminderStatus="";state.reminderError=false;$("reminder-status").textContent="";}
   if(event.target.id==="matchup-a"){state.matchupA=event.target.value;renderMatchup();}
   if(event.target.id==="matchup-b"){state.matchupB=event.target.value;renderMatchup();}
   if(event.target.id==="record-scope"){state.recordScope=event.target.value;renderRecords();}
@@ -293,11 +303,12 @@ $("auth-form").addEventListener("submit",async event=>{
 });
 document.addEventListener("submit",async event=>{
   if(event.target.id==="reminder-form") {
-    event.preventDefault();const form=event.target,session=state.session,body={};reminderDefinitions.forEach(([key])=>body[key]=form.elements[key].checked);["reminder_hour","quiet_start","quiet_end","daily_limit"].forEach(key=>body[key]=Number(form.elements[key].value));
-    const submit=form.querySelector('[type="submit"]'),status=$("reminder-status");submit.disabled=true;status.className="status";status.textContent="Saving preferences…";
-    try { const prefs=await privateRequest("reminders",body,session);if(state.session!==session)return;state.reminders=prefs;status.textContent="Your reminder preferences are saved."; }
-    catch(error){if(state.session===session){status.className="status error";status.textContent=error.message;}}
-    finally{submit.disabled=false;}
+    event.preventDefault();if(!state.session||state.reminderSaving)return;
+    const session=state.session,epoch=++state.reminderEpoch,body=reminderFormValues(event.target);
+    state.reminderDraft=body;state.reminderSaving=true;state.reminderError=false;state.reminderStatus="Saving preferences…";renderReminderForm(accountBanner());
+    try { const prefs=await privateRequest("reminders",body,session);if(state.session!==session||epoch!==state.reminderEpoch)return;state.reminders=prefs;state.reminderDraft=null;state.reminderStatus="Your reminder preferences are saved."; }
+    catch(error){if(state.session===session&&epoch===state.reminderEpoch){state.reminderError=true;state.reminderStatus=error.message;}}
+    finally{if(state.session===session&&epoch===state.reminderEpoch){state.reminderSaving=false;if(!state.privateLoading&&!state.privateError)renderReminderForm(accountBanner());}}
   }
   if(event.target.id==="challenge-form") {
     event.preventDefault();const form=event.target,session=state.session,formData=new FormData(form),body={title:String(formData.get("title")).trim(),kind:formData.get("kind"),cooperative:formData.get("cooperative")==="true",target:Number(formData.get("target")),duration_days:Number(formData.get("duration_days")),recipients:formData.getAll("recipients")};
