@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -103,6 +103,28 @@ impl Default for Week {
 }
 
 impl Week {
+    /// The common competition date, independent of any player's Anki clock.
+    pub fn competition_date(&self, ms: i64) -> NaiveDate {
+        self.shifted(ms).date()
+    }
+
+    /// Resolve a calendar rollover in the configured time zone. On a spring
+    /// daylight-saving gap, use the first valid local minute after the gap;
+    /// on a repeated fall-back hour, use its first occurrence.
+    pub fn boundary_ms(&self, date: NaiveDate) -> i64 {
+        let local = date.and_hms_opt(self.rollover_hour.min(23), 0, 0).unwrap();
+        for minute in 0..=180 {
+            if let Some(at) = self
+                .tz
+                .from_local_datetime(&(local + Duration::minutes(minute)))
+                .earliest()
+            {
+                return at.timestamp_millis();
+            }
+        }
+        local.and_utc().timestamp_millis()
+    }
+
     fn shifted(&self, ms: i64) -> NaiveDateTime {
         DateTime::from_timestamp_millis(ms)
             .unwrap_or_default()
@@ -703,6 +725,20 @@ pub struct Event {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct HistoryDay {
+    /// UTC start of the player's Anki day. Competition periods use this instant,
+    /// exactly as the existing weekly/monthly leaderboard does.
+    pub at: i64,
+    pub date: String,
+    pub xp: u64,
+    pub reviews: u64,
+    pub time_ms: i64,
+    pub new_cards: u64,
+    pub streak: u64,
+    pub frozen: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct Profile {
     pub user: String,
     pub display: String,
@@ -730,6 +766,8 @@ pub struct Profile {
     pub day: i64,
     #[serde(skip)]
     pub events: Vec<Event>,
+    #[serde(skip)]
+    pub history: Vec<HistoryDay>,
 }
 
 pub fn level_need(level: u64) -> u64 {
@@ -993,6 +1031,7 @@ pub fn compute_with_freezes(
     let mut xp_total = 0u64;
     let mut today_quests = Vec::new();
     let mut events = Vec::new();
+    let mut history = Vec::new();
     let empty = DayStats::default();
     let (first_year, first_month, first_date) = civil(first);
     let mut month = (first_year, first_month);
@@ -1118,6 +1157,17 @@ pub fn compute_with_freezes(
             }
         }
         xp_total += xp;
+        let s = stats.unwrap_or(&empty);
+        history.push(HistoryDay {
+            at: clock.day_start_ms(day),
+            date: date_string(day),
+            xp,
+            reviews: s.reviews,
+            time_ms: s.time_ms,
+            new_cards: s.new_cards,
+            streak,
+            frozen: frozen.contains(&day),
+        });
         if xp > 0 {
             day_xp.insert(day, xp);
         }
@@ -1264,6 +1314,7 @@ pub fn compute_with_freezes(
         last_review_id: reviews.last().map_or(0, |r| r.id),
         day: today,
         events,
+        history,
     }
 }
 

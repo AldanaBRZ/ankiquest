@@ -215,6 +215,7 @@ function tabs(active) {
   const links = Object.entries(PERIODS).map(([name, label]) =>
     `<a class="${name === active ? "on" : ""}" href="/${name}${location.hash}">${label}</a>`);
   links.push(`<a class="${active === "records" ? "on" : ""}" href="/records${location.hash}">Records</a>`);
+  links.push(`<a href="/community">Community</a>`);
   return `<nav class="tabs">${links.join("")}</nav>`;
 }
 
