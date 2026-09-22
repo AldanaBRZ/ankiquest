@@ -489,6 +489,173 @@ fn won(period: &Period, user: &str) -> bool {
     period.is_final() && period.winners.iter().any(|winner| winner == user)
 }
 
+#[derive(Default, Serialize)]
+struct WinnerTotals {
+    user: String,
+    display: String,
+    history_start: Option<String>,
+    day_wins: u64,
+    week_wins: u64,
+    month_wins: u64,
+}
+
+impl WinnerTotals {
+    fn add_win(&mut self, kind: &str) {
+        match kind {
+            "day" => self.day_wins += 1,
+            "week" => self.week_wins += 1,
+            "month" => self.month_wins += 1,
+            _ => {}
+        }
+    }
+}
+
+/// Raw lifetime wins and a common comparison window for the current roster.
+/// Both views use the original archived winners; this never rewrites a result.
+pub fn winner_history(store: &Store, players: &[Participant]) -> Result<Value, Error> {
+    let meta = read_metadata(&store.conn)?;
+    let periods = read_periods(&store.conn)?;
+    winner_history_from_periods(meta.as_ref(), players, &periods)
+}
+
+fn archived_history_starts(periods: &[Period]) -> BTreeMap<String, String> {
+    let mut starts: BTreeMap<String, String> = BTreeMap::new();
+    for period in periods.iter().filter(|p| p.kind == "day") {
+        for row in period.standings.iter().filter(|row| row.reviews > 0) {
+            starts
+                .entry(row.user.clone())
+                .and_modify(|start| {
+                    if period.start < *start {
+                        *start = period.start.clone();
+                    }
+                })
+                .or_insert_with(|| period.start.clone());
+        }
+    }
+    starts
+}
+
+fn has_full_daily_coverage(period: &Period, covered_days: &BTreeSet<&str>) -> Result<bool, Error> {
+    let mut day = date(&period.start)?;
+    let end = date(&period.end)?;
+    while day < end {
+        if !covered_days.contains(day.to_string().as_str()) {
+            return Ok(false);
+        }
+        day += Duration::days(1);
+    }
+    Ok(true)
+}
+
+fn winner_history_from_periods(
+    meta: Option<&Metadata>,
+    players: &[Participant],
+    periods: &[Period],
+) -> Result<Value, Error> {
+    let mut identities = BTreeMap::new();
+    let history_starts = archived_history_starts(periods);
+    for period in periods {
+        for row in &period.standings {
+            identities.insert(row.user.clone(), row.display.clone());
+        }
+    }
+    let mut roster = BTreeSet::new();
+    let mut waiting_players = Vec::new();
+    for player in players {
+        identities.insert(player.user.clone(), player.display.clone());
+        if history_starts.contains_key(&player.user) {
+            roster.insert(player.user.clone());
+        } else {
+            waiting_players.push(json!({"user":player.user,"display":player.display}));
+        }
+    }
+    let shared_start = (roster.len() >= 2)
+        .then(|| {
+            roster
+                .iter()
+                .filter_map(|user| history_starts.get(user))
+                .max()
+        })
+        .flatten();
+    let totals = |user: &str, display: &str| WinnerTotals {
+        user: user.into(),
+        display: display.into(),
+        history_start: history_starts.get(user).cloned(),
+        ..WinnerTotals::default()
+    };
+    let mut lifetime: BTreeMap<_, _> = identities
+        .iter()
+        .map(|(user, display)| (user.clone(), totals(user, display)))
+        .collect();
+    let mut shared: BTreeMap<_, _> = roster
+        .iter()
+        .map(|user| (user.clone(), totals(user, &identities[user])))
+        .collect();
+    let roster_present = |period: &Period| {
+        roster
+            .iter()
+            .all(|user| period.standings.iter().any(|row| row.user == *user))
+    };
+    // An aggregate row only proves that a player appeared at some point in the
+    // week/month. Require a recorded row on every constituent day as well, so a
+    // late import or a gap in archived membership cannot create a partial match.
+    // A present zero-review row is a valid missed study day, not missing history.
+    let covered_days: BTreeSet<_> = periods
+        .iter()
+        .filter(|p| p.kind == "day" && p.is_final() && !p.partial && roster_present(p))
+        .map(|p| p.start.as_str())
+        .collect();
+    let mut shared_periods = [0u64; 3];
+    for period in periods.iter().filter(|p| p.is_final()) {
+        for winner in &period.winners {
+            if let Some(total) = lifetime.get_mut(winner) {
+                total.add_win(&period.kind);
+            }
+        }
+        let Some(start) = shared_start else {
+            continue;
+        };
+        if period.partial
+            || period.start < *start
+            || period.winners.is_empty()
+            || !roster_present(period)
+        {
+            continue;
+        }
+        let slot = match period.kind.as_str() {
+            "day" => 0,
+            "week" => 1,
+            "month" => 2,
+            _ => continue,
+        };
+        if slot != 0 && !has_full_daily_coverage(period, &covered_days)? {
+            continue;
+        }
+        shared_periods[slot] += 1;
+        for winner in &period.winners {
+            if let Some(total) = shared.get_mut(winner) {
+                total.add_win(&period.kind);
+            }
+        }
+    }
+    Ok(json!({
+        "meta": {
+            "start_date":meta.and_then(|m| m.start_date.as_deref()),
+            "start_source":meta.map_or("available_history", |m| m.start_source.as_str()),
+            "time_zone":meta.map(|m| m.time_zone.as_str()),
+            "rollover_hour":meta.map(|m| m.rollover_hour)
+        },
+        "shared": {
+            "start_date":shared_start,
+            "player_count":roster.len(),
+            "periods":{"day":shared_periods[0],"week":shared_periods[1],"month":shared_periods[2]},
+            "players":shared.into_values().collect::<Vec<_>>()
+        },
+        "lifetime":{"players":lifetime.into_values().collect::<Vec<_>>()},
+        "waiting_players":waiting_players
+    }))
+}
+
 fn trophy(id: &str, title: &str, date: &str) -> Value {
     json!({"id":id,"title":title,"date":date})
 }
@@ -686,12 +853,40 @@ pub fn dashboard(
         }));
     }
     let users: Vec<_> = identities.keys().collect();
+    let history_starts = archived_history_starts(&periods);
     let mut head_to_head = Vec::new();
     for (index, a) in users.iter().enumerate() {
         for b in users.iter().skip(index + 1) {
-            let count = |periods: &[&Period]| {
+            let pair_start = history_starts
+                .get(*a)
+                .zip(history_starts.get(*b))
+                .map(|(a, b)| a.max(b));
+            let covered_days: BTreeSet<_> = days
+                .iter()
+                .filter(|p| {
+                    p.is_final()
+                        && !p.partial
+                        && p.standings.iter().any(|row| &row.user == *a)
+                        && p.standings.iter().any(|row| &row.user == *b)
+                })
+                .map(|p| p.start.as_str())
+                .collect();
+            let count = |periods: &[&Period]| -> Result<[u64; 3], Error> {
                 let mut score = [0u64; 3];
                 for period in periods.iter().filter(|p| p.is_final()) {
+                    if period.kind == "week" {
+                        let Some(start) = pair_start else {
+                            continue;
+                        };
+                        // Compare complete weeks for this pair, independently
+                        // of when other community members started studying.
+                        if period.partial
+                            || period.start < *start
+                            || !has_full_daily_coverage(period, &covered_days)?
+                        {
+                            continue;
+                        }
+                    }
                     let ra = period.standings.iter().find(|r| &r.user == *a);
                     let rb = period.standings.iter().find(|r| &r.user == *b);
                     // Include only periods both players were present in the
@@ -707,13 +902,14 @@ pub fn dashboard(
                         }
                     }
                 }
-                score
+                Ok(score)
             };
-            let d = count(&days);
-            let w = count(&weeks);
+            let d = count(&days)?;
+            let w = count(&weeks)?;
             head_to_head.push(json!({"a":a,"b":b,"days_a":d[0],"days_b":d[1],"days_tied":d[2],"weeks_a":w[0],"weeks_b":w[1],"weeks_tied":w[2]}));
         }
     }
+    let winner_history = winner_history_from_periods(Some(&meta), players, &periods)?;
     let mut metadata = serde_json::to_value(meta)?;
     metadata["year"] = json!(year);
     metadata["month"] = json!(month);
@@ -728,7 +924,7 @@ pub fn dashboard(
         "seasons":seasons.iter().filter(|p| p.start>=year_start && p.start<year_end).collect::<Vec<_>>(),
         "awards":awards.into_iter().filter(|a| a["date"].as_str().is_some_and(|d| d>=year_start.as_str() && d<year_end.as_str())).collect::<Vec<_>>(),
         "records":records.into_iter().filter(|a| a["date"].as_str().is_some_and(|d| d>=year_start.as_str() && d<year_end.as_str())).rev().collect::<Vec<_>>(),
-        "head_to_head":head_to_head
+        "head_to_head":head_to_head,"winner_history":winner_history
     }))
 }
 
@@ -809,6 +1005,301 @@ mod tests {
             .into_iter()
             .find(|p| p.kind == kind && p.key == key)
             .unwrap()
+    }
+
+    fn winner_total<'a>(view: &'a Value, scope: &str, user: &str) -> &'a Value {
+        view[scope]["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["user"] == user)
+            .unwrap()
+    }
+
+    #[test]
+    fn shared_wins_remove_solo_headstarts_and_ignore_accounts_without_history() {
+        let mut db = Database::new();
+        let mut veteran = reviews("2019-01-01", 1);
+        veteran.extend(reviews("2022-01-03", 1));
+        let players = vec![
+            player("veteran", veteran),
+            // Clear the veteran's existing comeback/achievement bonuses too;
+            // the shared window must preserve, rather than recompute, this win.
+            player("newcomer", reviews("2022-01-03", 100)),
+            player("waiting", vec![]),
+        ];
+        let now = at("2022-01-05", 12);
+        refresh(db.get(), &players, &Week::default(), now, None).unwrap();
+        assert_eq!(
+            period(db.get(), "day", "2022-01-03").winners,
+            vec!["newcomer"]
+        );
+        let view = winner_history(db.get(), &players).unwrap();
+        assert_eq!(view["meta"]["start_date"], "2019-01-01");
+        assert_eq!(view["shared"]["start_date"], "2022-01-03");
+        assert_eq!(view["shared"]["player_count"], 2);
+        assert_eq!(view["shared"]["periods"]["day"], 1);
+        assert_eq!(winner_total(&view, "shared", "veteran")["day_wins"], 0);
+        assert_eq!(winner_total(&view, "shared", "newcomer")["day_wins"], 1);
+        assert_eq!(winner_total(&view, "lifetime", "veteran")["day_wins"], 1);
+        assert_eq!(
+            winner_total(&view, "lifetime", "veteran")["history_start"],
+            "2019-01-01"
+        );
+        assert!(winner_total(&view, "lifetime", "waiting")["history_start"].is_null());
+        assert_eq!(
+            view["waiting_players"],
+            json!([{"user":"waiting","display":"WAITING"}])
+        );
+        let dashboard = dashboard(db.get(), &players, &Week::default(), now, 2022, 1).unwrap();
+        assert_eq!(dashboard["winner_history"], view);
+    }
+
+    #[test]
+    fn shared_weeks_and_months_begin_with_the_first_full_common_period() {
+        let mut db = Database::new();
+        let mut a = reviews("2026-09-01", 1);
+        a.extend(reviews("2026-09-14", 100));
+        a.extend(reviews("2026-10-01", 10));
+        let mut b = reviews("2026-09-16", 2);
+        b.extend(reviews("2026-09-21", 3));
+        b.extend(reviews("2026-10-01", 1));
+        let players = vec![player("a", a), player("b", b)];
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-11-03", 12),
+            None,
+        )
+        .unwrap();
+        let view = winner_history(db.get(), &players).unwrap();
+        assert_eq!(view["shared"]["start_date"], "2026-09-16");
+        assert_eq!(
+            view["shared"]["periods"],
+            json!({"day":3,"week":2,"month":1})
+        );
+        assert_eq!(winner_total(&view, "shared", "a")["day_wins"], 1);
+        assert_eq!(winner_total(&view, "shared", "b")["day_wins"], 2);
+        assert_eq!(winner_total(&view, "shared", "a")["week_wins"], 1);
+        assert_eq!(winner_total(&view, "shared", "b")["week_wins"], 1);
+        assert_eq!(winner_total(&view, "shared", "a")["month_wins"], 1);
+        assert_eq!(winner_total(&view, "lifetime", "a")["month_wins"], 2);
+        assert!(period(db.get(), "week", "2026-08-31").partial);
+    }
+
+    #[test]
+    fn head_to_head_skips_a_partial_join_week_but_keeps_the_pairs_next_full_week() {
+        let mut db = Database::new();
+        let mut a = reviews("2026-09-14", 100);
+        a.extend(reviews("2026-09-21", 1));
+        let mut b = reviews("2026-09-16", 1);
+        b.extend(reviews("2026-09-21", 5));
+        let players = vec![
+            player("a", a),
+            player("b", b),
+            player("later", reviews("2026-09-30", 1)),
+        ];
+        let now = at("2026-10-03", 12);
+        refresh(db.get(), &players, &Week::default(), now, None).unwrap();
+        let view = dashboard(db.get(), &players, &Week::default(), now, 2026, 9).unwrap();
+        let pair = view["head_to_head"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pair| pair["a"] == "a" && pair["b"] == "b")
+            .unwrap();
+        // Player a wins the full week in which b only joined on Wednesday.
+        // Their next week is comparable even though a third player joins later.
+        assert_eq!(period(db.get(), "week", "2026-09-14").winners, vec!["a"]);
+        assert_eq!(pair["weeks_a"], 0);
+        assert_eq!(pair["weeks_b"], 1);
+        assert_eq!(pair["weeks_tied"], 0);
+        assert_eq!(pair["days_a"], 0);
+        assert_eq!(pair["days_b"], 2);
+        assert_eq!(view["winner_history"]["shared"]["start_date"], "2026-09-30");
+
+        // A missing inactive daily snapshot also disqualifies an otherwise full
+        // week, even though its aggregate row still includes both players.
+        let mut missing = period(db.get(), "day", "2026-09-23");
+        missing.standings.retain(|row| row.user != "b");
+        db.get()
+            .conn
+            .execute(
+                "update competition_periods set payload=?1 where kind='day' and key='2026-09-23'",
+                [serde_json::to_string(&missing).unwrap()],
+            )
+            .unwrap();
+        let view = dashboard(db.get(), &players, &Week::default(), now, 2026, 9).unwrap();
+        let pair = view["head_to_head"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pair| pair["a"] == "a" && pair["b"] == "b")
+            .unwrap();
+        assert_eq!(pair["weeks_b"], 0);
+        assert_eq!(pair["days_b"], 2);
+    }
+
+    #[test]
+    fn late_joined_history_does_not_rewrite_or_reuse_absent_frozen_snapshots() {
+        let mut db = Database::new();
+        let mut a = reviews("2026-09-01", 1);
+        a.extend(reviews("2026-09-14", 10));
+        let mut players = vec![player("a", a)];
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-09-22", 12),
+            None,
+        )
+        .unwrap();
+        let original = serde_json::to_value(period(db.get(), "day", "2026-09-14")).unwrap();
+        let mut b = reviews("2026-09-01", 100);
+        b.extend(reviews("2026-09-23", 2));
+        players.push(player("b", b));
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-09-23", 12),
+            None,
+        )
+        .unwrap();
+        let pending = winner_history(db.get(), &players).unwrap();
+        assert_eq!(pending["shared"]["start_date"], "2026-09-23");
+        assert_eq!(pending["shared"]["periods"]["day"], 0);
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-10-03", 12),
+            None,
+        )
+        .unwrap();
+        let view = winner_history(db.get(), &players).unwrap();
+        assert_eq!(
+            serde_json::to_value(period(db.get(), "day", "2026-09-14")).unwrap(),
+            original
+        );
+        assert_eq!(view["shared"]["start_date"], "2026-09-23");
+        assert_eq!(
+            view["shared"]["periods"],
+            json!({"day":1,"week":0,"month":0})
+        );
+        assert_eq!(winner_total(&view, "shared", "b")["day_wins"], 1);
+        assert_eq!(winner_total(&view, "lifetime", "a")["day_wins"], 2);
+        assert_eq!(winner_total(&view, "lifetime", "b")["day_wins"], 1);
+    }
+
+    #[test]
+    fn shared_aggregate_requires_every_daily_snapshot_even_after_history_started() {
+        let mut db = Database::new();
+        let mut a = reviews("2026-09-01", 1);
+        a.extend(reviews("2026-09-14", 2));
+        let mut b = reviews("2026-09-01", 1);
+        b.extend(reviews("2026-09-14", 1));
+        let players = vec![player("a", a), player("b", b)];
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-10-03", 12),
+            None,
+        )
+        .unwrap();
+        let mut periods = read_periods(&db.get().conn).unwrap();
+        // Model an interrupted archived membership: the aggregate contains both
+        // players, but an inactive day in its middle was saved without player b.
+        let gap = periods
+            .iter_mut()
+            .find(|p| p.kind == "day" && p.start == "2026-09-16")
+            .unwrap();
+        gap.standings.retain(|row| row.user != "b");
+        let view = winner_history_from_periods(None, &players, &periods).unwrap();
+        assert_eq!(view["shared"]["start_date"], "2026-09-01");
+        assert_eq!(
+            view["shared"]["periods"],
+            json!({"day":2,"week":0,"month":0})
+        );
+        assert_eq!(winner_total(&view, "lifetime", "a")["month_wins"], 1);
+        assert_eq!(winner_total(&view, "shared", "a")["month_wins"], 0);
+    }
+
+    #[test]
+    fn shared_wins_keep_ties_inactivity_and_retired_champions_honest() {
+        let mut db = Database::new();
+        let mut a = reviews("2026-09-01", 1);
+        a.extend(reviews("2026-09-02", 1));
+        a.extend(reviews("2026-09-03", 1));
+        let mut b = reviews("2026-09-01", 1);
+        b.extend(reviews("2026-09-02", 1));
+        let mut retired = reviews("2026-09-01", 1);
+        retired.extend(reviews("2026-09-02", 3));
+        let mut players = vec![player("a", a), player("b", b), player("retired", retired)];
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-09-06", 12),
+            None,
+        )
+        .unwrap();
+        players.pop();
+        let view = winner_history(db.get(), &players).unwrap();
+        assert_eq!(view["shared"]["player_count"], 2);
+        assert_eq!(view["shared"]["periods"]["day"], 3);
+        assert_eq!(winner_total(&view, "shared", "a")["day_wins"], 2);
+        assert_eq!(winner_total(&view, "shared", "b")["day_wins"], 1);
+        assert_eq!(winner_total(&view, "lifetime", "retired")["day_wins"], 2);
+        assert_eq!(view["shared"]["players"].as_array().unwrap().len(), 2);
+        assert_eq!(view["lifetime"]["players"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn shared_history_waits_for_two_players_and_final_results() {
+        let mut db = Database::new();
+        let empty = winner_history(db.get(), &[]).unwrap();
+        assert!(empty["meta"]["start_date"].is_null());
+        assert!(empty["shared"]["start_date"].is_null());
+        assert_eq!(empty["shared"]["player_count"], 0);
+        assert_eq!(
+            empty["shared"]["periods"],
+            json!({"day":0,"week":0,"month":0})
+        );
+        let mut players = vec![
+            player("a", reviews("2026-09-01", 1)),
+            player("waiting", vec![]),
+        ];
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-09-03", 12),
+            None,
+        )
+        .unwrap();
+        let solo = winner_history(db.get(), &players).unwrap();
+        assert!(solo["shared"]["start_date"].is_null());
+        assert_eq!(solo["shared"]["player_count"], 1);
+        assert_eq!(winner_total(&solo, "shared", "a")["day_wins"], 0);
+        assert_eq!(winner_total(&solo, "lifetime", "a")["day_wins"], 1);
+        players.push(player("b", reviews("2026-09-03", 1)));
+        refresh(
+            db.get(),
+            &players,
+            &Week::default(),
+            at("2026-09-04", 12),
+            None,
+        )
+        .unwrap();
+        let pending = winner_history(db.get(), &players).unwrap();
+        assert_eq!(pending["shared"]["start_date"], "2026-09-03");
+        assert_eq!(pending["shared"]["player_count"], 2);
+        assert_eq!(pending["shared"]["periods"]["day"], 0);
+        assert_eq!(winner_total(&pending, "shared", "b")["day_wins"], 0);
+        assert_eq!(winner_total(&pending, "lifetime", "b")["day_wins"], 0);
     }
 
     #[test]

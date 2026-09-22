@@ -720,6 +720,21 @@ async fn community_dashboard(
         .map_err(store_error)
 }
 
+async fn winners(State(app): State<Arc<App>>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut store = app.store.lock().unwrap();
+    if let Some(base) = &app.config.sync_base {
+        import(&app, &mut store, base).map_err(|error| {
+            eprintln!("winner history sync import incomplete: {error}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    }
+    let participants = app.participants();
+    refresh_community(&app, &mut store, &participants, now_ms()).map_err(store_error)?;
+    competition::winner_history(&store, &participants)
+        .map(Json)
+        .map_err(store_error)
+}
+
 async fn get_reminders(
     State(app): State<Arc<App>>,
     UrlPath(user): UrlPath<String>,
@@ -1369,6 +1384,7 @@ async fn main() -> Result<(), Error> {
         .route("/icon.svg", get(icon))
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/records", get(records))
+        .route("/api/winners", get(winners))
         .route("/api/community", get(community_dashboard))
         .route(
             "/api/community/reminders/{user}",
@@ -1752,6 +1768,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn winners_imports_before_archiving_and_matches_community_history() {
+        let (app, path, base) = community_sync_fixture();
+        let (day, reviews) = community_history(30);
+        {
+            let mut store = app.store.lock().unwrap();
+            for (user, count) in [("hill", 1), ("cerro", 2)] {
+                store
+                    .upsert(user, &reviews[..count], &[], Clock::default())
+                    .unwrap();
+                app.players
+                    .write()
+                    .unwrap()
+                    .insert(user.into(), load_player(&store, user).unwrap());
+            }
+        }
+        community_collection(&base, "hill", &reviews);
+        let history = winners(State(app.clone())).await.unwrap().0;
+        assert_eq!(history["shared"]["start_date"], day.to_string());
+        assert_eq!(history["shared"]["player_count"], 2);
+        assert_eq!(history["shared"]["periods"]["day"], 1);
+        let champion = history["shared"]["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|player| player["user"] == "hill")
+            .unwrap();
+        assert_eq!(champion["day_wins"], 1);
+        assert_eq!(history["waiting_players"][0]["user"], "friend");
+        let board = community_dashboard(State(app.clone()), community_query(day))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(board["winner_history"], history);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn community_failed_import_defers_archive_until_every_collection_recovers() {
         let (app, path, base) = community_sync_fixture();
         let (day, reviews) = community_history(100);
@@ -1823,6 +1877,10 @@ mod tests {
         let (mut app, path, base) = community_sync_fixture();
         Arc::get_mut(&mut app).unwrap().config.sync_base = Some(base.join("missing"));
         assert!(sync_users(&base.join("missing")).is_err());
+        assert_eq!(
+            winners(State(app.clone())).await.unwrap_err(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(
             community_dashboard(State(app.clone()), Query(CommunityQuery::default()))
                 .await
