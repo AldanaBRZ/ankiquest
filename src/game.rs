@@ -5,8 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 const SESSION_GAP_MS: i64 = 300_000;
 const MATURE_IVL: i64 = 21;
-const MAX_FREEZES: u32 = 2;
-const FREEZE_EVERY: u32 = 7;
+pub const MAX_FREEZES: u32 = 3;
 const QUEST_XP: u64 = 50;
 const ALL_QUESTS_XP: u64 = 100;
 const RECENT_DAYS: usize = 14;
@@ -30,6 +29,27 @@ pub struct Review {
     pub last_ivl: i64,
     pub time_ms: i64,
     pub kind: u8,
+}
+
+/// Preference changes ordered by time, retaining save order for equal timestamps.
+/// Replaying them with reviews keeps later toggles from changing past protection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreezePreference {
+    pub at: i64,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FreezePolicy {
+    /// First migration time for an existing database; earlier Anki days retain
+    /// their old automatic protection. New databases have no legacy period.
+    pub legacy_until: Option<i64>,
+    pub preferences: Vec<FreezePreference>,
+}
+
+fn freezes_enabled_at(preferences: &[FreezePreference], at: i64) -> bool {
+    let end = preferences.partition_point(|change| change.at <= at);
+    end > 0 && preferences[end - 1].enabled
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
@@ -135,6 +155,7 @@ struct DayStats {
     max_ivl: i64,
     first_seen: u64,
     longest_session_ms: i64,
+    quests_completed_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -694,6 +715,9 @@ pub struct Profile {
     pub records: Records,
     pub streak: u64,
     pub freezes: u32,
+    pub stored_freezes: u32,
+    pub freezes_enabled: bool,
+    pub freeze_earned_today: bool,
     pub at_risk: bool,
     pub local_hour: i64,
     pub today: Today,
@@ -838,9 +862,18 @@ fn review_base_xp(r: &Review) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn collect_days(
     reviews: &[Review],
     clock: &Clock,
+) -> (BTreeMap<i64, DayStats>, u64, Vec<(i64, f64)>) {
+    collect_days_with_quests(reviews, clock, 0)
+}
+
+fn collect_days_with_quests(
+    reviews: &[Review],
+    clock: &Clock,
+    seed: u64,
 ) -> (BTreeMap<i64, DayStats>, u64, Vec<(i64, f64)>) {
     let mut days: BTreeMap<i64, DayStats> = BTreeMap::new();
     let mut earned: Vec<(i64, f64)> = Vec::new();
@@ -848,9 +881,22 @@ fn collect_days(
     let mut combo = 0u64;
     let mut session_ms = 0i64;
     let mut prev: Option<(i64, i64)> = None;
+    let mut counted_day = None;
+    let mut recent = VecDeque::new();
+    let mut quests = Vec::new();
     for r in reviews {
         let day = clock.day(r.id);
         let hour = clock.hour(r.id);
+        if counted_day != Some(day) {
+            if let Some(previous) = counted_day.and_then(|d| days.get(&d)) {
+                recent.push_back(previous.clone());
+                if recent.len() > RECENT_DAYS {
+                    recent.pop_front();
+                }
+            }
+            quests = gen_quests(seed, day, &recent);
+            counted_day = Some(day);
+        }
         let s = days.entry(day).or_default();
         let continues = prev.is_some_and(|(d, id)| d == day && r.id - id < SESSION_GAP_MS);
         if continues {
@@ -892,10 +938,14 @@ fn collect_days(
         let xp = review_base_xp(r) * (1.0 + combo.min(100) as f64 / 200.0);
         s.review_xp += xp;
         earned.push((r.id, xp));
+        if s.quests_completed_at.is_none() && quests.iter().all(|q| q.progress(s) >= q.target) {
+            s.quests_completed_at = Some(r.id);
+        }
     }
     (days, combo, earned)
 }
 
+#[cfg(test)]
 pub fn compute(
     user: &str,
     display: &str,
@@ -904,8 +954,30 @@ pub fn compute(
     week: &Week,
     now_ms: i64,
 ) -> Profile {
-    let (days, last_combo, earned) = collect_days(reviews, clock);
+    compute_with_freezes(
+        user,
+        display,
+        reviews,
+        clock,
+        week,
+        now_ms,
+        &FreezePolicy::default(),
+    )
+}
+
+pub fn compute_with_freezes(
+    user: &str,
+    display: &str,
+    reviews: &[Review],
+    clock: &Clock,
+    week: &Week,
+    now_ms: i64,
+    freeze_policy: &FreezePolicy,
+) -> Profile {
+    let freeze_preferences = &freeze_policy.preferences;
+    let (days, last_combo, earned) = collect_days_with_quests(reviews, clock, seed_of(user));
     let today = clock.day(now_ms);
+    let legacy_until = freeze_policy.legacy_until.map(|at| clock.day(at));
     let seed = seed_of(user);
     let first = days.keys().next().copied().unwrap_or(today);
 
@@ -913,6 +985,7 @@ pub fn compute(
     let mut streak = 0u64;
     let mut best_streak_day = first;
     let mut freezes = 0u32;
+    let mut freeze_earned_today = false;
     let mut frozen = BTreeSet::new();
     let mut recent: VecDeque<DayStats> = VecDeque::new();
     let mut unlocked: Vec<Option<i64>> = vec![None; ACHIEVEMENTS.len()];
@@ -927,6 +1000,12 @@ pub fn compute(
     let mut last_active: Option<i64> = None;
 
     for day in first..=today {
+        let legacy = legacy_until.is_some_and(|cutoff| day < cutoff);
+        if legacy_until == Some(day) {
+            // Preserve previously used protection and its streak/XP history,
+            // but begin the opt-in system with an empty bank.
+            freezes = 0;
+        }
         let stats = days.get(&day);
         let (year, month_of_year, date) = civil(day);
         if (year, month_of_year) != month {
@@ -958,11 +1037,15 @@ pub fn compute(
                 totals.best_streak = streak;
                 best_streak_day = day;
             }
-            if streak.is_multiple_of(u64::from(FREEZE_EVERY)) && freezes < MAX_FREEZES {
+            if legacy && streak.is_multiple_of(7) && freezes < 2 {
                 freezes += 1;
             }
         } else if day != today {
-            if streak > 0 && freezes > 0 {
+            if streak > 0
+                && freezes > 0
+                && (legacy
+                    || freezes_enabled_at(freeze_preferences, clock.day_start_ms(day + 1) - 1))
+            {
                 freezes -= 1;
                 frozen.insert(day);
                 totals.freezes_used += 1;
@@ -981,6 +1064,17 @@ pub fn compute(
             if done == quests.len() as u64 {
                 xp += ALL_QUESTS_XP;
                 totals.perfect_days += 1;
+                // The first completion is the only earning opportunity that day,
+                // including when protection is off or the bank is already full.
+                if !legacy
+                    && freezes < MAX_FREEZES
+                    && s.quests_completed_at.is_some_and(|at| {
+                        at <= now_ms && freezes_enabled_at(freeze_preferences, at)
+                    })
+                {
+                    freezes += 1;
+                    freeze_earned_today = day == today;
+                }
             }
             totals.reviews += s.reviews;
             totals.time_ms += s.time_ms;
@@ -1131,7 +1225,14 @@ pub fn compute(
         periods,
         records,
         streak,
-        freezes,
+        freezes: if freezes_enabled_at(freeze_preferences, now_ms) {
+            freezes
+        } else {
+            0
+        },
+        stored_freezes: freezes,
+        freezes_enabled: freezes_enabled_at(freeze_preferences, now_ms),
+        freeze_earned_today,
         at_risk: streak > 0 && !days.contains_key(&today),
         local_hour: clock.hour(now_ms),
         today: Today {
@@ -1197,6 +1298,69 @@ mod tests {
 
     fn at(day: i64) -> i64 {
         day * DAY_MS + NOON + 3_600_000
+    }
+
+    fn protection(at: i64, enabled: bool) -> FreezePreference {
+        FreezePreference { at, enabled }
+    }
+
+    fn protected(reviews: &[Review], now: i64, changes: &[FreezePreference]) -> Profile {
+        compute_with_freezes(
+            "a",
+            "a",
+            reviews,
+            &utc(),
+            &Week::default(),
+            now,
+            &FreezePolicy {
+                preferences: changes.to_vec(),
+                ..FreezePolicy::default()
+            },
+        )
+    }
+
+    /// Finish every possible quest metric, with a second session before noon.
+    fn perfect_day(prior: &[Review], day: i64, clock: &Clock) -> Vec<Review> {
+        let (days, _, _) = collect_days_with_quests(prior, clock, seed_of("a"));
+        let recent = days
+            .values()
+            .rev()
+            .take(RECENT_DAYS)
+            .cloned()
+            .rev()
+            .collect();
+        let quests = gen_quests(seed_of("a"), day, &recent);
+        let count = quests.iter().map(|q| q.target).max().unwrap().max(2) as i64 + 1;
+        let start = clock.day_start_ms(day) + 2 * 3_600_000;
+        (0..count)
+            .map(|i| {
+                let id = start + i * 10_000 + if i == count - 1 { SESSION_GAP_MS } else { 0 };
+                Review {
+                    id,
+                    cid: id,
+                    last_ivl: MATURE_IVL,
+                    time_ms: 60_000,
+                    kind: 0,
+                }
+            })
+            .collect()
+    }
+
+    fn perfect_history(days: &[i64]) -> Vec<Review> {
+        let mut reviews = Vec::new();
+        for day in days {
+            reviews.extend(perfect_day(&reviews, *day, &utc()));
+        }
+        reviews
+    }
+
+    fn first_completion(reviews: &[Review], day: i64) -> i64 {
+        collect_days_with_quests(reviews, &utc(), seed_of("a"))
+            .0
+            .get(&day)
+            .unwrap()
+            .quests_completed_at
+            .expect("fixture completes every quest")
     }
 
     #[test]
@@ -1380,17 +1544,376 @@ mod tests {
     }
 
     #[test]
-    fn freeze_is_earned_and_spent() {
-        let mut days: Vec<i64> = (1..=7).collect();
-        days.push(9);
-        let p = compute("a", "a", &history(&days), &utc(), &Week::default(), at(9));
-        assert_eq!(p.streak, 8);
+    fn freezes_default_off_and_start_empty_without_historical_rewards() {
+        let reviews = perfect_history(&[1, 2, 3, 4, 5, 6, 7]);
+        let p = protected(&reviews, at(9), &[]);
+        assert!(!p.freezes_enabled);
+        assert_eq!(p.stored_freezes, 0);
         assert_eq!(p.freezes, 0);
+        assert_eq!(p.streak, 0);
+        assert!(p.heatmap.iter().all(|c| !c.frozen));
+        let opted_in = protected(&reviews, at(9), &[protection(at(9), true)]);
+        assert!(opted_in.freezes_enabled);
+        assert_eq!(opted_in.freezes, 0);
+        assert!(!opted_in.freeze_earned_today);
+        assert_eq!(protected(&[], at(9), &[protection(0, true)]).freezes, 0);
+        let ordinary = protected(
+            &history(&[1, 2, 3, 4, 5, 6, 7]),
+            at(7),
+            &[protection(0, true)],
+        );
+        assert_eq!(
+            ordinary.freezes, 0,
+            "a seven-day streak alone earns nothing"
+        );
+    }
+
+    #[test]
+    fn migration_preserves_previously_protected_days_and_streak() {
+        let reviews = history(&[1, 2, 3, 4, 5, 6, 7, 9]);
+        let policy = FreezePolicy {
+            legacy_until: Some(at(10)),
+            preferences: vec![],
+        };
+        let p = compute_with_freezes(
+            "a",
+            "a",
+            &reviews,
+            &utc(),
+            &Week::default(),
+            at(10),
+            &policy,
+        );
+        assert_eq!(
+            p.streak, 8,
+            "upgrading must not erase the freeze that covered day8"
+        );
+        assert_eq!(p.lifetime.best_streak, 8);
         assert!(
             p.heatmap
                 .iter()
-                .any(|c| c.frozen && c.date == date_string(8))
+                .any(|c| c.date == date_string(8) && c.frozen)
         );
+        assert_eq!(p.freezes, 0);
+        assert_eq!(p.stored_freezes, 0);
+        assert!(!p.freezes_enabled);
+        let before_cutover = compute_with_freezes(
+            "a",
+            "a",
+            &reviews,
+            &utc(),
+            &Week::default(),
+            at(9),
+            &FreezePolicy {
+                legacy_until: Some(at(10)),
+                preferences: vec![],
+            },
+        );
+        assert_eq!(p.xp_total, before_cutover.xp_total);
+        assert_eq!(p.lifetime.quests, before_cutover.lifetime.quests);
+        for cell in before_cutover
+            .heatmap
+            .iter()
+            .filter(|c| c.reviews > 0 || c.frozen)
+        {
+            let after = p.heatmap.iter().find(|c| c.date == cell.date).unwrap();
+            assert_eq!(
+                (after.reviews, after.xp, after.frozen),
+                (cell.reviews, cell.xp, cell.frozen)
+            );
+        }
+    }
+
+    #[test]
+    fn migration_clears_unspent_legacy_stock_and_new_quests_use_the_new_rules() {
+        let mut reviews = history(&(1..=14).collect::<Vec<_>>());
+        let policy = FreezePolicy {
+            legacy_until: Some(utc().day_start_ms(15)),
+            preferences: vec![protection(utc().day_start_ms(15), true)],
+        };
+        let run = |reviews: &[Review], day| {
+            compute_with_freezes(
+                "a",
+                "a",
+                reviews,
+                &utc(),
+                &Week::default(),
+                at(day),
+                &policy,
+            )
+        };
+        let old = run(&reviews, 14);
+        assert_eq!(old.stored_freezes, 2);
+        let upgraded = run(&reviews, 15);
+        assert_eq!(upgraded.stored_freezes, 0);
+        assert_eq!(upgraded.streak, 14);
+        assert_eq!(upgraded.xp_total, old.xp_total);
+        assert_eq!(
+            run(&reviews, 16).streak,
+            0,
+            "old stock cannot cover a new missed day"
+        );
+        reviews.extend(perfect_day(&reviews, 15, &utc()));
+        let completed = run(&reviews, 15);
+        assert_eq!(completed.freezes, 1);
+        assert!(completed.freeze_earned_today);
+        let covered = run(&reviews, 17);
+        assert_eq!(covered.freezes, 0);
+        assert_eq!(covered.streak, 15);
+    }
+
+    #[test]
+    fn freeze_requires_all_quests_and_is_earned_only_once_per_day() {
+        let mut reviews = perfect_history(&[1]);
+        let completion = first_completion(&reviews, 1);
+        let changes = [protection(0, true)];
+        let before: Vec<_> = reviews
+            .iter()
+            .copied()
+            .filter(|r| r.id < completion)
+            .collect();
+        let p = protected(&before, completion - 1, &changes);
+        assert!(p.quests.iter().any(|q| !q.done));
+        assert_eq!(p.freezes, 0);
+
+        let p = protected(&reviews, at(1), &changes);
+        assert!(p.quests.iter().all(|q| q.done));
+        assert!(p.freeze_earned_today);
+        assert_eq!(p.freezes, 1);
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::to_value(protected(&reviews, at(1), &changes)).unwrap(),
+            "repeated reads replay the same result"
+        );
+        reviews.extend(reviews_on(1, 5, 99));
+        assert_eq!(protected(&reviews, at(1), &changes).freezes, 1);
+    }
+
+    #[test]
+    fn freeze_reward_matches_visible_quest_completion_after_day_rollover() {
+        let mut reviews = perfect_history(&[1]);
+        let first_today = reviews.len();
+        reviews.extend(perfect_day(&reviews, 2, &utc()));
+        // Read the visible quest state independently of the collector's saved
+        // completion timestamp, including the previous day's adaptive targets.
+        let completed = (first_today..reviews.len())
+            .find(|&i| {
+                protected(&reviews[..=i], reviews[i].id, &[])
+                    .quests
+                    .iter()
+                    .all(|quest| quest.done)
+            })
+            .expect("the second day completes its displayed quests");
+        let completion = reviews[completed].id;
+        assert!(
+            protected(&reviews[..completed], completion - 1, &[])
+                .quests
+                .iter()
+                .any(|quest| !quest.done)
+        );
+        assert_eq!(
+            protected(&reviews, at(2), &[protection(completion, true)]).stored_freezes,
+            1,
+            "opting in at the visible completion earns today's freeze"
+        );
+        assert_eq!(
+            protected(&reviews, at(2), &[protection(completion + 1, true)]).stored_freezes,
+            0,
+            "opting in after completion cannot claim a past reward"
+        );
+    }
+
+    #[test]
+    fn preference_at_first_completion_controls_earning_without_backfill() {
+        let mut reviews = perfect_history(&[1]);
+        let completion = first_completion(&reviews, 1);
+        assert_eq!(
+            protected(&reviews, at(1), &[protection(completion, true)]).freezes,
+            1
+        );
+        assert_eq!(
+            protected(&reviews, at(1), &[protection(completion + 1, true)]).freezes,
+            0
+        );
+        reviews.extend(reviews_on(1, 3, 999));
+        let p = protected(
+            &reviews,
+            at(1),
+            &[
+                protection(0, true),
+                protection(completion, false),
+                protection(completion + 1, true),
+            ],
+        );
+        assert_eq!(
+            p.freezes, 0,
+            "more reviews cannot retry a missed earning opportunity"
+        );
+        let p = protected(
+            &reviews,
+            at(1),
+            &[protection(0, true), protection(completion + 1, false)],
+        );
+        assert_eq!(
+            p.stored_freezes, 1,
+            "turning off keeps what was already earned"
+        );
+        assert_eq!(
+            p.freezes, 0,
+            "older clients must not promise disabled coverage"
+        );
+    }
+
+    #[test]
+    fn freezes_cap_at_three_and_can_be_earned_again_after_spending() {
+        let reviews = perfect_history(&[1, 2, 3, 4]);
+        let changes = [protection(0, true)];
+        let full = protected(&reviews, at(4), &changes);
+        assert_eq!(MAX_FREEZES, 3);
+        assert_eq!(full.freezes, MAX_FREEZES);
+        assert!(
+            !full.freeze_earned_today,
+            "completing quests at capacity grants no extra charge"
+        );
+        let mut after_gap = reviews;
+        after_gap.extend(perfect_day(&after_gap, 6, &utc()));
+        let p = protected(&after_gap, at(6), &changes);
+        assert_eq!(p.freezes, 3);
+        assert!(p.freeze_earned_today);
+        assert_eq!(
+            p.streak, 5,
+            "covered days preserve rather than increase the streak"
+        );
+        let frozen = p.heatmap.iter().find(|c| c.date == date_string(5)).unwrap();
+        assert!(frozen.frozen);
+        assert_eq!(frozen.reviews, 0);
+        assert_eq!(frozen.xp, achievement_xp(Metric::FreezesUsed, 1));
+    }
+
+    #[test]
+    fn ended_missed_days_spend_one_each_until_empty() {
+        let reviews = perfect_history(&[1, 2, 3]);
+        let changes = [protection(0, true)];
+        let today = protected(&reviews, at(4), &changes);
+        assert_eq!(today.freezes, 3, "today has not ended yet");
+        assert_eq!(today.streak, 3);
+        let p = protected(&reviews, at(7), &changes);
+        assert_eq!(p.freezes, 0);
+        assert_eq!(p.streak, 3);
+        assert_eq!(p.heatmap.iter().filter(|c| c.frozen).count(), 3);
+        let broken = protected(&reviews, at(8), &changes);
+        assert_eq!(broken.streak, 0);
+        assert_eq!(broken.heatmap.iter().filter(|c| c.frozen).count(), 3);
+    }
+
+    #[test]
+    fn disabling_preserves_bank_and_past_coverage_but_does_not_cover_new_gaps() {
+        let reviews = perfect_history(&[1, 2, 3]);
+        let off = [protection(0, true), protection(at(5), false)];
+        let paused = protected(&reviews, at(6), &off);
+        assert_eq!(paused.stored_freezes, 2);
+        assert_eq!(paused.freezes, 0);
+        assert_eq!(paused.streak, 0);
+        assert_eq!(paused.heatmap.iter().filter(|c| c.frozen).count(), 1);
+        assert!(
+            paused
+                .heatmap
+                .iter()
+                .any(|c| c.date == date_string(4) && c.frozen)
+        );
+        let mut on_again = off.to_vec();
+        on_again.push(protection(at(6), true));
+        let p = protected(&reviews, at(6), &on_again);
+        assert_eq!(p.freezes, 2);
+        assert_eq!(
+            p.streak, 0,
+            "reenabling cannot retroactively cover yesterday"
+        );
+        assert_eq!(p.heatmap.iter().filter(|c| c.frozen).count(), 1);
+        assert_eq!(
+            protected(&reviews, at(8), &on_again).freezes,
+            2,
+            "an already broken streak spends nothing"
+        );
+    }
+
+    #[test]
+    fn missed_day_checks_setting_just_before_the_anki_rollover() {
+        let clock = Clock {
+            offset_west_min: -120,
+            rollover_hour: 4,
+        };
+        let reviews = perfect_day(&[], 1, &clock);
+        let boundary = clock.day_start_ms(3);
+        let run = |now, changes: &[FreezePreference]| {
+            compute_with_freezes(
+                "a",
+                "a",
+                &reviews,
+                &clock,
+                &Week::default(),
+                now,
+                &FreezePolicy {
+                    preferences: changes.to_vec(),
+                    ..FreezePolicy::default()
+                },
+            )
+        };
+        assert_eq!(run(boundary - 1, &[protection(0, true)]).stored_freezes, 1);
+        let p = run(
+            boundary,
+            &[protection(0, true), protection(boundary, false)],
+        );
+        assert_eq!(
+            p.stored_freezes, 0,
+            "a change on the new day preserves yesterday's enabled state"
+        );
+        assert_eq!(p.streak, 1);
+        let p = run(
+            boundary,
+            &[protection(0, true), protection(boundary - 1, false)],
+        );
+        assert_eq!(p.stored_freezes, 1);
+        assert_eq!(p.streak, 0);
+        let p = run(
+            boundary,
+            &[
+                protection(0, true),
+                protection(at(1), false),
+                protection(boundary, true),
+            ],
+        );
+        assert_eq!(p.streak, 0);
+        assert_eq!(p.freezes, 1);
+    }
+
+    #[test]
+    fn future_reviews_and_preferences_cannot_award_a_freeze_early() {
+        let reviews = perfect_history(&[1]);
+        let completion = first_completion(&reviews, 1);
+        let changes = [protection(0, true)];
+        let before = protected(&reviews, completion - 1, &changes);
+        assert_eq!(before.freezes, 0);
+        assert!(!before.freeze_earned_today);
+        assert_eq!(protected(&reviews, completion, &changes).freezes, 1);
+        let future = protected(&reviews, at(1), &[protection(at(2), true)]);
+        assert!(!future.freezes_enabled);
+        assert_eq!(future.stored_freezes, 0);
+        assert_eq!(
+            changes,
+            [protection(0, true)],
+            "preview and replay never mutate preferences"
+        );
+    }
+
+    #[test]
+    fn preference_changes_at_the_same_time_use_the_latest_save() {
+        let reviews = perfect_history(&[1]);
+        let completion = first_completion(&reviews, 1);
+        let changes = [protection(completion, true), protection(completion, false)];
+        assert_eq!(protected(&reviews, at(1), &changes).stored_freezes, 0);
+        let changes = [protection(completion, false), protection(completion, true)];
+        assert_eq!(protected(&reviews, at(1), &changes).freezes, 1);
     }
 
     #[test]
