@@ -1,3 +1,4 @@
+mod access;
 mod challenges;
 mod competition;
 mod decks;
@@ -45,6 +46,11 @@ struct Config {
     #[serde(default, rename = "remind_hour")]
     legacy_remind_hour: Option<i64>,
     public_url: Option<String>,
+    #[serde(default)]
+    private_site: bool,
+    site_password_file: Option<PathBuf>,
+    #[serde(default)]
+    site_trust_proxy: bool,
     #[serde(default = "default_week_timezone")]
     week_timezone: String,
     #[serde(default = "default_week_rollover_hour")]
@@ -79,6 +85,7 @@ struct Player {
 
 struct App {
     config: Config,
+    access: access::Access,
     week: Week,
     store: Mutex<Store>,
     players: RwLock<HashMap<String, Player>>,
@@ -307,21 +314,7 @@ struct Upload {
 }
 
 fn authorized(app: &App, user: &str, headers: &HeaderMap) -> bool {
-    let Some(expected) = app.config.users.get(user).and_then(|u| u.token.as_deref()) else {
-        return false;
-    };
-    let given = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    !expected.is_empty()
-        && given.len() == expected.len()
-        && given
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0, |acc, (a, b)| acc | (a ^ b))
-            == 0
+    access::authorized(app, user, headers)
 }
 
 async fn upload(
@@ -379,6 +372,7 @@ async fn upload(
     }
     let player = load_player(&store, &user).map_err(store_error)?;
     app.players.write().unwrap().insert(user.clone(), player);
+    challenges::refresh(&mut store, &app.participants(), now_ms()).map_err(store_error)?;
     let profile = app.profile(&user).ok_or(StatusCode::NOT_FOUND)?;
     if silent {
         for event in &profile.events {
@@ -556,6 +550,7 @@ async fn notifications(
     }
     let mut store = app.store.lock().unwrap();
     let now = now_ms();
+    challenges::refresh(&mut store, &app.participants(), now).map_err(store_error)?;
     let profile = app.profile(&user);
     let clock = app.players.read().unwrap().get(&user).map(|p| p.clock);
     if let (Some(profile), Some(clock)) = (&profile, &clock) {
@@ -579,6 +574,66 @@ async fn notifications(
         result.push(notice);
     }
     Ok(Json(result))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ActivityQuery {
+    days: Option<u32>,
+    before: Option<i64>,
+    limit: Option<u32>,
+}
+
+async fn activity(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<ActivityQuery>,
+) -> Result<Json<decks::Activity>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let days = query.days.unwrap_or(decks::ACTIVITY_DAYS);
+    let limit = query.limit.unwrap_or(100);
+    if !matches!(days, 30 | 90)
+        || !(1..=200).contains(&limit)
+        || query.before.is_some_and(|id| id <= 0)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut store = app.store.lock().unwrap();
+    let now = now_ms();
+    challenges::refresh(&mut store, &app.participants(), now).map_err(store_error)?;
+    store
+        .activity(&user, now, days, query.before, limit)
+        .map(Json)
+        .map_err(store_error)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityRead {
+    ids: Vec<i64>,
+}
+
+async fn read_activity(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<ActivityRead>,
+) -> Result<StatusCode, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if request.ids.len() > 200 || request.ids.iter().any(|id| *id <= 0) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    app.store
+        .lock()
+        .unwrap()
+        .read_activity(&user, &request.ids, now_ms())
+        .map_err(store_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Serialize)]
@@ -900,8 +955,14 @@ async fn get_challenges(
             Json(serde_json::json!({"error":"Check your player and token."})),
         ));
     }
-    let store = app.store.lock().unwrap();
+    let mut store = app.store.lock().unwrap();
     let participants = app.participants();
+    challenges::refresh(&mut store, &participants, now_ms()).map_err(|error| {
+        (
+            store_error(error),
+            Json(serde_json::json!({"error":"Unable to refresh challenges."})),
+        )
+    })?;
     challenge_list(&app, &store, &user, &participants)
         .map(Json)
         .map_err(challenge_error)
@@ -950,6 +1011,12 @@ async fn act_on_challenge(
     let mut store = app.store.lock().unwrap();
     let participants = app.participants();
     challenges::act(&mut store, &user, id, &action.action, now_ms()).map_err(challenge_error)?;
+    challenges::refresh(&mut store, &participants, now_ms()).map_err(|error| {
+        (
+            store_error(error),
+            Json(serde_json::json!({"error":"Unable to refresh challenges."})),
+        )
+    })?;
     challenge_list(&app, &store, &user, &participants)
         .map(Json)
         .map_err(challenge_error)
@@ -1112,6 +1179,7 @@ fn tick(app: &App) -> Result<(), Error> {
     if import_complete {
         refresh_community(app, &mut store, &participants, now)?;
     }
+    challenges::refresh(&mut store, &participants, now)?;
     let users: Vec<String> = app.players.read().unwrap().keys().cloned().collect();
     // One snapshot of the standings, so a nudge knows who is just out of reach.
     let ranking = app.profiles();
@@ -1414,6 +1482,7 @@ async fn main() -> Result<(), Error> {
         }
     }
 
+    let access = access::Access::from_config(&config)?;
     let store = Store::open(&config.state_dir)?;
     let mut players = HashMap::new();
     for user in store.users()? {
@@ -1432,6 +1501,7 @@ async fn main() -> Result<(), Error> {
     let app = Arc::new(App {
         week,
         config,
+        access,
         players: RwLock::new(players),
         store: Mutex::new(store),
     });
@@ -1446,13 +1516,35 @@ async fn main() -> Result<(), Error> {
         }
     });
 
-    let router = Router::new()
+    let router = router(app.clone());
+
+    let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;
+    println!("ankiquest listening on http://{}", app.config.addr);
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+
+fn router(app: Arc<App>) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/records", get(index))
         .route("/community", get(community_page))
         .route("/{period}", get(period_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
+        .route("/site.css", get(access::site_css))
+        .route("/site.js", get(access::site_js))
+        .route("/login", get(access::login))
+        .route("/auth/status", get(access::status))
+        .route(
+            "/auth/session",
+            post(access::session).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route("/auth/logout", post(access::logout))
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/records", get(records))
         .route("/api/winners", get(winners))
@@ -1483,13 +1575,14 @@ async fn main() -> Result<(), Error> {
             "/api/notification-preferences/{user}",
             get(get_incoming_preferences).post(set_incoming_preferences),
         )
+        .route("/api/activity/{user}", get(activity))
+        .route("/api/activity/{user}/read", post(read_activity))
         .route("/api/reply/{user}", post(reply))
-        .with_state(app.clone());
-
-    let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;
-    println!("ankiquest listening on http://{}", app.config.addr);
-    axum::serve(listener, router).await?;
-    Ok(())
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            access::gate,
+        ))
+        .with_state(app)
 }
 
 #[cfg(test)]
@@ -1509,6 +1602,7 @@ mod tests {
         (
             Arc::new(App {
                 config,
+                access: access::Access::default(),
                 week: Week::default(),
                 store: Mutex::new(store),
                 players: RwLock::new(HashMap::new()),
@@ -1606,6 +1700,7 @@ mod tests {
     async fn community_challenges_are_owner_authenticated_and_membership_is_opt_in() {
         let (app, path) = fixture();
         let request = || challenges::Create {
+            request_id: None,
             title: "Five study days".into(),
             kind: challenges::Kind::StudyDays,
             cooperative: false,
@@ -2161,6 +2256,7 @@ mod tests {
         let player = load_player(&store, "cerro").unwrap();
         let reloaded = App {
             config,
+            access: access::Access::default(),
             week: Week::default(),
             store: Mutex::new(store),
             players: RwLock::new(HashMap::from([("cerro".into(), player)])),

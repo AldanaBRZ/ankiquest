@@ -36,6 +36,35 @@ Sign in there with your own upload token to choose daily, urgent streak, freeze-
 
 The old server-wide `remind_hour` / NixOS `remindHour` setting is deprecated; enable personal reminders in `/community` instead. Existing device-only AnkiDroid and desktop add-on alarms are controlled separately in each client's settings.
 
+## Private website access
+
+The leaderboard, profiles, records, and Community share the same navigation, colors, cards, and controls, including light and dark themes. Enable private access to put those pages and their data behind a sign-in screen:
+
+```json
+{
+  "private_site": true,
+  "site_password_file": "/run/secrets/ankiquest-site-password",
+  "public_url": "https://anki.example.com"
+}
+```
+
+Add these fields to your existing configuration. Store the shared member password in the named file, readable only by the service and server administrator; do not commit the password or put it in the Nix store. Existing nonempty player upload tokens also unlock the website. The shared password is optional when at least one player has a token. Private mode refuses to start without a usable password or token. Existing installations remain public until `private_site` is enabled.
+
+For NixOS, add these options to the existing service definition:
+
+```nix
+services.ankiquest = {
+  privateSite = true;
+  sitePasswordFile = "/etc/nixos/secrets/ankiquest-site-password";
+};
+```
+
+The module loads the password through a systemd credential. Use HTTPS and set `public_url` to the actual HTTPS address (the NixOS `domain` option does this). Browser sign-in creates an opaque, HttpOnly, SameSite cookie that lasts seven days. Select **Lock site** to end the session. Restarting the service clears browser sessions; restart after changing the password or token files to load the new credentials. Passwords and tokens are never placed in website URLs or browser storage.
+
+The shared password and browser session grant access to community pages and read data. Managing reminders, challenges, deck notifications, freezes, or an inbox still requires that player's own upload token; the shared password cannot impersonate members.
+
+Update the Android app before enabling private mode: authenticated reads and automatic embedded-page sign-in are required. The desktop add-on already sends its configured token on API requests; when opening the website in an external browser, sign in there once. Configure each app with its player's token, not the shared website password. Tokenless clients cannot read a private server. See [the access guide](docs/private-site.md) for API behavior and rollout checks.
+
 ## Getting reviews in
 
 Both clients upload new review rows after each answer and show XP feedback while reviewing. Sync itself can stay on AnkiWeb.

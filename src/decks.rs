@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 pub const MAX_DECKS: usize = 2000;
 const MAX_RECIPIENTS: usize = 100;
 const INBOX_AGE_MS: i64 = 7 * 86_400_000;
+pub const ACTIVITY_DAYS: u32 = 90;
+const ACTIVITY_AGE_MS: i64 = ACTIVITY_DAYS as i64 * 86_400_000;
 const PUSH_LEASE_MS: i64 = 60_000;
 const MAX_SEPARATE_PUSHES: usize = 3;
 pub const MAX_MESSAGE: usize = 200;
@@ -80,7 +82,48 @@ pub struct Notification {
     /// What put this here: "completion", "reply", "nudge" or "message". Clients
     /// choose how loudly to announce each.
     pub kind: String,
+    /// Unix seconds, independently of push/delivery state.
+    pub read_at: Option<i64>,
+    pub challenge_id: Option<i64>,
+    pub route: Option<String>,
+    pub action_required: bool,
 }
+
+#[derive(Debug, Serialize)]
+pub struct Activity {
+    pub items: Vec<Notification>,
+    pub unread_count: u64,
+    pub action_count: u64,
+    pub retention_days: u32,
+    pub window_days: u32,
+    pub next_before: Option<i64>,
+}
+
+fn notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Notification> {
+    let challenge_id: Option<i64> = row.get(9)?;
+    Ok(Notification {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        body: row.get(2)?,
+        day: row.get(3)?,
+        created_at: row.get(4)?,
+        sender: row.get(5)?,
+        replied: row.get(6)?,
+        kind: row.get(7)?,
+        read_at: row.get(8)?,
+        challenge_id,
+        route: challenge_id.map(|id| format!("/community#challenge-{id}")),
+        action_required: row.get(10)?,
+    })
+}
+
+// Read and actionable are independent: reading an invitation does not answer it.
+const NOTICE_COLUMNS: &str =
+    "n.id,n.title,n.body,n.day,n.created_at / 1000,n.sender,n.replied,n.kind,
+ n.read_at / 1000,n.challenge_id,exists(select 1 from community_members m
+ join community_challenges c on c.id=m.challenge where c.id=n.challenge_id
+ and n.kind='challenge_invite' and m.user=n.recipient and m.status='invited'
+ and c.cancelled=0 and c.end_at>?2)";
 
 /// A completion that was just announced, echoed back so the client can say so locally.
 #[derive(Debug, Serialize)]
@@ -216,6 +259,8 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
         ("push_attempts", "integer not null default 0"),
         ("push_cancelled", "integer not null default 0"),
         ("completion_cancelled", "integer not null default 0"),
+        ("read_at", "integer"),
+        ("challenge_id", "integer"),
     ] {
         let present = conn
             .prepare("select 1 from pragma_table_info('notifications') where name = ?1")?
@@ -533,31 +578,85 @@ impl Store {
     }
 
     pub fn notifications(&self, user: &str, now_ms: i64) -> Result<Vec<Notification>, Error> {
-        let mut stmt = self.conn.prepare(
-            "select id, title, body, day, created_at / 1000, sender, replied, kind from (
-                 select id, title, body, day, created_at, sender, replied, kind from notifications
-                 where recipient = ?1 and push_only = 0 and created_at >= ?2
+        let mut stmt = self.conn.prepare(&format!(
+            "select {NOTICE_COLUMNS} from notifications n where n.id in (
+                 select id from notifications where recipient=?1 and push_only=0
+                 and created_at>=?3
                  and (kind != 'completion' or (completion_cancelled = 0
                      and not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
                      and not exists (select 1 from incoming_muted_senders
                                      where recipient = ?1 and sender = notifications.sender)))
-                 order by id desc limit 500
-             ) order by id",
-        )?;
+                 order by id desc limit 500) order by n.id"
+        ))?;
         Ok(stmt
-            .query_map(params![user, now_ms - INBOX_AGE_MS], |r| {
-                Ok(Notification {
-                    id: r.get(0)?,
-                    title: r.get(1)?,
-                    body: r.get(2)?,
-                    day: r.get(3)?,
-                    created_at: r.get(4)?,
-                    sender: r.get(5)?,
-                    replied: r.get(6)?,
-                    kind: r.get(7)?,
-                })
-            })?
+            .query_map(params![user, now_ms, now_ms - INBOX_AGE_MS], notification)?
             .collect::<Result<_, _>>()?)
+    }
+
+    pub fn activity(
+        &self,
+        user: &str,
+        now_ms: i64,
+        days: u32,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Activity, Error> {
+        let cutoff = now_ms - i64::from(days) * 86_400_000;
+        let mut stmt = self.conn.prepare(&format!(
+            "select {NOTICE_COLUMNS} from notifications n
+            where n.recipient=?1 and n.push_only=0 and n.created_at>=?3 and (?4 is null or n.id<?4)
+            and (n.kind != 'completion' or (n.completion_cancelled = 0
+                and not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
+                and not exists (select 1 from incoming_muted_senders
+                                where recipient = ?1 and sender = n.sender)))
+            order by n.id desc limit ?5"
+        ))?;
+        let mut items = stmt
+            .query_map(
+                params![user, now_ms, cutoff, before, i64::from(limit) + 1],
+                notification,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_before = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|item| item.id)
+        } else {
+            None
+        };
+        let (unread_count, action_count) = self.conn.query_row(
+            "select coalesce(sum(n.read_at is null),0),coalesce(sum(exists(
+              select 1 from community_members m join community_challenges c on c.id=m.challenge
+              where c.id=n.challenge_id and n.kind='challenge_invite' and m.user=n.recipient
+              and m.status='invited' and c.cancelled=0 and c.end_at>?2)),0)
+             from notifications n where n.recipient=?1 and n.push_only=0 and n.created_at>=?3
+             and (n.kind != 'completion' or (n.completion_cancelled = 0
+                 and not exists (select 1 from incoming_settings where user = ?1 and enabled = 0)
+                 and not exists (select 1 from incoming_muted_senders
+                                 where recipient = ?1 and sender = n.sender)))",
+            params![user, now_ms, cutoff],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )?;
+        Ok(Activity {
+            items,
+            unread_count,
+            action_count,
+            retention_days: ACTIVITY_DAYS,
+            window_days: days,
+            next_before,
+        })
+    }
+
+    pub fn read_activity(&mut self, user: &str, ids: &[i64], now_ms: i64) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        for id in ids {
+            tx.execute(
+                "update notifications set read_at=?3 where id=?1 and recipient=?2
+                and push_only=0 and read_at is null and created_at>=?4",
+                params![id, user, now_ms, now_ms - ACTIVITY_AGE_MS],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn nudges_enabled(&self, user: &str) -> Result<bool, Error> {
@@ -718,7 +817,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         tx.execute(
             "delete from notifications where created_at < ?1",
-            [now_ms - INBOX_AGE_MS],
+            [now_ms - ACTIVITY_AGE_MS],
         )?;
         let deliveries = {
             let mut stmt = tx.prepare(
@@ -731,15 +830,16 @@ impl Store {
                          and not exists (select 1 from incoming_muted_senders
                                          where recipient = notifications.recipient
                                          and sender = notifications.sender)))
+                       and created_at >= ?2
                  ), attempted as (
                      select recipient, max(retry_at) as last_retry from notifications
                      where push_attempts > 0 group by recipient
                  )
-                 select ready.recipient, id, title, body, day, created_at / 1000, sender, replied, kind
+                 select ready.recipient, id, title, body, day, created_at / 1000, sender, replied, kind, read_at / 1000, challenge_id
                  from ready left join attempted using (recipient)
                  order by turn, coalesce(last_retry, 0), retry_at, id limit 100",
             )?;
-            stmt.query_map([now_ms], |r| {
+            stmt.query_map(params![now_ms, now_ms - INBOX_AGE_MS], |r| {
                 Ok(Delivery {
                     user: r.get(0)?,
                     notification: Notification {
@@ -751,6 +851,12 @@ impl Store {
                         sender: r.get(6)?,
                         replied: r.get(7)?,
                         kind: r.get(8)?,
+                        read_at: r.get(9)?,
+                        challenge_id: r.get(10)?,
+                        route: r
+                            .get::<_, Option<i64>>(10)?
+                            .map(|id| format!("/community#challenge-{id}")),
+                        action_required: false,
                     },
                 })
             })?
@@ -765,7 +871,7 @@ impl Store {
     pub fn begin_push(&mut self, id: i64, now_ms: i64) -> Result<bool, Error> {
         Ok(self.conn.execute(
             "update notifications set retry_at = ?2, push_attempts = min(push_attempts + 1, 31)
-             where id = ?1 and pushed = 0 and push_cancelled = 0 and retry_at <= ?3
+             where id = ?1 and pushed = 0 and push_cancelled = 0 and retry_at <= ?3 and created_at>=?4
              and (kind != 'completion' or (completion_cancelled = 0
                  and not exists (select 1 from incoming_settings
                                  where user = notifications.recipient and enabled = 0)
@@ -774,7 +880,7 @@ impl Store {
                                  and sender = notifications.sender)))
              and (kind != 'nudge' or exists (select 1 from player_settings
                                             where user = notifications.recipient and nudges = 1))",
-            params![id, now_ms + PUSH_LEASE_MS, now_ms],
+            params![id, now_ms + PUSH_LEASE_MS, now_ms, now_ms - INBOX_AGE_MS],
         )? > 0)
     }
 
@@ -814,6 +920,138 @@ impl Store {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn activity_retention_pagination_reads_and_delivery_are_independent() {
+        let (mut store, path) = temporary_store();
+        let send = |store: &mut Store, to: &str, age: i64| {
+            store
+                .send(
+                    &Outgoing {
+                        to,
+                        from: "sender",
+                        title: "Message",
+                        body: "Hello",
+                        kind: "message",
+                    },
+                    DAY,
+                    NOW - age * 86_400_000,
+                )
+                .unwrap()
+        };
+        let recent = send(&mut store, "hill", 0);
+        let peer = send(&mut store, "friend", 0);
+        let eight = send(&mut store, "hill", 8);
+        let forty = send(&mut store, "hill", 40);
+        let expired = send(&mut store, "hill", 91);
+        store
+            .send_once(
+                &Outgoing {
+                    to: "hill",
+                    from: "",
+                    title: "Push only",
+                    body: "Hidden",
+                    kind: "event",
+                },
+                "test-push",
+                DAY,
+                NOW,
+                true,
+            )
+            .unwrap();
+        let page = store.activity("hill", NOW, 90, None, 1).unwrap();
+        assert_eq!(
+            (
+                page.unread_count,
+                page.action_count,
+                page.retention_days,
+                page.window_days
+            ),
+            (3, 0, 90, 90)
+        );
+        assert_eq!(page.items[0].id, forty);
+        assert_eq!(page.next_before, Some(forty));
+        let next = store
+            .activity("hill", NOW, 90, page.next_before, 1)
+            .unwrap();
+        assert_eq!(next.items[0].id, eight);
+        assert_eq!(
+            next.unread_count, 3,
+            "counts include the whole window, not just this page"
+        );
+        assert_eq!(
+            store
+                .activity("hill", NOW, 30, None, 200)
+                .unwrap()
+                .unread_count,
+            2
+        );
+        assert_eq!(
+            store
+                .notifications("hill", NOW)
+                .unwrap()
+                .iter()
+                .map(|n| n.id)
+                .collect::<Vec<_>>(),
+            [recent]
+        );
+        store
+            .read_activity("hill", &[recent, recent, peer, expired, i64::MAX], NOW)
+            .unwrap();
+        store.read_activity("hill", &[recent], NOW + 1000).unwrap();
+        assert_eq!(
+            store
+                .activity("friend", NOW, 90, None, 100)
+                .unwrap()
+                .unread_count,
+            1
+        );
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let activity = store.activity("hill", NOW, 90, None, 100).unwrap();
+        assert_eq!(activity.unread_count, 2);
+        assert_eq!(
+            activity
+                .items
+                .iter()
+                .find(|n| n.id == recent)
+                .unwrap()
+                .read_at,
+            Some(NOW / 1000)
+        );
+        let deliveries = store.take_deck_deliveries(NOW).unwrap();
+        assert!(
+            deliveries.iter().any(|d| d.notification.id == recent),
+            "reading does not consume a delivery"
+        );
+        assert!(
+            deliveries
+                .iter()
+                .all(|d| ![eight, forty, expired].contains(&d.notification.id))
+        );
+        assert!(!store.begin_push(eight, NOW).unwrap());
+        assert_eq!(
+            store
+                .activity("hill", NOW, 90, None, 100)
+                .unwrap()
+                .items
+                .len(),
+            3
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "select count(*) from notifications where id=?1",
+                    [expired],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const DAY: i64 = 20_000;
@@ -1048,6 +1286,37 @@ pub(crate) mod tests {
             store.notifications("hill", NOW).unwrap().len(),
             unrelated.len() + 1
         );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn activity_respects_completion_mutes_and_does_not_restore_cancelled_history() {
+        let (mut store, path) = temporary_store();
+        queue_kind(&mut store, "hill", "cerro", "completion", NOW);
+        let allowed = queue_kind(&mut store, "hill", "friend", "completion", NOW);
+        let message = queue_kind(&mut store, "hill", "cerro", "message", NOW);
+        store
+            .set_incoming_settings("hill", &incoming(true, &["cerro"]))
+            .unwrap();
+        let activity = store.activity("hill", NOW, 30, None, 1).unwrap();
+        assert_eq!(activity.unread_count, 2);
+        assert_eq!(activity.items[0].id, message);
+        let older = store
+            .activity("hill", NOW, 30, activity.next_before, 10)
+            .unwrap();
+        assert_eq!(older.items.len(), 1);
+        assert_eq!(older.items[0].id, allowed);
+        store
+            .set_incoming_settings("hill", &incoming(false, &[]))
+            .unwrap();
+        store
+            .set_incoming_settings("hill", &incoming(true, &[]))
+            .unwrap();
+        let activity = store.activity("hill", NOW, 30, None, 10).unwrap();
+        assert_eq!(activity.unread_count, 1);
+        assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.items[0].id, message);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -1374,7 +1643,21 @@ pub(crate) mod tests {
                 .query_row("select count(*) from notifications", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            0
+            1,
+            "delivery expiration retains durable Activity history"
+        );
+        assert!(
+            store
+                .take_deck_deliveries(NOW + ACTIVITY_AGE_MS + 1)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .activity("hill", NOW + ACTIVITY_AGE_MS + 1, 90, None, 100)
+                .unwrap()
+                .items
+                .is_empty()
         );
         drop(store);
         std::fs::remove_dir_all(path).unwrap();

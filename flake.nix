@@ -52,6 +52,12 @@
         week_timezone = cfg.weekTimezone;
         week_rollover_hour = cfg.weekRolloverHour;
         competition_start_date = cfg.competitionStartDate;
+        private_site = cfg.privateSite;
+        site_trust_proxy = cfg.domain != null;
+        site_password_file =
+          if cfg.sitePasswordFile == null
+          then null
+          else "/run/credentials/ankiquest.service/site-password";
         public_url =
           if cfg.domain == null
           then null
@@ -101,6 +107,17 @@
           default = null;
           description = "Serve through nginx with ACME on this domain.";
         };
+        privateSite = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Require a community password or player token to view all site pages and data.";
+        };
+        sitePasswordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/ankiquest-site-password";
+          description = "Runtime file with the shared read-only site password. Loaded with systemd credentials; the secret never enters the Nix store.";
+        };
         syncBase = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -141,6 +158,12 @@
       };
 
       config = lib.mkIf cfg.enable {
+        assertions = [
+          {
+            assertion = !cfg.privateSite || cfg.sitePasswordFile != null || withToken != {};
+            message = "services.ankiquest.privateSite needs sitePasswordFile or at least one user tokenFile.";
+          }
+        ];
         systemd.services.ankiquest = {
           description = "ankiquest";
           wantedBy = ["multi-user.target"];
@@ -151,7 +174,9 @@
             DynamicUser = true;
             StateDirectory = "ankiquest";
             BindReadOnlyPaths = lib.optional (cfg.syncBase != null) "${cfg.syncBase}:${syncMount}";
-            LoadCredential = lib.mapAttrsToList (name: u: "token-${name}:${toString u.tokenFile}") withToken;
+            LoadCredential =
+              lib.mapAttrsToList (name: u: "token-${name}:${toString u.tokenFile}") withToken
+              ++ lib.optional (cfg.sitePasswordFile != null) "site-password:${toString cfg.sitePasswordFile}";
             Restart = "always";
             RestartSec = 5;
           };
@@ -169,7 +194,12 @@
           ${cfg.domain} = {
             forceSSL = true;
             enableACME = true;
-            locations."/".proxyPass = "http://127.0.0.1:${toString cfg.port}";
+            locations."/" = {
+              proxyPass = "http://127.0.0.1:${toString cfg.port}";
+              extraConfig = ''
+                proxy_set_header X-AnkiQuest-Client-IP $remote_addr;
+              '';
+            };
           };
         };
       };

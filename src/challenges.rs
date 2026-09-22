@@ -46,6 +46,9 @@ pub struct Create {
     pub target: u64,
     pub duration_days: u32,
     pub recipients: Vec<String>,
+    /// New clients keep the same key when retrying one deliberate creation.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -90,7 +93,11 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
            primary key (challenge, user),
            foreign key (challenge) references community_challenges(id)
          );
-         create index if not exists community_members_user on community_members(user);",
+         create index if not exists community_members_user on community_members(user);
+         create table if not exists community_requests (
+           creator text not null, request_id text not null, challenge integer not null,
+           payload text not null, primary key(creator,request_id)
+         ) without rowid;",
     )
 }
 
@@ -101,6 +108,17 @@ pub fn create(
     eligible: &BTreeSet<String>,
     now: i64,
 ) -> Result<i64, Error> {
+    if request.request_id.as_ref().is_some_and(|key| {
+        key.len() < 8
+            || key.len() > 128
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    }) {
+        return Err(Error::Invalid(
+            "Use an 8–128 character request ID containing letters, numbers, hyphens or underscores.",
+        ));
+    }
     let title = request.title.trim();
     if title.is_empty() || title.chars().count() > 80 || title.chars().any(char::is_control) {
         return Err(Error::Invalid("Use a title between 1 and 80 characters."));
@@ -133,6 +151,24 @@ pub fn create(
         return Err(Error::Invalid(
             "The study-day target exceeds the available participant days.",
         ));
+    }
+    let payload =
+        serde_json::json!({"title":title,"kind":request.kind,"cooperative":request.cooperative,
+        "target":request.target,"duration_days":request.duration_days,"recipients":recipients})
+        .to_string();
+    if let Some(key) = &request.request_id {
+        let previous: Option<(i64,String)> = store.conn.query_row(
+            "select challenge,payload from community_requests where creator=?1 and request_id=?2",
+            params![user,key], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((id, previous)) = previous {
+            return if previous == payload {
+                Ok(id)
+            } else {
+                Err(Error::Invalid(
+                    "That request ID belongs to a different challenge.",
+                ))
+            };
+        }
     }
     // Completed goals remain open until the creator closes them or their
     // original deadline passes; the UI permits closing a completed goal.
@@ -170,23 +206,27 @@ pub fn create(
             "insert into community_members (challenge,user,status) values (?1,?2,'invited')",
             params![id, recipient],
         )?;
+        notice(&tx, &recipient, user, id, title, "challenge_invite", now)?;
+    }
+    if let Some(key) = &request.request_id {
+        tx.execute("insert into community_requests(creator,request_id,challenge,payload) values(?1,?2,?3,?4)",
+            params![user,key,id,payload])?;
     }
     tx.commit()?;
     Ok(id)
 }
 
 pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Result<(), Error> {
-    let row: Option<(String, i64, bool)> = store
-        .conn
+    let tx = store.conn.transaction()?;
+    let row: Option<(String, String, i64, bool)> = tx
         .query_row(
-            "select creator,end_at,cancelled from community_challenges where id=?1",
+            "select creator,title,end_at,cancelled from community_challenges where id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (creator, end, cancelled) = row.ok_or(Error::NotFound)?;
-    let membership: Option<String> = store
-        .conn
+    let (creator, title, end, cancelled) = row.ok_or(Error::NotFound)?;
+    let membership: Option<String> = tx
         .query_row(
             "select status from community_members where challenge=?1 and user=?2",
             params![id, user],
@@ -194,30 +234,38 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
         )
         .optional()?;
     let status = membership.ok_or(Error::Forbidden)?;
+    if (action == "cancel" && creator == user && cancelled)
+        || (action == "accept" && creator != user && status == "accepted")
+        || (action == "decline" && status == "declined")
+        || (action == "leave" && status == "left")
+    {
+        return Ok(());
+    }
     if cancelled || now >= end {
         return Err(Error::Invalid("This challenge has ended."));
     }
     match action {
         "cancel" if creator == user => {
-            store.conn.execute(
+            tx.execute(
                 "update community_challenges set cancelled=1,end_at=min(end_at,?2) where id=?1",
                 params![id, now],
             )?;
         }
         "accept" if status == "invited" => {
-            store.conn.execute(
+            tx.execute(
                 "update community_members set status='accepted',joined_at=?3 where challenge=?1 and user=?2 and status='invited'",
                 params![id,user,now],
             )?;
+            notice(&tx, &creator, user, id, &title, "challenge_accepted", now)?;
         }
         "decline" if status == "invited" => {
-            store.conn.execute(
+            tx.execute(
                 "update community_members set status='declined',left_at=?3 where challenge=?1 and user=?2",
                 params![id,user,now],
             )?;
         }
         "leave" if status == "accepted" && creator != user => {
-            store.conn.execute(
+            tx.execute(
                 "update community_members set status='left',left_at=?3 where challenge=?1 and user=?2",
                 params![id,user,now],
             )?;
@@ -229,6 +277,102 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
             ));
         }
     }
+    tx.execute(
+        "update notifications set read_at=coalesce(read_at,?3)
+        where recipient=?1 and challenge_id=?2 and kind='challenge_invite'",
+        params![user, id, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Commit event identity and delivery in the same transaction as membership changes.
+fn notice(
+    conn: &Connection,
+    to: &str,
+    from: &str,
+    id: i64,
+    title: &str,
+    kind: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let key = format!("challenge:{id}:{kind}:{from}");
+    if conn.execute(
+        "insert or ignore into seen(user,key) values(?1,?2)",
+        params![to, key],
+    )? == 0
+    {
+        return Ok(());
+    }
+    let (heading, body) = match kind {
+        "challenge_invite" => (
+            "Challenge invitation",
+            format!("{from} invited you to {title}."),
+        ),
+        "challenge_accepted" => ("Invitation accepted", format!("{from} joined {title}.")),
+        _ => (
+            "Challenge complete",
+            format!("You reached the goal in {title}."),
+        ),
+    };
+    conn.execute(
+        "insert into notifications(recipient,sender,title,body,day,created_at,kind,challenge_id)
+        values(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            to,
+            from,
+            heading,
+            body,
+            now.div_euclid(DAY_MS),
+            now,
+            kind,
+            id
+        ],
+    )?;
+    Ok(())
+}
+
+/// Progress is derived from reviews, so completion events are reconciled after
+/// review uploads/polls and before personal challenge or Activity reads.
+pub fn refresh(store: &mut Store, players: &[Participant], now: i64) -> Result<(), crate::Error> {
+    let creators = store
+        .conn
+        .prepare(
+            "select distinct creator from community_challenges
+        where cancelled=0 and end_at>=?1",
+        )?
+        .query_map([now - 90 * DAY_MS], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut complete = Vec::new();
+    for creator in creators {
+        complete.extend(
+            list(store, &creator, players, now)
+                .map_err(|error| format!("challenge progress: {error:?}"))?
+                .into_iter()
+                .filter(|challenge| {
+                    challenge.status == "complete" && challenge.end_at >= now - 90 * DAY_MS
+                }),
+        );
+    }
+    let tx = store.conn.transaction()?;
+    for challenge in complete {
+        for member in challenge
+            .members
+            .iter()
+            .filter(|member| member.status == "accepted")
+        {
+            notice(
+                &tx,
+                &member.user,
+                "",
+                challenge.id,
+                &challenge.title,
+                "challenge_complete",
+                now,
+            )?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -361,6 +505,200 @@ mod tests {
     use super::*;
     use crate::game::{Clock, FreezePolicy, Review};
 
+    #[test]
+    fn challenge_events_are_private_transactional_and_retry_safe() {
+        let (mut store, path) = crate::decks::tests::temporary_store();
+        let eligible = BTreeSet::from(["friend".into(), "outsider".into()]);
+        let mut request = request();
+        request.request_id = Some("create-request-1".into());
+        store.conn.execute_batch("create trigger fail_invite before insert on notifications when new.kind='challenge_invite' begin select raise(abort,'test'); end;").unwrap();
+        assert!(create(&mut store, "owner", &request, &eligible, 100).is_err());
+        for table in [
+            "community_challenges",
+            "community_members",
+            "community_requests",
+            "seen",
+            "notifications",
+        ] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(&format!("select count(*) from {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        store
+            .conn
+            .execute_batch("drop trigger fail_invite")
+            .unwrap();
+        let id = create(&mut store, "owner", &request, &eligible, 100).unwrap();
+        assert_eq!(
+            create(&mut store, "owner", &request, &eligible, 110).unwrap(),
+            id
+        );
+        request.title = "Changed request".into();
+        assert!(matches!(
+            create(&mut store, "owner", &request, &eligible, 110),
+            Err(Error::Invalid(_))
+        ));
+        let invite = store.activity("friend", 110, 90, None, 100).unwrap();
+        assert_eq!(
+            (invite.unread_count, invite.action_count, invite.items.len()),
+            (1, 1, 1)
+        );
+        assert_eq!(invite.items[0].challenge_id, Some(id));
+        assert_eq!(
+            invite.items[0].route,
+            Some(format!("/community#challenge-{id}"))
+        );
+        assert!(
+            store
+                .activity("outsider", 110, 90, None, 100)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(
+            store
+                .activity("owner", 110, 90, None, 100)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(matches!(
+            act(&mut store, "outsider", id, "accept", 120),
+            Err(Error::Forbidden)
+        ));
+        store
+            .read_activity("friend", &[invite.items[0].id], 120)
+            .unwrap();
+        let read = store.activity("friend", 120, 90, None, 100).unwrap();
+        assert_eq!(
+            (read.unread_count, read.action_count),
+            (0, 1),
+            "reading does not accept an invitation"
+        );
+        store.conn.execute_batch("create trigger fail_accept before insert on notifications when new.kind='challenge_accepted' begin select raise(abort,'test'); end;").unwrap();
+        assert!(act(&mut store, "friend", id, "accept", 150).is_err());
+        assert_eq!(
+            store
+                .activity("friend", 150, 90, None, 100)
+                .unwrap()
+                .action_count,
+            1
+        );
+        store
+            .conn
+            .execute_batch("drop trigger fail_accept")
+            .unwrap();
+        act(&mut store, "friend", id, "accept", 150).unwrap();
+        act(&mut store, "friend", id, "accept", 170).unwrap();
+        assert_eq!(store.notifications("owner", 170).unwrap().len(), 1);
+        assert_eq!(
+            store.notifications("owner", 170).unwrap()[0].kind,
+            "challenge_accepted"
+        );
+        assert_eq!(
+            store
+                .activity("friend", 170, 90, None, 100)
+                .unwrap()
+                .action_count,
+            0
+        );
+        let players = [player("owner", &[110]), player("friend", &[140, 160, 165])];
+        assert_eq!(
+            list(&store, "friend", &players, 180).unwrap()[0]
+                .members
+                .iter()
+                .find(|m| m.user == "friend")
+                .unwrap()
+                .progress,
+            2,
+            "accept retry does not reset joined_at"
+        );
+        store.conn.execute_batch("create trigger fail_complete before insert on notifications when new.kind='challenge_complete' and new.recipient='friend' begin select raise(abort,'test'); end;").unwrap();
+        assert!(refresh(&mut store, &players, 180).is_err());
+        assert!(
+            store
+                .notifications("owner", 180)
+                .unwrap()
+                .iter()
+                .all(|n| n.kind != "challenge_complete")
+        );
+        store
+            .conn
+            .execute_batch("drop trigger fail_complete")
+            .unwrap();
+        refresh(&mut store, &players, 180).unwrap();
+        refresh(&mut store, &players, 190).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        refresh(&mut store, &players, 200).unwrap();
+        for user in ["owner", "friend"] {
+            assert_eq!(
+                store
+                    .notifications(user, 200)
+                    .unwrap()
+                    .iter()
+                    .filter(|n| n.kind == "challenge_complete")
+                    .count(),
+                1
+            );
+        }
+        assert!(store.notifications("outsider", 200).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn invitation_actions_and_completion_skip_declined_and_expired_members() {
+        let (mut store, path) = crate::decks::tests::temporary_store();
+        let eligible = BTreeSet::from(["friend".into(), "outsider".into()]);
+        let mut request = request();
+        request.recipients.push("outsider".into());
+        let id = create(&mut store, "owner", &request, &eligible, 100).unwrap();
+        act(&mut store, "friend", id, "decline", 120).unwrap();
+        act(&mut store, "friend", id, "decline", 130).unwrap();
+        assert_eq!(
+            store
+                .activity("friend", 130, 90, None, 100)
+                .unwrap()
+                .action_count,
+            0
+        );
+        refresh(&mut store, &[player("owner", &[110, 120, 130])], 150).unwrap();
+        for user in ["friend", "outsider"] {
+            assert!(
+                store
+                    .notifications(user, 150)
+                    .unwrap()
+                    .iter()
+                    .all(|n| n.kind != "challenge_complete")
+            );
+        }
+        assert_eq!(
+            store
+                .activity("outsider", 100 + 7 * DAY_MS, 90, None, 100)
+                .unwrap()
+                .action_count,
+            0
+        );
+        assert!(act(&mut store, "outsider", id, "accept", 100 + 7 * DAY_MS).is_err());
+        act(&mut store, "owner", id, "cancel", 200).unwrap();
+        act(&mut store, "owner", id, "cancel", 201).unwrap();
+        assert_eq!(
+            store
+                .activity("outsider", 201, 90, None, 100)
+                .unwrap()
+                .action_count,
+            0
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     fn player(user: &str, times: &[i64]) -> Participant {
         Participant {
             user: user.into(),
@@ -383,6 +721,7 @@ mod tests {
 
     fn request() -> Create {
         Create {
+            request_id: None,
             title: "Study together".into(),
             kind: Kind::Reviews,
             cooperative: true,
@@ -415,10 +754,7 @@ mod tests {
         let result = list(&store, "owner", &players, 300).unwrap();
         assert_eq!(result[0].progress, 3);
         assert_eq!(result[0].status, "complete");
-        assert!(matches!(
-            act(&mut store, "friend", id, "accept", 250),
-            Err(Error::Invalid(_))
-        ));
+        act(&mut store, "friend", id, "accept", 250).unwrap();
         assert!(matches!(
             act(&mut store, "friend", id, "cancel", 250),
             Err(Error::Forbidden)
