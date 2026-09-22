@@ -206,6 +206,8 @@ dialog.freeze-settings::backdrop { background: #0008; }
   .ach { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .embedded .leaderboard-kpis, .embedded .site-footer { display: none; }
+.dashboard button, dialog button { min-height:48px; }
+dialog .fold { min-width:48px; }
 </style>
 <link rel="stylesheet" href="/avatars.css">
 <script src="/avatars.js"></script>
@@ -229,7 +231,17 @@ const num = n => n.toLocaleString();
 const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 
 let weekEnds = 0;
-let renderId = 0;
+let renderId = 0, privatePageHidden = false, knownMember;
+function closePersonalSettings() {
+  renderId++;
+  for(const id of ["deck-sharing","streak-freezes"]) {
+    const dialog=document.getElementById(id);if(dialog.open)dialog.close();
+  }
+}
+addEventListener("ankiquest:locked",()=>{closePersonalSettings();app.innerHTML="";});
+addEventListener("ankiquest:identity",event=>{const user=event.detail.user;if(knownMember&&knownMember!==user)closePersonalSettings();knownMember=user;});
+addEventListener("pagehide",()=>{privatePageHidden=true;closePersonalSettings();});
+addEventListener("pageshow",()=>{privatePageHidden=false;});
 const winnerState = { data: null, scope: "shared", metric: "day", error: false, request: 0 };
 const settingsOpen = () => AnkiQuestAvatars.isOpen() || document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
@@ -516,7 +528,7 @@ function openDeckSharing(user, display) {
   if (settingsOpen()) return;
   renderId++;
   const dialog = document.getElementById("deck-sharing");
-  let token = "";
+  let token = "", session = null;
   let closed = false;
   const controller = new AbortController();
   dialog.innerHTML = `<h3 id="deck-sharing-title">Deck notifications · ${esc(display)}</h3>
@@ -524,7 +536,7 @@ function openDeckSharing(user, display) {
     <div id="deck-sharing-content"><form id="deck-unlock">
       <label for="deck-token">Your AnkiQuest token</label>
       <input id="deck-token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="deck-token-help">
-      <p id="deck-token-help" class="sub">Use the token from your AnkiQuest settings. It is kept only while this window is open.</p>
+      <p id="deck-token-help" class="sub">Connect with your own token. Your personal connection also works across Community and other settings.</p>
       <button type="submit">Load my decks</button>
     </form></div>
     <p id="deck-status" role="status" aria-live="polite"></p>
@@ -538,12 +550,12 @@ function openDeckSharing(user, display) {
   const request = async (body) => {
     const response = await fetch("/api/decks/" + encodeURIComponent(user), {
       method: body ? "POST" : "GET",
-      headers: { "Authorization": "Bearer " + token, ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: AnkiQuestSite.ownerHeaders(token ? {user,token} : session, body),
       ...(body ? { body: JSON.stringify(body) } : {}),
       cache: "no-store", signal: controller.signal,
     });
     if (!response.ok) {
-      if (response.status === 401) throw new Error("The token was not accepted for this player. Close and reopen this window to try again.");
+      if (response.status === 401) { await AnkiQuestSite.checkAccess(response); throw new Error("This account could not be verified. Close and reconnect with your own token."); }
       if (response.status === 400 || response.status === 404) throw new Error("The deck or recipient list has changed. Close and reopen this window to refresh it.");
       throw new Error("Could not save or load deck notifications. Please try again.");
     }
@@ -643,12 +655,13 @@ function openDeckSharing(user, display) {
   content.querySelector("form").addEventListener("submit", async event => {
     event.preventDefault();
     token = dialog.querySelector("#deck-token").value.trim();
+    dialog.querySelector("#deck-token").value = "";
     const button = event.target.querySelector("button");
     button.disabled = true;
     say("Loading decks…");
     try {
       const data = await request();
-      if (!closed) { showDecks(data); say(""); }
+      if (!closed) { session = await AnkiQuestSite.connectMember(user, token); token = session.token || ""; if (!closed) { showDecks(data); say(""); } }
     } catch (error) {
       if (!closed) say(error.message, true);
     } finally {
@@ -659,11 +672,20 @@ function openDeckSharing(user, display) {
   dialog.addEventListener("close", () => {
     closed = true;
     token = "";
+    session = null;
     controller.abort();
     dialog.innerHTML = "";
     render();
   }, { once: true });
   dialog.showModal();
+  AnkiQuestSite.member(user).then(async identity => {
+    if (closed || !identity || token) return;
+    session = identity;
+    content.querySelector("form").hidden = true;
+    say("Loading your deck preferences…");
+    try { const data = await request(); if (!closed) { showDecks(data); say(""); } }
+    catch (error) { if (!closed) { content.querySelector("form").hidden = false; say(error.message, true); } }
+  });
 }
 
 function openStreakFreezes(user, display) {
@@ -671,7 +693,7 @@ function openStreakFreezes(user, display) {
   renderId++;
   const dialog = document.getElementById("streak-freezes");
   const controller = new AbortController();
-  let token = "", closed = false, busy = false;
+  let token = "", session = null, closed = false, busy = false;
   dialog.innerHTML = `<h3 id="freeze-title">Streak protection</h3>
     <p id="freeze-intro" class="intro">A little backup for ${esc(display)}'s study streak. Off by default.</p>
     <ul class="rules">
@@ -682,7 +704,7 @@ function openStreakFreezes(user, display) {
     <div id="freeze-content"><form id="freeze-unlock">
       <label class="token-label" for="freeze-token">Your AnkiQuest token</label>
       <input id="freeze-token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="freeze-token-help">
-      <p id="freeze-token-help" class="token-help">Use the token from your AnkiQuest settings. It is kept only while this window is open.</p>
+      <p id="freeze-token-help" class="token-help">Connect with your own token. Your personal connection also works across Community and other settings.</p>
       <button type="submit" class="freeze-button primary">Load my settings</button>
     </form></div>
     <p id="freeze-status" class="status" role="status" aria-live="polite"></p>
@@ -696,14 +718,14 @@ function openStreakFreezes(user, display) {
   const request = async body => {
     const response = await fetch("/api/streak-freezes/" + encodeURIComponent(user), {
       method: body === undefined ? "GET" : "POST",
-      headers: { Authorization: "Bearer " + token, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      headers: AnkiQuestSite.ownerHeaders(token ? {user,token} : session, body),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: "no-store", signal: controller.signal,
     });
     if (!response.ok) {
-      if (response.status === 401) throw new Error(body === undefined
+      if (response.status === 401) { await AnkiQuestSite.checkAccess(response); throw new Error(body === undefined
         ? "That token was not accepted for this player. Check it and try again."
-        : "That token is no longer accepted. Close and reopen this window to enter it again.");
+        : "Your connection has expired. Close and reconnect with your own token."); }
       throw new Error("Could not load or save streak protection. Please try again.");
     }
     const data = await response.json();
@@ -760,7 +782,7 @@ function openStreakFreezes(user, display) {
     say("Loading settings…");
     try {
       const data = await request();
-      if (!closed) { showSettings(data); say(""); content.querySelector("#freeze-enabled").focus(); }
+      if (!closed) { session = await AnkiQuestSite.connectMember(user, token); token = session.token || ""; if (!closed) { showSettings(data); say(""); content.querySelector("#freeze-enabled").focus(); } }
     } catch (error) {
       token = "";
       if (!closed) { say(error.message, true); input.focus(); }
@@ -773,6 +795,7 @@ function openStreakFreezes(user, display) {
   dialog.addEventListener("close", () => {
     closed = true;
     token = "";
+    session = null;
     controller.abort();
     dialog.innerHTML = "";
     render().then(() => {
@@ -783,10 +806,19 @@ function openStreakFreezes(user, display) {
     });
   }, { once: true });
   dialog.showModal();
+  AnkiQuestSite.member(user).then(async identity => {
+    if (closed || !identity || token || busy) return;
+    session = identity; busy = true;
+    content.querySelector("form").hidden = true;
+    say("Loading your streak protection…");
+    try { const data = await request(); if (!closed) { showSettings(data); say(""); } }
+    catch (error) { if (!closed) { content.querySelector("form").hidden = false; say(error.message, true); } }
+    finally { busy = false; }
+  });
 }
 
 async function render() {
-  if (settingsOpen()) return;
+  if (settingsOpen() || privatePageHidden) return;
   const id = ++renderId;
   const canRender = () => id === renderId && !settingsOpen();
   const user = decodeURIComponent(location.hash.slice(1));

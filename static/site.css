@@ -306,3 +306,70 @@ dialog{padding:20px}
 
 /* Winner comparison controls shared with Community. */
 .winner-counts .win-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0}.winner-counts .win-sort{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}.winner-counts .win-sort select{font-size:12px}.winner-counts .win-window,.winner-counts .win-note{font-size:12px;color:var(--dim);margin:12px 0;overflow-wrap:anywhere}.winner-counts .win-count-table{table-layout:fixed;white-space:normal}.win-count-table th,.win-count-table td{padding:12px 5px}.win-count-table th:first-child,.win-count-table td:first-child{width:28px;color:var(--dim)}.win-count-table th:nth-child(2){width:auto}.win-count-table th:nth-child(n+3){width:62px}.win-count-table td:nth-child(2){overflow-wrap:anywhere}.win-count-table .table-player{min-width:0;gap:6px}.win-count-table .table-player button{min-width:0}.win-count-table .history-start{display:block;color:var(--dim);font-size:10px;margin-top:4px}.win-count-table .win-selected{font-weight:700;color:var(--accent)}.win-count-table .win-waiting td{color:var(--dim)}.winner-counts .segmented button{min-height:44px}@media(max-width:420px){.win-count-table th:nth-child(n+3){width:38px}.win-count-table th,.win-count-table td{padding-left:3px;padding-right:3px;font-size:12px}.win-count-table th{font-size:10px}.win-count-table .table-player .avatar{display:none}.win-count-table .table-player button{font-size:12px}}
+
+/* Comfortable shared controls and focused personal Community surfaces. */
+button, .button-link, .site-nav a, .top-actions a, .tabs a, .tabs button,
+.link-button, .segmented button, .challenge .actions button,
+.auth-status button, dialog .dialog-head button, .winner-counts .segmented button,
+.month-actions button, .table-player button { min-height:48px; }
+input:not([type=checkbox]):not([type=radio]), select { min-height:48px; }
+.button-link { display:inline-flex;align-items:center;justify-content:center;padding:9px 14px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--ink);font-weight:600;text-decoration:none;font-size:13px; }
+.month-actions button, dialog .dialog-head button { min-width:48px; }
+.check { min-height:48px;align-items:center; }
+.site-nav a, .top-actions a { display:inline-flex;align-items:center; }
+.community-hero { padding:25px 0 20px; }
+.community-hero h1 { font-size:34px; }
+#tabs { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px; }
+#tabs button { min-width:0;white-space:normal;padding:10px 7px; }
+.history-tabs { padding:12px 0; }
+#history-navigation .history-note { max-width:none;text-align:left;margin:0 0 18px; }
+.friend-heading { margin:22px 0 10px; }
+.challenge-group { margin-bottom:24px; }
+.challenge-group .card-head h2 { font-size:19px; }
+.challenge-group .card-head p { font-size:13px; }
+.challenge { margin:0; }
+.challenge h3 { overflow-wrap:anywhere; }
+.challenge .toolbar { align-items:flex-start; }
+.challenge .members { margin:14px 0 8px; }
+.challenge .member { min-height:44px;flex-wrap:wrap; }
+.challenge .member > span:not(.avatar) { min-width:0;overflow-wrap:anywhere;flex:1; }
+.challenge .member > small { margin-left:auto; }
+.challenge .actions { flex-wrap:wrap; }
+.friend-create { margin:24px 0; }
+.friend-create > button { width:100%; }
+.challenge-history summary, .goal-customize summary { cursor:pointer;min-height:48px;padding:12px 0;font-weight:600; }
+.challenge-history .stack { margin-top:12px; }
+.auth-status { margin-bottom:18px;flex-wrap:wrap; }
+.auth-status > span { display:flex;align-items:center;gap:9px;min-width:0;flex:1;overflow-wrap:anywhere; }
+.auth-status .avatar { width:28px;height:28px;font-size:10px; }
+.auth-status > p { flex-basis:100%;margin:0;color:var(--fire); }
+.preset-note { padding:18px;margin-bottom:20px;border-radius:12px;background:var(--blue); }
+.preset-note h3 { margin:8px 0; }
+.preset-note p { font-size:14px; }
+.goal-customize { margin-top:16px; }
+.goal-customize .form-grid { margin:12px 0; }
+.count-badge { display:inline-flex;align-items:center;justify-content:center;min-width:20px;min-height:20px;padding:1px 5px;border-radius:20px;background:var(--accent);color:var(--card);font-size:11px;margin-left:3px; }
+.count-badge[hidden] { display:none; }
+.activity-window { display:flex;align-items:center;gap:12px;margin-bottom:18px;color:var(--dim);font-size:13px; }
+.activity-list .card-head { margin-bottom:10px; }
+.activity-list h3 { font-size:17px;overflow-wrap:anywhere; }
+.activity-item.unread { border-left:4px solid var(--accent); }
+.activity-body { white-space:pre-wrap;overflow-wrap:anywhere; }
+.activity-item .actions { display:flex;gap:8px;flex-wrap:wrap;margin-top:12px; }
+.activity-reply { border-top:1px solid var(--line);margin-top:18px;padding-top:18px; }
+.activity-reply input { width:100%; }
+.load-more { margin-top:20px;width:100%; }
+.activity-list .status:empty, #challenge-action-status:empty, #activity-action-status:empty { display:none; }
+@media(max-width:620px) {
+  .community-hero { padding:18px 0 14px; }
+  .community-hero h1 { font-size:27px; }
+  .community-hero p { font-size:13px; }
+  #tabs { gap:1px; }
+  #tabs button { font-size:12px;padding:10px 3px; }
+  .challenge { padding:16px; }
+  .friend-heading { margin-top:12px; }
+  .challenge .toolbar { gap:8px; }
+  .challenge .actions > * { flex:1 1 auto; }
+  .settings-timing { grid-template-columns:1fr; }
+  #challenge-dialog .form-actions > button { flex:1; }
+}
