@@ -46,7 +46,7 @@
   <footer class="footer"><details><summary>How the community record works</summary><p id="scoring-note">Competitions share one calendar. Recorded results distinguish live standings from finalized winners.</p><p>Shared wins count for every tied winner. Trophy totals cover the available retained history. Reconstructed and partial periods are labeled, and days without studying have no winner. Study-day awards count studying, not streak freezes.</p></details></footer>
 </div>
 <dialog id="day-dialog" aria-labelledby="day-title"><div class="dialog-head"><h2 id="day-title">Competition standings</h2><button type="button" data-close="day-dialog" aria-label="Close standings">×</button></div><div id="day-detail"></div></dialog>
-<dialog id="auth-dialog" aria-labelledby="auth-title"><div class="dialog-head"><h2 id="auth-title">Connect your account</h2><button type="button" data-close="auth-dialog" aria-label="Close account connection">×</button></div><p class="intro">Manage your reminders and private challenges using the token from your AnkiQuest settings.</p><form id="auth-form"><label class="field"><span>Your player</span><select id="auth-user" required></select></label><label class="field"><span>Your AnkiQuest token</span><input type="password" id="auth-token" required autocomplete="off" spellcheck="false" aria-describedby="token-help"></label><p id="token-help" class="settings-hint">Your token stays only in this page’s memory. Disconnecting or closing the page clears it.</p><p id="auth-message" class="status" role="status"></p><div class="form-actions"><button type="submit" class="primary" id="auth-submit">Connect</button></div></form></dialog>
+<dialog id="auth-dialog" aria-labelledby="auth-title"><div class="dialog-head"><h2 id="auth-title">Connect your account</h2><button type="button" data-close="auth-dialog" aria-label="Close account connection">×</button></div><p class="intro">Manage your reminders and private challenges using the token from your AnkiQuest settings.</p><form id="auth-form"><label class="field"><span>Your player</span><select id="auth-user" required></select></label><label class="field"><span>Your AnkiQuest token</span><input type="password" id="auth-token" required autocomplete="off" spellcheck="false" aria-describedby="token-help"></label><p id="token-help" class="settings-hint">Your token stays only in this page’s memory. This page never stores it on your device.</p><p id="auth-message" class="status" role="status"></p><div class="form-actions"><button type="submit" class="primary" id="auth-submit">Connect</button></div></form></dialog>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -56,7 +56,7 @@ const amount = value => Math.max(0, Number(value) || 0);
 const months = Array.from({length:12}, (_, i) => new Intl.DateTimeFormat(undefined,{month:"long",timeZone:"UTC"}).format(new Date(Date.UTC(2024,i,1))));
 const now = new Date();
 const initialPeriod = new URLSearchParams(location.search).get("period");
-const state = { data:null, view:"overview", year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:["day","week","month"].includes(initialPeriod)?initialPeriod:"day", winnerScope:"shared", winnerMetric:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"" };
+const state = { data:null, view:"overview", year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:["day","week","month"].includes(initialPeriod)?initialPeriod:"day", winnerScope:"shared", winnerMetric:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, nativeSession:false, nativeDisconnected:false, authError:"", reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"" };
 const reminderDefinitions = [
   ["gentle_daily","Gentle daily reminder","A friendly nudge when you haven’t studied yet."],
   ["urgent_streak","Unprotected streak warning","An urgent reminder near your cutoff when no freeze is left or freeze protection is switched off."],
@@ -204,7 +204,7 @@ function accountBanner() { return `<div class="auth-status"><span>Connected as <
 function renderPrivate() {
   const panels=["challenges","reminders"];
   if(!state.session) {
-    panels.forEach(panel=>$("view-"+panel).innerHTML=`<article class="card gate"><span class="symbol" aria-hidden="true">${panel==="challenges"?"⚑":"◷"}</span><h2>${panel==="challenges"?"A little encouragement from your friends":"Reminders that fit your day"}</h2><p>${panel==="challenges"?"Invite study buddies to a personal challenge, work toward a shared goal, and see your progress together.":"Choose the nudges you want, set quiet hours, and protect your study routine."}</p><button class="primary" type="button" data-connect>Connect your account</button><p class="settings-hint">Use your AnkiQuest token. Your private settings stay private.</p></article>`);
+    panels.forEach(panel=>$("view-"+panel).innerHTML=`<article class="card gate"><span class="symbol" aria-hidden="true">${panel==="challenges"?"⚑":"◷"}</span><h2>${panel==="challenges"?"A little encouragement from your friends":"Reminders that fit your day"}</h2><p>${panel==="challenges"?"Invite study buddies to a personal challenge, work toward a shared goal, and see your progress together.":"Choose the nudges you want, set quiet hours, and protect your study routine."}</p>${state.authError?`<p class="error" role="alert">${esc(state.authError)}</p>`:""}<button class="primary" type="button" data-connect>Connect your account</button><p class="settings-hint">AnkiDroid uses your saved account. In a browser, use your AnkiQuest token.</p></article>`);
     return;
   }
   const banner=accountBanner();
@@ -242,10 +242,21 @@ function renderChallenge(challenge) {
 }
 async function request(url,options={}) {
   const response=await fetch(url,{cache:"no-store",...options});
-  if(!response.ok) { let message="";try { const body=await response.json();message=typeof body.error==="string"?body.error:typeof body.message==="string"?body.message:""; }catch(_){} throw new Error(response.status===401?"That token was not accepted for this player. Disconnect and connect again with the correct token.":response.status===403?"This account does not have access to that action.":message||`The server could not complete this request (${response.status}). Please try again.`); }
+  if(!response.ok) { let message="";try { const body=await response.json();message=typeof body.error==="string"?body.error:typeof body.message==="string"?body.message:""; }catch(_){} const error=new Error(response.status===401?"That token was not accepted for this player. Disconnect and connect again with the correct token.":response.status===403?"This account does not have access to that action.":message||`The server could not complete this request (${response.status}). Please try again.`);error.status=response.status;throw error; }
   return response.json();
 }
-function privateRequest(path,body,session=state.session) { if(!session) return Promise.reject(new Error("Connect your account first."));return request(`/api/community/${path}/${encodeURIComponent(session.user)}`,{method:body===undefined?"GET":"POST",headers:{Authorization:"Bearer "+session.token,...(body===undefined?{}:{"Content-Type":"application/json"})},...(body===undefined?{}:{body:JSON.stringify(body)})}); }
+async function accountRequest(url,options,session) {
+  try { return await request(url,options); }
+  catch(error) {
+    if(error.status===401&&state.session===session) {
+      const native=window.ankiquestSession;
+      if(native?.user===session.user&&typeof native.token==="string"&&native.token.trim()===session.token)delete window.ankiquestSession;
+      disconnect();state.authError="Your account token was not accepted. Connect again with the correct token.";renderPrivate();
+    }
+    throw error;
+  }
+}
+function privateRequest(path,body,session=state.session) { if(!session) return Promise.reject(new Error("Connect your account first."));return accountRequest(`/api/community/${path}/${encodeURIComponent(session.user)}`,{method:body===undefined?"GET":"POST",headers:{Authorization:"Bearer "+session.token,...(body===undefined?{}:{"Content-Type":"application/json"})},...(body===undefined?{}:{body:JSON.stringify(body)})},session); }
 async function loadPrivate() {
   if(!state.session) return;
   const session=state.session,epoch=++state.privateEpoch,reminderEpoch=state.reminderEpoch,reminderSaving=state.reminderSaving;state.privateLoading=true;state.privateError="";renderPrivate();
@@ -256,13 +267,31 @@ async function loadPrivate() {
 function connect() {
   if(!state.data) return;
   if(state.session) { showView("reminders");return; }
+  state.nativeDisconnected=false;
+  if(connectNativeSession())return;
   state.authEpoch++;
   $("auth-user").innerHTML=playerOptions(state.player||state.data.players[0]?.user||"");
   $("auth-token").value="";$("auth-message").textContent="";$("auth-message").className="status";$("auth-submit").disabled=!state.data.players.length;
   if(!state.data.players.length) $("auth-message").textContent="No player accounts are available yet.";
   $("auth-dialog").showModal();
 }
-function disconnect() { state.privateEpoch++;state.reminderEpoch++;state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;state.challenges=null;state.privateLoading=false;state.privateError="";$("connect-button").textContent="Connect account";renderPrivate(); }
+function disconnect(blockNative=true) { state.authEpoch++;if(blockNative)state.nativeDisconnected=true;state.nativeSession=false;state.authError="";state.privateEpoch++;state.reminderEpoch++;state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;state.challenges=null;state.privateLoading=false;state.privateError="";$("connect-button").textContent="Connect account";$("connect-button").className="";renderPrivate(); }
+function connectNativeSession() {
+  if(!state.data||state.nativeDisconnected)return false;
+  const saved=window.ankiquestSession;
+  if(typeof saved?.user!=="string"||!saved.user||typeof saved.token!=="string"||!saved.token.trim()) {
+    if(state.nativeSession)disconnect(false);
+    return false;
+  }
+  const candidate={user:saved.user,token:saved.token.trim()};
+  if(state.session&&(!state.nativeSession||(state.session.user===candidate.user&&state.session.token===candidate.token)))return true;
+  disconnect(false);
+  state.session=candidate;state.nativeSession=true;
+  $("connect-button").textContent=name(candidate.user);$("connect-button").className="auth-name";
+  if($("auth-dialog").open)$("auth-dialog").close();
+  loadPrivate();
+  return true;
+}
 function updateSelectors() {
   const earliest=Number(String(state.data.meta.start_date||state.year).slice(0,4)), latest=Math.max(now.getFullYear(),state.year);
   $("year-filter").innerHTML=Array.from({length:Math.max(1,Math.min(150,latest-Math.min(earliest,state.year)+1))},(_,index)=>latest-index).map(year=>`<option value="${year}" ${year===state.year?"selected":""}>${year}</option>`).join("");
@@ -280,7 +309,7 @@ async function loadData() {
     updateSelectors();
     $("history-note").innerHTML=data.meta.start_date?`<strong>${data.meta.start_source==="configured"?"Server started":"History available from"} ${esc(date(data.meta.start_date))}</strong>${data.meta.start_source==="configured"?"Every study day adds to the story":"Earliest retained activity; may predate this server"}`:'<strong>Your community starts here</strong>The first study session begins the record';
     $("scoring-note").textContent=`${data.meta.scoring_note||""} Competition timezone: ${data.meta.time_zone||"server timezone"}, cutoff ${String(data.meta.rollover_hour??0).padStart(2,"0")}:00. Results finalize after a ${data.meta.grace_hours??24}-hour sync allowance.`;
-    renderAll();
+    renderAll();connectNativeSession();
   } catch(error) { if(id!==state.request)return;$("load-error").className="notice error";$("load-error").innerHTML=`${esc(error.message)} <button type="button" data-retry>Try again</button>`;$("load-error").hidden=false;if(!state.data) $("view-overview").innerHTML=empty("The community record is unavailable.","Try again to load your community’s progress.");else{state.year=Number(state.data.meta.year)||state.year;state.month=Number(state.data.meta.month)||state.month;updateSelectors();renderAll();} }
   finally { if(id===state.request){$("community-app").setAttribute("aria-busy","false");$("loading-status").hidden=true;} }
 }
@@ -352,11 +381,12 @@ async function actOnChallenge(button) {
   if(action==="cancel"&&!window.confirm("Cancel this challenge for everyone? Its recorded progress will remain visible."))return;
   if(action==="leave"&&!window.confirm("Leave this challenge? You can’t rejoin this invitation."))return;
   button.disabled=true;status.className="status";status.textContent="Updating challenge…";
-  try{const payload=await request(`/api/community/challenges/${encodeURIComponent(session.user)}/${encodeURIComponent(id)}`,{method:"POST",headers:{Authorization:"Bearer "+session.token,"Content-Type":"application/json"},body:JSON.stringify({action})});if(state.session!==session)return;state.challenges=payload;renderPrivate();$("challenge-action-status").textContent=({accept:"You joined the challenge. Studying from now on counts toward your goal.",decline:"Invitation declined.",leave:"You left the challenge.",cancel:"Challenge cancelled."})[action];}
+  try{const payload=await accountRequest(`/api/community/challenges/${encodeURIComponent(session.user)}/${encodeURIComponent(id)}`,{method:"POST",headers:{Authorization:"Bearer "+session.token,"Content-Type":"application/json"},body:JSON.stringify({action})},session);if(state.session!==session)return;state.challenges=payload;renderPrivate();$("challenge-action-status").textContent=({accept:"You joined the challenge. Studying from now on counts toward your goal.",decline:"Invitation declined.",leave:"You left the challenge.",cancel:"Challenge cancelled."})[action];}
   catch(error){if(state.session===session){status.className="status error";status.textContent=error.message;}}
   finally{button.disabled=false;}
 }
 window.addEventListener("hashchange",()=>showView(location.hash.slice(1)));
+window.addEventListener("ankiquest-auth",connectNativeSession);
 window.addEventListener("pagehide",disconnect);
 showView(location.hash.slice(1)||"overview");
 loadData();

@@ -2,7 +2,7 @@
 
 Open **Community** from the leaderboard, or visit `/community`. Public history can be explored without signing in. Choose a player, year, and, in the daily calendar, a month.
 
-For **Reminders** or **Challenges**, select **Connect account** and use the player's existing AnkiQuest bearer token. The page keeps the token in memory only; disconnecting or leaving the page clears it. Each account can manage only its own preferences and invitations.
+For **Reminders** or **Challenges**, the updated AnkiDroid dashboard connects with the account already saved in the app. **Settings → ankiquest → Community reminders** opens the reminder controls directly. In a standalone browser, select **Connect account** and use the player's existing AnkiQuest bearer token. Tokens stay in page memory only, never URLs or browser storage. Disconnecting stops private requests until you explicitly connect again; AnkiDroid can reuse its saved account for that reconnect. Each account can manage only its own preferences and invitations.
 
 These features become available after the updated server is installed and restarted.
 
