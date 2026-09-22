@@ -188,6 +188,7 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
         ("push_only", "integer not null default 0"),
         ("retry_at", "integer not null default 0"),
         ("push_attempts", "integer not null default 0"),
+        ("push_cancelled", "integer not null default 0"),
     ] {
         let present = conn
             .prepare("select 1 from pragma_table_info('notifications') where name = ?1")?
@@ -201,6 +202,15 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
     }
     conn.execute(
         "create index if not exists notifications_pending on notifications (pushed, retry_at, id)",
+        [],
+    )?;
+    // Older servers left nudges queued after opt-out. Retain their inbox history
+    // without resuming those pushes when the player next enables nudges.
+    conn.execute(
+        "update notifications set push_cancelled = 1
+         where pushed = 0 and push_cancelled = 0 and kind = 'nudge'
+         and not exists (select 1 from player_settings
+                         where user = notifications.recipient and nudges = 1)",
         [],
     )?;
     Ok(())
@@ -391,11 +401,20 @@ impl Store {
     }
 
     pub fn set_nudges(&mut self, user: &str, enabled: bool) -> Result<(), Error> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "insert into player_settings (user, nudges) values (?1, ?2)
              on conflict (user) do update set nudges = excluded.nudges",
             params![user, enabled],
         )?;
+        if !enabled {
+            tx.execute(
+                "update notifications set push_cancelled = 1
+                 where recipient = ?1 and kind = 'nudge' and pushed = 0",
+                [user],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -532,7 +551,7 @@ impl Store {
             let mut stmt = tx.prepare(
                 "with ready as (
                      select *, row_number() over (partition by recipient order by retry_at, id) as turn
-                     from notifications where pushed = 0 and retry_at <= ?1
+                     from notifications where pushed = 0 and push_cancelled = 0 and retry_at <= ?1
                  ), attempted as (
                      select recipient, max(retry_at) as last_retry from notifications
                      where push_attempts > 0 group by recipient
@@ -567,7 +586,9 @@ impl Store {
     pub fn begin_push(&mut self, id: i64, now_ms: i64) -> Result<bool, Error> {
         Ok(self.conn.execute(
             "update notifications set retry_at = ?2, push_attempts = min(push_attempts + 1, 31)
-             where id = ?1 and pushed = 0 and retry_at <= ?3",
+             where id = ?1 and pushed = 0 and push_cancelled = 0 and retry_at <= ?3
+             and (kind != 'nudge' or exists (select 1 from player_settings
+                                            where user = notifications.recipient and nudges = 1))",
             params![id, now_ms + PUSH_LEASE_MS, now_ms],
         )? > 0)
     }
@@ -753,6 +774,99 @@ pub(crate) mod tests {
                 .unwrap(),
             0
         );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn nudge_opt_out_cancels_selected_and_leased_pushes_only_for_that_user() {
+        let (mut store, path) = temporary_store();
+        store.set_nudges("hill", true).unwrap();
+        store.set_nudges("friend", true).unwrap();
+        let mut ids = Vec::new();
+        for (user, kind) in [
+            ("hill", "nudge"),
+            ("hill", "nudge"),
+            ("hill", "message"),
+            ("hill", "completion"),
+            ("friend", "nudge"),
+        ] {
+            ids.push(
+                store
+                    .send(
+                        &Outgoing {
+                            to: user,
+                            from: "",
+                            title: "Notification",
+                            body: "Keep this in the inbox",
+                            kind,
+                        },
+                        DAY,
+                        NOW,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(store.take_deck_deliveries(NOW).unwrap().len(), 5);
+        assert!(store.begin_push(ids[1], NOW).unwrap());
+        store.set_nudges("hill", false).unwrap();
+        store.finish_push(ids[1], false, NOW).unwrap();
+        store.set_nudges("hill", true).unwrap();
+        assert!(
+            !store.begin_push(ids[0], NOW).unwrap(),
+            "a batch selected before opt-out must not send a cancelled nudge"
+        );
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let mut ready: Vec<_> = store
+            .take_deck_deliveries(NOW + PUSH_LEASE_MS)
+            .unwrap()
+            .into_iter()
+            .map(|delivery| delivery.notification.id)
+            .collect();
+        ready.sort();
+        assert_eq!(ready, ids[2..]);
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 4);
+        assert_eq!(store.notifications("friend", NOW).unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn old_pending_nudges_are_cancelled_when_the_recipient_has_opted_out() {
+        let (mut store, path) = temporary_store();
+        for user in ["hill", "friend"] {
+            store.set_nudges(user, true).unwrap();
+            store
+                .send(
+                    &Outgoing {
+                        to: user,
+                        from: "",
+                        title: "Old nudge",
+                        body: "Already queued before the upgrade",
+                        kind: "nudge",
+                    },
+                    DAY,
+                    NOW,
+                )
+                .unwrap();
+        }
+        // Simulate an older server's opt-out, which left the delivery pending.
+        store
+            .conn
+            .execute(
+                "update player_settings set nudges = 0 where user = 'hill'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let ready = store.take_deck_deliveries(NOW).unwrap();
+        assert_eq!(ready.len(), 1, "old opted-out nudges must not be retried");
+        assert_eq!(ready[0].user, "friend");
+        store.set_nudges("hill", true).unwrap();
+        assert_eq!(store.take_deck_deliveries(NOW).unwrap().len(), 1);
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 1);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
