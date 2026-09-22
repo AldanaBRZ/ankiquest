@@ -164,6 +164,14 @@
 
   window.AnkiQuestAvatars = { markup, refresh, open, isOpen: () => !!editor, close: () => closeEditor?.() };
   window.addEventListener("ankiquest:identity", () => closeEditor?.());
+  let nativeIdentity = "";
+  window.addEventListener("ankiquest-auth", () => {
+    const session = window.ankiquestSession;
+    const next = session && typeof session.user === "string" && session.user && typeof session.token === "string" && session.token.trim()
+      ? JSON.stringify([session.user, session.token.trim()]) : "";
+    if (next !== nativeIdentity) closeEditor?.();
+    nativeIdentity = next;
+  });
   window.addEventListener("ankiquest:locked", () => {
     locked = true;
     generation++;

@@ -205,6 +205,18 @@ async function main() {
     assert.equal(await page.evaluate(() => activePreviewURLs.size), 0, 'Changing member identity releases the selected picture');
     checks.push('member account replacement clears editor credentials and selected picture');
 
+    await open('cerro', 'qa-cerro-token'); await choose(landscape);
+    await page.evaluate(() => { window.ankiquestSession = { user: 'alice', token: 'replacement' }; dispatchEvent(new Event('ankiquest-auth')); });
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Replacing the native account closes the previous account editor');
+    assert.equal(await page.evaluate(() => activePreviewURLs.size), 0, 'Replacing the native account releases the selected picture');
+    checks.push('native account replacement clears editor credentials and selected picture');
+    await open('alice', 'qa-alice-token'); await choose(landscape);
+    await page.evaluate(() => dispatchEvent(new Event('ankiquest-auth')));
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), true, 'Repeated identical native session preserves the editor draft');
+    await page.evaluate(() => { window.ankiquestSession = null; dispatchEvent(new Event('ankiquest-auth')); });
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Removing the native account clears the editor');
+    assert.equal(await page.evaluate(() => activePreviewURLs.size), 0);
+
     await open('cerro', 'qa-cerro-token'); await choose(landscape); await refresh();
     const lockedMetadata = gate(); pauseMetadata = lockedMetadata;
     await page.evaluate(() => { window.lockedRefresh = AnkiQuestAvatars.refresh(); }); await lockedMetadata.reached;
