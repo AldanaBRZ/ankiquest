@@ -8,6 +8,8 @@
 <link rel="icon" href="/icon.svg">
 <link rel="stylesheet" href="/site.css">
 <script src="/site.js"></script>
+<link rel="stylesheet" href="/avatars.css">
+<script src="/avatars.js"></script>
 </head>
 <body>
 <a class="skip" href="#community-app">Skip to community</a>
@@ -206,7 +208,7 @@ function renderAll() {
   if(!state.data) return;
   renderOverview();renderCalendar();renderTrophies();renderRecords();renderYear();renderPrivate();showView(state.challengeId?"challenge-"+state.challengeId:state.view);
 }
-function accountBanner() { return `<div class="auth-status"><span>${avatar(state.session.user,name(state.session.user))} <strong>${esc(name(state.session.user))}</strong></span><button type="button" data-disconnect>Disconnect</button></div>`; }
+function accountBanner() { return `<div class="auth-status"><span>${avatar(state.session.user,name(state.session.user))} <strong>${esc(name(state.session.user))}</strong></span><div><button type="button" data-avatar-edit>Profile picture</button> <button type="button" data-disconnect>Disconnect</button></div></div>`; }
 function renderPrivate() {
   const panels=["challenges","reminders","activity"];
   $("connect-button").hidden=!!state.session;
@@ -326,6 +328,7 @@ function connect() {
 }
 addEventListener("ankiquest:locked", clearPrivate);
 function clearPrivate() {
+  AnkiQuestAvatars.close();
   state.authEpoch++;state.privateEpoch++;state.reminderEpoch++;state.activityEpoch++;
   state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;
   state.challenges=null;state.activity=null;state.activityError="";state.activityLoading=false;state.privateLoading=false;state.privateError="";
@@ -433,6 +436,7 @@ document.addEventListener("click",event=>{
   if(button.dataset.close)$(button.dataset.close).close();
   if(button.hasAttribute("data-connect")||button.id==="connect-button")connect();
   if(button.hasAttribute("data-disconnect"))disconnect();
+  if(button.hasAttribute("data-avatar-edit")&&state.session)AnkiQuestAvatars.open({user:state.session.user,display:name(state.session.user),token:state.session.token});
   if(button.hasAttribute("data-retry"))loadData();
   if(button.hasAttribute("data-private-retry"))loadPrivate();
   if(button.dataset.period&&state.data)openPeriod(button.dataset.period);

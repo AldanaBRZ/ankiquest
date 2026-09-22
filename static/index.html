@@ -227,6 +227,8 @@ dialog.freeze-settings::backdrop { background: #0008; }
 .dashboard button, dialog button { min-height:48px; }
 dialog .fold { min-width:48px; }
 </style>
+<link rel="stylesheet" href="/avatars.css">
+<script src="/avatars.js"></script>
 </head>
 <body>
 <a class="skip" href="#app">Skip to main content</a>
@@ -260,7 +262,7 @@ addEventListener("ankiquest:identity",event=>{const user=event.detail.user;if(kn
 addEventListener("pagehide",()=>{privatePageHidden=true;closePersonalSettings();});
 addEventListener("pageshow",()=>{privatePageHidden=false;});
 const winnerState = { data: null, scope: "shared", metric: "day", error: false, request: 0 };
-const settingsOpen = () => document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open || document.getElementById("notification-preferences").open;
+const settingsOpen = () => AnkiQuestAvatars.isOpen() || document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open || document.getElementById("notification-preferences").open;
 let notificationDialogSession = 0;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
@@ -498,6 +500,8 @@ ${pageHero(p.display, "A study journey, one session at a time. Quests, milestone
   <div>
     <h2>Keep the progress going.</h2>
     <div class="sub">${num(p.xp_total)} XP earned so far</div>
+    <div class="name avatar-name">${AnkiQuestSite.avatar(p.user,p.display)}<span>${esc(p.display)}</span></div>
+    <div><button class="avatar-edit-button" type="button" id="manage-avatar">Profile picture</button></div>
     <div class="bar gold"><i style="width:${pct(p.xp_into_level, p.xp_for_next)}%"></i></div>
     <div class="sub">${num(p.xp_into_level)} / ${num(p.xp_for_next)} XP to level ${p.level + 1} · ${num(p.xp_total)} total</div>
   </div>
@@ -1059,6 +1063,7 @@ async function render() {
         AnkiQuestSite.setProfile(p.user, true);
         try { localStorage.setItem("ankiquestPlayer", p.user); } catch (e) {}
         app.innerHTML = view(p, rows);
+        document.getElementById("manage-avatar").addEventListener("click", () => AnkiQuestAvatars.open({user:p.user,display:p.display}));
         document.getElementById("manage-decks").addEventListener("click", () => openDeckSharing(p.user, p.display));
         document.getElementById("manage-received-notifications").addEventListener("click", () => openNotificationPreferences(p.user, p.display));
         document.getElementById("manage-freezes").addEventListener("click", () => openStreakFreezes(p.user, p.display));

@@ -6,6 +6,8 @@ XP never depends on which answer button was pressed, so there is no incentive to
 
 ## Run
 
+Requires Rust 1.88 or later.
+
 ```sh
 cargo run -- ankiquest.json
 ```
@@ -36,6 +38,19 @@ Sign in there with your own upload token to choose daily, urgent streak, freeze-
 
 The old server-wide `remind_hour` / NixOS `remindHour` setting is deprecated; enable personal reminders in `/community` instead. Existing device-only AnkiDroid and desktop add-on alarms are controlled separately in each client's settings.
 
+## Profile pictures
+
+Profile pictures are optional. Open your profile and choose **Profile picture**, or connect your account in Community and use the same control there. Choose a JPEG or PNG, preview its center square, then save with your own AnkiQuest token. **Remove picture** restores your initials. Photos appear on the leaderboard and community views; compatible Android clients also display them in widgets and offer a picture picker in AnkiQuest settings.
+
+The website accepts files up to 20 MB and reduces them before upload. The server accepts PNG/JPEG bodies up to 2 MiB and 4096 × 4096 pixels, stores a normalized 256 × 256 PNG in its existing database, and strips original file metadata. Pictures have the same visibility as the community’s player profiles: private sites require a browser session or a member’s token to read pictures and their revision list. Uploading and removing always require the owner’s bearer token; the shared site password and browser session do not grant permission to change someone’s picture. Tokens are never stored by the picture editor.
+
+- `GET /api/avatars` returns an object mapping usernames with pictures to revision strings.
+- `GET /api/avatar/<user>?v=<revision>` returns the current PNG or 404, with an ETag for conditional requests. Like other site data, responses use `Cache-Control: no-store` so photos cannot remain readable through a browser cache after logout.
+- `POST /api/avatar/<user>` accepts the raw picture body with `Authorization: Bearer <token>` and returns `{"revision":"1"}`.
+- `DELETE /api/avatar/<user>` removes the picture and returns 204.
+
+Browser regression checks are in `tests/avatar_layout.cjs`, `tests/avatar_index_layout.cjs`, and `tests/avatar_photos.cjs`. Run them with Node and Playwright installed; `PLAYWRIGHT_MODULE` and `ANKIQUEST_BROWSER_CHANNEL` optionally select an existing installation/browser. The tests use synthetic users and mocked requests.
+
 ## Private website access
 
 The leaderboard, profiles, records, and Community share the same navigation, colors, cards, and controls, including light and dark themes. Enable private access to put those pages and their data behind a sign-in screen:
@@ -61,7 +76,7 @@ services.ankiquest = {
 
 The module loads the password through a systemd credential. Use HTTPS and set `public_url` to the actual HTTPS address (the NixOS `domain` option does this). Browser sign-in creates an opaque, HttpOnly, SameSite cookie that lasts seven days. Select **Lock site** to end the session. Restarting the service clears browser sessions; restart after changing the password or token files to load the new credentials. Passwords and tokens are never placed in website URLs or browser storage.
 
-The shared password and browser session grant access to community pages and read data. Managing reminders, challenges, deck notifications, freezes, or an inbox still requires that player's own upload token; the shared password cannot impersonate members.
+The shared password and browser session grant access to community pages and read data. Managing profile pictures, reminders, challenges, deck notifications, freezes, or an inbox still requires that player's own upload token; the shared password cannot impersonate members.
 
 Update the Android app before enabling private mode: authenticated reads and automatic embedded-page sign-in are required. The desktop add-on already sends its configured token on API requests; when opening the website in an external browser, sign in there once. Configure each app with its player's token, not the shared website password. Tokenless clients cannot read a private server. See [the access guide](docs/private-site.md) for API behavior and rollout checks.
 

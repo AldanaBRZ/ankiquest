@@ -6,6 +6,7 @@
   const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
   const href = (path, hash = "") => `${path}${embedded ? (path.includes("?") ? "&" : "?") + "embed=1" : ""}${hash}`;
   const avatar = (user, display = user) => {
+    if (window.AnkiQuestAvatars) return AnkiQuestAvatars.markup(user, display);
     let hash = 0;
     for (const char of String(user)) hash = (hash * 31 + char.charCodeAt(0)) | 0;
     const initials = String(display || user).trim().split(/\s+/).map(part => Array.from(part)[0] || "").slice(0, 2).join("").toUpperCase();

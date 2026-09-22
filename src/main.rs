@@ -1,4 +1,5 @@
 mod access;
+mod avatars;
 mod challenges;
 mod competition;
 mod decks;
@@ -1530,6 +1531,7 @@ async fn main() -> Result<(), Error> {
 
 fn router(app: Arc<App>) -> Router {
     Router::new()
+        .merge(avatars::routes())
         .route("/", get(index))
         .route("/records", get(index))
         .route("/community", get(community_page))
