@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_browser_sessions_read_avatars_but_only_owner_tokens_can_change_them() {
+    async fn private_browser_sessions_read_avatars_and_only_owners_can_change_them() {
         let (app, path) = fixture_with_private_site(true);
         let photo = sample(ImageFormat::Png);
         save(&app.store.lock().unwrap(), "cerro", Some(&photo)).unwrap();
@@ -430,7 +430,7 @@ mod tests {
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         }
         for credentials in [
-            browser.to_vec(),
+            vec![("cookie", cookie.as_str()), ("x-ankiquest-csrf", "1")],
             vec![("authorization", "Bearer hill-secret")],
         ] {
             for method in ["POST", "DELETE"] {
@@ -447,6 +447,15 @@ mod tests {
                     StatusCode::UNAUTHORIZED
                 );
             }
+        }
+        for method in ["POST", "DELETE"] {
+            assert_eq!(
+                routed(&app, method, "/api/avatar/cerro", &browser, photo.clone())
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN,
+                "cookie writes require the CSRF header"
+            );
         }
         let owner = [
             ("cookie", cookie.as_str()),

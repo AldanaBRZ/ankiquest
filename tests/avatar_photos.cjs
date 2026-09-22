@@ -20,6 +20,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: Number(process.env.ANKIQUEST_AVATAR_WIDTH || 390), height: 844 }, colorScheme: process.env.ANKIQUEST_AVATAR_THEME || 'light' });
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
+      window.ankiquestSession = { user: 'cerro', token: 'initial-native-token' };
       window.activePreviewURLs = new Set();
       const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
       URL.createObjectURL = blob => { const url = create(blob); activePreviewURLs.add(url); return url; };
@@ -206,6 +207,8 @@ async function main() {
     checks.push('member account replacement clears editor credentials and selected picture');
 
     await open('cerro', 'qa-cerro-token'); await choose(landscape);
+    await page.evaluate(() => dispatchEvent(new Event('ankiquest-auth')));
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), true, 'Repeating the native identity supplied before script loading preserves the draft');
     await page.evaluate(() => { window.ankiquestSession = { user: 'alice', token: 'replacement' }; dispatchEvent(new Event('ankiquest-auth')); });
     assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Replacing the native account closes the previous account editor');
     assert.equal(await page.evaluate(() => activePreviewURLs.size), 0, 'Replacing the native account releases the selected picture');
