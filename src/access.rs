@@ -541,6 +541,7 @@ mod tests {
         for endpoint in [
             "/api/leaderboard",
             "/api/records",
+            "/api/winners",
             "/api/community",
             "/api/week",
             "/api/profile/alice",

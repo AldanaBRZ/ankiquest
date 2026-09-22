@@ -55,7 +55,17 @@ When `sync_base` is configured, archival updates wait for a complete collection 
 | Reconstructed / Rebuilt | A historical period was reconstructed from review history available when archived. |
 | Partial period | The period begins before available competition history, so its opening portion is missing. |
 
-Days without studying have no winner. Every tied champion receives a win; shared-win totals include daily, weekly, and monthly competitions. Lifetime counters, awards, and records use finalized results. Yearly activity totals also include current and pending periods. Head-to-head comparisons use periods in which both players were present and exclude periods where neither studied.
+Days without studying have no winner. Every tied champion receives a win; tied-win totals include daily, weekly, and monthly competitions. Lifetime counters, awards, and records use finalized results. Yearly activity totals also include current and pending periods. Head-to-head comparisons use periods in which both players were present and exclude periods where neither studied. Weekly head-to-head results require a full shared week for that pair, with both represented in every finalized daily snapshot; another player's later arrival does not shorten their pairwise history.
+
+## Fair comparisons and lifetime wins
+
+The main leaderboard and the Community trophy table default to **Shared history**. Daily, weekly, and monthly win totals use the same comparison window for everyone: the latest first recorded study date among current players with archived study history. For example, when one player's history starts in 2019 and another's starts in 2022, their shared totals begin in 2022. The earlier solo years remain available under **Lifetime**.
+
+Shared history needs at least two players with study history. Accounts without recorded studying are listed as waiting and do not move the comparison date. The window updates when another player gains history; it is a comparison of the current group, not a permanent lifetime ranking. Each player's first recorded date is visible, and missing history is never treated as proof of when they joined the server.
+
+Only finalized, complete periods starting on or after the shared date count. Weeks and months spanning that date are excluded, so a newcomer never competes against another player's earlier days in the same week or month. Every player must be represented in each archived daily snapshot throughout the period. A represented player who skipped studying still participates; a missing snapshot does not create a loss. Days, weeks, or months without a winner do not count as competitions. Tied champions each receive a win.
+
+**Lifetime** shows all finalized wins from available history, including earlier solo wins and partial opening weeks or months. These totals preserve the archive rather than offering an equal-opportunity ranking. Historical winners are never recalculated for a smaller group; if a former player won, that result stays theirs. The calendar and trophies retain the original results in both views.
 
 ## Creating and leaving challenges
 
@@ -73,7 +83,8 @@ Private member routes require `Authorization: Bearer <token>` for the `{user}` i
 
 | Route | Payload / result |
 | --- | --- |
-| `GET /api/community?year=2026&month=9` | Community `{meta, players, calendar, weeks, seasons, awards, records, head_to_head}`. Player counters cover all time; `year_review`, awards, and records use the selected year; `calendar` uses the selected month. |
+| `GET /api/community?year=2026&month=9` | Community `{meta, players, calendar, weeks, seasons, awards, records, head_to_head, winner_history}`. Player counters cover all time; `year_review`, awards, and records use the selected year; `calendar` uses the selected month. |
+| `GET /api/winners` | Community `{meta, shared, lifetime, waiting_players}`. Both scopes include player identities, first recorded study dates, and `day_wins`, `week_wins`, `month_wins`; `shared` also includes the comparison start date, player count, and eligible competition counts. Uses the same archive and import safeguards as `/api/community`. |
 | `GET /api/community/reminders/{user}` | Current reminder settings. |
 | `POST /api/community/reminders/{user}` | Full replacement: booleans `gentle_daily`, `urgent_streak`, `freeze_used`, `freeze_refill`, `milestone`, `weekly_closing`, `weekly_recap`; numeric `reminder_hour`, `quiet_start`, `quiet_end`, `daily_limit`. Returns saved settings. |
 | `GET /api/community/challenges/{user}` | `{challenges, recipients}`; recipients are eligible configured accounts. |
