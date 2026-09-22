@@ -51,12 +51,14 @@ async function main() {
   log=fs.openSync(path.join(run,'server.log'),'a');
   server=spawn(exe,[path.join(run,'config.json')],{windowsHide:true,stdio:['ignore',log,log]});
   await ready();
+  const history=new DatabaseSync(path.join(run,'ankiquest.db'));
+  history.prepare('INSERT INTO notifications(recipient,sender,title,body,day,created_at,kind) VALUES(?,?,?,?,?,?,?)').run('alice','','An earlier study update','Your activity stays available after a notification is dismissed.',Math.floor(Date.now()/86400000)-10,Date.now()-10*86400000,'message');
+  history.close();
   const invited=await api('/api/community/challenges/bob',{title:'Three days with Bob',kind:'study_days',cooperative:false,target:3,duration_days:7,recipients:['alice'],request_id:'fixture-invite'},bobToken);
   const invitation=invited.challenges.find(item=>item.title==='Three days with Bob');
   await api('/api/community/challenges/alice',{title:'Our shared review goal',kind:'reviews',cooperative:true,target:50,duration_days:7,recipients:['cleo'],request_id:'fixture-active'});
   const records=new DatabaseSync(path.join(run,'ankiquest.db'));
   records.prepare('INSERT INTO notifications(recipient,sender,title,body,day,created_at,kind) VALUES(?,?,?,?,?,?,?)').run('alice','bob','A note from Bob','Nice work on your studying!',Math.floor(Date.now()/86400000),Date.now(),'message');
-  records.prepare('INSERT INTO notifications(recipient,sender,title,body,day,created_at,kind) VALUES(?,?,?,?,?,?,?)').run('alice','','An earlier study update','Your activity stays available after a notification is dismissed.',Math.floor(Date.now()/86400000)-10,Date.now()-10*86400000,'message');
   records.close();
   browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHANNEL?{channel:process.env.PLAYWRIGHT_CHANNEL}:{})});
   const context=await browser.newContext({viewport:{width:390,height:844}});
