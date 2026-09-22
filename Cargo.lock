@@ -15,10 +15,12 @@ dependencies = [
  "axum",
  "chrono",
  "chrono-tz",
+ "getrandom",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "ureq",
 ]
 

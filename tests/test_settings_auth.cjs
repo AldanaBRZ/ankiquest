@@ -7,6 +7,7 @@ const { test, before, after } = require('node:test');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const html = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
+const siteScript = fs.readFileSync(path.join(__dirname, '../static/site.js'), 'utf8');
 const origin = 'http://ankiquest.test';
 const savedSession = { user: 'cerro', token: 'saved-token' };
 const dialogs = [
@@ -22,7 +23,7 @@ before(async () => {
 });
 after(async () => browser?.close());
 
-async function fixture(t, session = savedSession, user = 'cerro') {
+async function fixture(t, session = savedSession, user = 'cerro', options = {}) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark' });
   const pendingReleases = [];
   t.after(async () => {
@@ -33,9 +34,9 @@ async function fixture(t, session = savedSession, user = 'cerro') {
   page.setDefaultTimeout(10000);
   page.setDefaultNavigationTimeout(15000);
   const errors = [], requests = [];
-  const state = { nextFailure: null, acceptedToken: 'saved-token' };
+  const state = { nextFailure: null, acceptedToken: 'saved-token', cookieUser: options.cookieUser || null };
   page.on('pageerror', error => errors.push(error.message));
-  page.on('request', request => requests.push({ url: request.url(), method: request.method(), auth: request.headers().authorization, body: request.postData() }));
+  page.on('request', request => requests.push({ url: request.url(), method: request.method(), auth: request.headers().authorization, csrf: request.headers()['x-ankiquest-csrf'], body: request.postData() }));
   await page.addInitScript(session => {
     window.authStorageWrites = [];
     window.settingsFetchSignals = [];
@@ -56,8 +57,24 @@ async function fixture(t, session = savedSession, user = 'cerro') {
   }, session);
   await page.route(`${origin}/**`, async route => {
     const request = route.request(), url = new URL(request.url());
+    if (url.pathname === '/site.js') return route.fulfill({contentType: 'text/javascript', body: siteScript});
+    if (['/avatars.js','/avatars.css','/site.css'].includes(url.pathname)) {
+      const asset=path.join(__dirname,'../static',url.pathname.slice(1));
+      if(fs.existsSync(asset))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:fs.readFileSync(asset,'utf8')});
+    }
+    if(url.pathname === '/api/avatars')return route.fulfill({contentType:'application/json',body:'{}'});
+    if (url.pathname === '/auth/status') return route.fulfill({contentType: 'application/json', body: JSON.stringify({private_site:false, authenticated:true, member:state.cookieUser ? {user:state.cookieUser} : null})});
+    if (url.pathname === '/auth/session' || url.pathname === '/auth/logout') {
+      if (!options.modern) return route.fulfill({status:404, body:''});
+      if(url.pathname === '/auth/session' && state.holdSession) {
+        const held=state.holdSession;state.holdSession=null;held.arrive();await held.released;
+      }
+      state.cookieUser = url.pathname === '/auth/logout' ? null : request.headers().authorization === 'Bearer hill-token' ? 'hill' : 'cerro';
+      return route.fulfill({status:204});
+    }
     let data;
     if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: html });
+    if (url.pathname.startsWith('/api/community/reminders/')) return route.fulfill({status: request.headers().authorization === `Bearer ${state.acceptedToken}` ? 200 : 401, contentType:'application/json',body:'{}'});
     if (url.pathname === '/api/leaderboard') data = [];
     else if (url.pathname === '/api/week') data = {};
     else if (url.pathname.startsWith('/api/profile/')) {
@@ -83,7 +100,9 @@ async function fixture(t, session = savedSession, user = 'cerro') {
         if (failure === 'network') return route.abort('failed');
         return route.fulfill({ status: failure, body: '' });
       }
-      if (forcedStatus === 401 || (forcedStatus !== 200 && request.headers().authorization !== `Bearer ${state.acceptedToken}`)) return route.fulfill({ status: 401, body: '' });
+      const cookieAuthorized = !request.headers().authorization && state.cookieUser === decodeURIComponent(url.pathname.split('/').pop());
+      if (cookieAuthorized && request.method() === 'POST' && request.headers()['x-ankiquest-csrf'] !== '1') return route.fulfill({status:403,body:''});
+      if (forcedStatus === 401 || (forcedStatus !== 200 && !cookieAuthorized && request.headers().authorization !== `Bearer ${state.acceptedToken}`)) return route.fulfill({ status: 401, body: '' });
       data = url.pathname.startsWith('/api/streak-freezes/')
         ? { enabled: request.method() === 'POST' ? request.postDataJSON().enabled : false, freezes: 2, capacity: 3 }
         : { decks: [{ id: '42', name: 'Spanish', enabled: false, recipients: [] }], recipients: [], nudges: false };
@@ -102,6 +121,11 @@ async function fixture(t, session = savedSession, user = 'cerro') {
       state.holdNext = { arrive, released, status };
       pendingReleases.push(release);
       return { arrived, release };
+    },
+    holdSession() {
+      let arrive,release;
+      const arrived=new Promise(resolve=>{arrive=resolve;}),released=new Promise(resolve=>{release=resolve;});
+      state.holdSession={arrive,released};pendingReleases.push(release);return{arrived,release};
     },
     settingsRequests: () => requests.filter(request => /\/api\/(streak-freezes|decks)\//.test(request.url)),
     async deliver(session = savedSession) {
@@ -400,5 +424,106 @@ for (const spec of dialogs) {
     await retry.click();
     await f.ready(spec);
     assert.equal(f.settingsRequests().length, 2);
+  });
+}
+
+for (const spec of dialogs) {
+  test(spec.name + ': current cookie account opens and saves without a token', async t => {
+    const f = await fixture(t, null, 'cerro', {modern:true, cookieUser:'cerro'});
+    await f.open(spec); await f.ready(spec);
+    assert.equal(await f.page.locator(spec.input).count(), 0);
+    await f.page.locator(spec.id).getByRole('button', {name:spec.save, exact:true}).click();
+    await f.page.locator(spec.id).getByRole('status').filter({hasText:/saved|protection is off/}).waitFor();
+    assert(f.settingsRequests().every(request => !request.auth));
+    assert.equal(f.settingsRequests().find(request => request.method === 'POST').csrf, '1');
+  });
+  test(spec.name + ': changing cookie identity closes the dialog and ignores its pending response', async t => {
+    const f = await fixture(t, null, 'cerro', {modern:true, cookieUser:'cerro'});
+    const held=f.holdNext(200);
+    await f.open(spec); await held.arrived;
+    f.state.cookieUser='hill';
+    await f.page.evaluate(() => AnkiQuestSite.status(true));
+    await f.page.waitForFunction(id => !document.querySelector(id).open, spec.id);
+    held.release();
+    await f.page.evaluate(() => new Promise(resolve => setTimeout(resolve, 50)));
+    assert.equal(await f.page.locator(spec.ready).count(), 0);
+    assert.equal(await f.page.evaluate(() => settingsFetchSignals.at(-1).aborted), true);
+  });
+}
+test('a manually verified account uses the server session in the next settings dialog and after reload', async t => {
+  const f=await fixture(t,null,'cerro',{modern:true});
+  await f.open(dialogs[0]);await f.unlock(dialogs[0]);await f.close(dialogs[0]);
+  await f.open(dialogs[1]);await f.ready(dialogs[1]);await f.close(dialogs[1]);
+  assert.equal(f.settingsRequests()[0].auth,'Bearer saved-token');
+  assert.equal(f.settingsRequests()[1].auth,undefined);
+  await f.page.reload();await f.page.locator('#manage-freezes').waitFor();
+  await f.open(dialogs[0]);await f.ready(dialogs[0]);
+  assert.equal(f.settingsRequests().at(-1).auth,undefined);
+  await f.noCredentialPersistence('saved-token');
+});
+
+for(const replacement of [{user:'hill',token:'hill-token'},null]) {
+  test('a pending manual sign-in yields to native '+(replacement?'account replacement':'account removal'), async t=>{
+    const f=await fixture(t,null,'cerro',{modern:true});
+    const spec=dialogs[0],held=f.holdSession();
+    await f.open(spec);await f.page.locator(spec.input).fill('saved-token');
+    await f.page.locator(spec.unlock).getByRole('button').click();await held.arrived;
+    if(replacement)f.state.acceptedToken='hill-token';
+    // Supplying and then removing a native account models account removal during the pending manual sign-in.
+    if(!replacement)await f.deliver({user:'cerro',token:'saved-token'});
+    await f.deliver(replacement);
+    const corrected=f.page.waitForResponse(response=>new URL(response.url()).pathname===(replacement?'/auth/session':'/auth/logout') && (!replacement || response.request().headers().authorization==='Bearer hill-token'),{timeout:3000});
+    held.release();await corrected;
+    await f.page.evaluate(()=>AnkiQuestSite.status(true));
+    assert.equal(f.state.cookieUser,replacement?.user||null);
+    assert.equal(await f.page.locator(spec.ready).count(),0,'old manual settings must not reappear');
+  });
+}
+test('disconnect waits out a pending sign-in and prevents stale cookie reconnection', async t=>{
+  const f=await fixture(t,null,'cerro',{modern:true});
+  const spec=dialogs[0],held=f.holdSession();
+  await f.open(spec);await f.page.locator(spec.input).fill('saved-token');
+  await f.page.locator(spec.unlock).getByRole('button').click();await held.arrived;
+  await f.page.evaluate(()=>{window.disconnectFinished=false;window.disconnectDone=AnkiQuestSite.disconnectMember().then(()=>{disconnectFinished=true;});});
+  await f.page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,100)));
+  assert.equal(await f.page.evaluate(()=>disconnectFinished),false,'logout must wait for the earlier cookie mutation');
+  held.release();await f.page.evaluate(()=>disconnectDone);
+  await f.page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,100)));
+  assert.equal(f.state.cookieUser,null);
+  assert.equal(await f.page.locator(spec.ready).count(),0);
+});
+
+test('a successful manual account switch keeps its cookie when its identity event closes the previous dialog', async t=>{
+  const f=await fixture(t,null,'cerro',{modern:true,cookieUser:'hill'});
+  const spec=dialogs[0];await f.open(spec);await f.page.locator(spec.input).fill('saved-token');
+  await f.page.locator(spec.unlock).getByRole('button').click();
+  await f.page.waitForFunction(id=>!document.querySelector(id).open,spec.id);
+  assert.equal(f.state.cookieUser,'cerro');
+  await f.open(spec);await f.ready(spec);
+  assert.equal(f.settingsRequests().at(-1).auth,undefined);
+});
+
+test('canceling a queued replacement cannot leave the superseded sign-in cookie installed', async t=>{
+  const f=await fixture(t,null,'cerro',{modern:true});
+  const spec=dialogs[0],held=f.holdSession();
+  await f.open(spec);await f.page.locator(spec.input).fill('saved-token');
+  await f.page.locator(spec.unlock).getByRole('button').click();await held.arrived;
+  await f.close(spec);f.state.acceptedToken='hill-token';
+  const verified=f.page.waitForResponse(response=>new URL(response.url()).pathname==='/api/community/reminders/hill');
+  await f.page.evaluate(()=>{window.queuedActive=true;window.queuedConnection=AnkiQuestSite.connectMember('hill','hill-token',()=>queuedActive).catch(error=>error.name);});
+  await verified;await f.page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,50)));
+  await f.page.evaluate(()=>{queuedActive=false;});held.release();
+  assert.equal(await f.page.evaluate(()=>queuedConnection),'AbortError');
+  assert.equal(f.state.cookieUser,null);
+});
+
+for(const spec of dialogs) {
+  test(spec.name+': removing native credentials cannot reopen settings through its old cookie', async t=>{
+    const f=await fixture(t,savedSession,'cerro',{modern:true,cookieUser:'cerro'});
+    await f.open(spec);await f.ready(spec);await f.deliver(null);
+    await f.page.locator(spec.input).waitFor();await f.close(spec);await f.open(spec);
+    await f.page.evaluate(async()=>{await AnkiQuestSite.member('cerro');await new Promise(resolve=>setTimeout(resolve,200));});
+    assert.equal(f.settingsRequests().length,1);
+    assert.equal(await f.page.locator(spec.ready).count(),0);
   });
 }
