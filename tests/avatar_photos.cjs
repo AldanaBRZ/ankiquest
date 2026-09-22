@@ -15,7 +15,7 @@ async function main() {
   const browser = await chromium.launch({ headless: true, ...(process.env.ANKIQUEST_BROWSER_CHANNEL ? { channel: process.env.ANKIQUEST_BROWSER_CHANNEL } : {}) });
   const checks = [], requests = [], errors = [];
   const metadata = Object.create(null), broken = new Set();
-  let image, imageRequests = 0, pauseWrite = null, pauseMetadata = null;
+  let image, imageRequests = 0, pauseWrite = null, pauseMetadata = null, pauseStatus = null, cookieUser = null;
   try {
     const page = await browser.newPage({ viewport: { width: Number(process.env.ANKIQUEST_AVATAR_WIDTH || 390), height: 844 }, colorScheme: process.env.ANKIQUEST_AVATAR_THEME || 'light' });
     page.on('pageerror', error => errors.push(error.message));
@@ -34,6 +34,12 @@ async function main() {
       if (url.pathname === '/site.css') return route.fulfill({ contentType: 'text/css', body: siteStyles });
       if (url.pathname === '/avatars.js') return route.fulfill({ contentType: 'text/javascript', body: script });
       if (url.pathname === '/avatars.css') return route.fulfill({ contentType: 'text/css', body: stylesheet });
+      if (url.pathname === '/auth/status') {
+        const body = JSON.stringify({ private_site: false, authenticated: true, member: cookieUser ? { user: cookieUser } : null });
+        const gate = pauseStatus;
+        if (gate) { pauseStatus = null; gate.started(); await gate.released; }
+        return route.fulfill({ contentType: 'application/json', body });
+      }
       if (url.pathname === '/api/avatars') {
         const body = JSON.stringify(metadata), gate = pauseMetadata;
         if (gate) { pauseMetadata = null; gate.started(); await gate.released; }
@@ -47,7 +53,11 @@ async function main() {
         }
         const record = { user, method: request.method(), headers: request.headers(), body: request.postDataBuffer() };
         requests.push(record);
-        if (record.headers.authorization !== `Bearer qa-${user}-token`) return route.fulfill({ status: 401, body: 'Unauthorized' });
+        const authorized = record.headers.authorization
+          ? record.headers.authorization === `Bearer qa-${user}-token`
+          : cookieUser === user;
+        if (!authorized) return route.fulfill({ status: 401, body: 'Unauthorized' });
+        if (!record.headers.authorization && record.headers['x-ankiquest-csrf'] !== '1') return route.fulfill({ status: 403, body: 'CSRF required' });
         const gate = pauseWrite;
         if (gate) { pauseWrite = null; gate.started(); await gate.released; }
         if (request.method() === 'DELETE') {
@@ -134,6 +144,12 @@ async function main() {
     metadata.cerro = '3'; await refresh(); await cerro.locator('img[data-revision="3"][data-loaded]').waitFor();
     checks.push('external replacement and removal refresh all existing avatars');
 
+    await open('cerro', 'qa-cerro-token');
+    await page.evaluate(() => dispatchEvent(new Event('ankiquest-auth')));
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), true, 'Repeating the native identity supplied before script loading preserves the editor');
+    await close();
+    await page.evaluate(() => { window.ankiquestSession = null; dispatchEvent(new Event('ankiquest-auth')); });
+
     await open(); assert(await save.isDisabled());
     await dialog.locator('[data-remove]').click(); await status('Enter your AnkiQuest token'); assert.equal(requests.length, 0);
     await choose(landscape); await save.click(); assert.equal(requests.length, 0, 'Required password blocks unauthenticated upload');
@@ -155,6 +171,114 @@ async function main() {
     assert.equal(await cerro.locator('img').count(), 0); assert(await dialog.locator('[data-remove]').isDisabled());
     await close();
     checks.push('supplied-token editor, portrait center crop, authenticated deletion and immediate initials fallback');
+
+    cookieUser = 'cerro';
+    await page.evaluate(() => AnkiQuestSite.status(true, false));
+    await open(); await choose(landscape);
+    assert.equal(await dialog.locator('[name=token]').count(), 0, 'An existing matching owner session needs no token prompt');
+    await save.click(); await status('Profile picture saved.');
+    assert.equal(requests.at(-1).headers.authorization, undefined);
+    assert.equal(requests.at(-1).headers['x-ankiquest-csrf'], '1');
+    assert.equal(requests.at(-1).headers['content-type'], 'image/png');
+    await assertNormalized(requests.at(-1).body);
+    await dialog.locator('[data-remove]').click(); await status('Picture removed.');
+    assert.equal(requests.at(-1).method, 'DELETE');
+    assert.equal(requests.at(-1).headers.authorization, undefined);
+    assert.equal(requests.at(-1).headers['x-ankiquest-csrf'], '1');
+    await close();
+    checks.push('matching cookie owner saves raw PNG and removes photos with CSRF, no token prompt or Bearer header');
+
+    cookieUser = 'alice';
+    await page.evaluate(() => AnkiQuestSite.status(true, false));
+    await open(); await choose(portrait);
+    await dialog.locator('[name=token]').fill('qa-cerro-token');
+    await save.click(); await status('Profile picture saved.');
+    assert.equal(requests.at(-1).user, 'cerro');
+    assert.equal(requests.at(-1).headers.authorization, 'Bearer qa-cerro-token');
+    await close();
+    checks.push('a different member cookie does not authorize the selected profile; manual token fallback stays scoped');
+
+    cookieUser = 'cerro';
+    await page.evaluate(() => AnkiQuestSite.status(true, false));
+    await open('cerro', 'incorrect-explicit-token'); await choose(landscape);
+    await save.click(); await status('That token was not accepted');
+    assert.equal(requests.at(-1).headers.authorization, 'Bearer incorrect-explicit-token', 'An explicit credential takes precedence over a valid cookie');
+    await dialog.locator('[name=token]').fill('qa-cerro-token');
+    await save.click(); await status('Profile picture saved.');
+    await close();
+    checks.push('explicit Bearer retains priority and a rejected supplied token can be corrected without reopening');
+
+    await open(); await choose(landscape);
+    cookieUser = null;
+    await save.click(); await status('Your member session expired or changed');
+    assert.equal(requests.at(-1).headers.authorization, undefined);
+    await dialog.locator('[name=token]').fill('qa-cerro-token');
+    await save.click(); await status('Profile picture saved.');
+    await assertNormalized(requests.at(-1).body);
+    await close();
+    checks.push('expired owner session exposes manual recovery and preserves the selected photo for retry');
+
+    cookieUser = 'cerro';
+    const delayedIdentity = gate(); pauseStatus = delayedIdentity;
+    await page.evaluate(() => { window.pendingAvatarStatus = AnkiQuestSite.status(true, false); });
+    await delayedIdentity.reached;
+    await open();
+    assert(await save.isDisabled(), 'No mutation while member ownership is unresolved');
+    await page.evaluate(() => dispatchEvent(new CustomEvent('ankiquest:identity', { detail: { user: 'alice' } })));
+    assert.equal(await dialog.count(), 0);
+    await open('alice', 'qa-alice-token');
+    delayedIdentity.release(); await page.evaluate(() => pendingAvatarStatus);
+    assert.equal(await dialog.locator('.avatar-preview .avatar').getAttribute('data-avatar-user'), 'alice');
+    assert.equal(await dialog.locator('[name=token]').count(), 0);
+    await close();
+    cookieUser = null;
+    await page.evaluate(() => AnkiQuestSite.status(true, false));
+    checks.push('identity change during owner lookup closes the old editor and discards its late response');
+
+    await page.evaluate(() => {
+      window.ankiquestSession = { user: 'cerro', token: '  qa-cerro-token  ' };
+      dispatchEvent(new Event('ankiquest-auth'));
+    });
+    await open(); await choose(landscape);
+    assert.equal(await dialog.locator('[name=token]').count(), 0, 'The profile entry point reuses a matching native token without being passed one');
+    await save.click(); await status('Profile picture saved.');
+    assert.equal(requests.at(-1).headers.authorization, 'Bearer qa-cerro-token', 'Native token is trimmed');
+    await dialog.locator('[data-remove]').click(); await status('Picture removed.');
+    assert.equal(requests.at(-1).headers.authorization, 'Bearer qa-cerro-token');
+    await close();
+    await open('cerro', 'explicit-invalid'); await choose(landscape); await save.click(); await status('That token was not accepted');
+    assert.equal(requests.at(-1).headers.authorization, 'Bearer explicit-invalid', 'Explicit token precedes even a matching native token');
+    await close();
+    checks.push('matching native token is reused for save and remove; explicit credentials retain precedence');
+
+    cookieUser = 'cerro';
+    await page.evaluate(() => {
+      window.ankiquestSession = { user: 'alice', token: 'qa-alice-token' };
+      dispatchEvent(new Event('ankiquest-auth'));
+      return AnkiQuestSite.status(true, false);
+    });
+    await open(); await choose(landscape);
+    const beforeMismatch = requests.length;
+    await save.click();
+    assert.equal(requests.length, beforeMismatch, 'A different native identity blocks automatic use of the old matching owner cookie');
+    await dialog.locator('[name=token]').fill('qa-cerro-token'); await save.click(); await status('Profile picture saved.');
+    assert.equal(requests.at(-1).user, 'cerro');
+    assert.equal(requests.at(-1).headers.authorization, 'Bearer qa-cerro-token');
+    await close();
+    await page.evaluate(() => {
+      window.ankiquestSession = { user: 'cerro', token: 123 };
+      dispatchEvent(new Event('ankiquest-auth'));
+    });
+    await open(); await choose(landscape); await save.click(); await status('Profile picture saved.');
+    assert.equal(requests.at(-1).headers.authorization, undefined, 'Malformed native credentials are not adopted as a token');
+    await close();
+    cookieUser = null;
+    await page.evaluate(() => {
+      window.ankiquestSession = { user: 'cerro', token: 'initial-native-token' };
+      dispatchEvent(new Event('ankiquest-auth'));
+      return AnkiQuestSite.status(true, false);
+    });
+    checks.push('mismatched native account requires manual target authentication; malformed native token cannot become a credential');
 
     await open('cerro', 'qa-cerro-token');
     await dialog.locator('[name=picture]').setInputFiles({ name: 'invalid.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') });
@@ -208,7 +332,7 @@ async function main() {
 
     await open('cerro', 'qa-cerro-token'); await choose(landscape);
     await page.evaluate(() => dispatchEvent(new Event('ankiquest-auth')));
-    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), true, 'Repeating the native identity supplied before script loading preserves the draft');
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), true, 'Repeating the current native identity preserves the draft');
     await page.evaluate(() => { window.ankiquestSession = { user: 'alice', token: 'replacement' }; dispatchEvent(new Event('ankiquest-auth')); });
     assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Replacing the native account closes the previous account editor');
     assert.equal(await page.evaluate(() => activePreviewURLs.size), 0, 'Replacing the native account releases the selected picture');
