@@ -163,6 +163,7 @@
   }
 
   window.AnkiQuestAvatars = { markup, refresh, open, isOpen: () => !!editor, close: () => closeEditor?.() };
+  window.addEventListener("ankiquest:identity", () => closeEditor?.());
   window.addEventListener("ankiquest:locked", () => {
     locked = true;
     generation++;

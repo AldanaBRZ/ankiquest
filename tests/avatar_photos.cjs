@@ -199,6 +199,12 @@ async function main() {
     await cerro.locator(`img[data-revision="${savedRevision}"][data-loaded]`).waitFor();
     await close(); checks.push('stale metadata response cannot undo a saved revision');
 
+    await open('cerro', 'qa-cerro-token'); await choose(landscape);
+    await page.evaluate(() => dispatchEvent(new CustomEvent('ankiquest:identity', { detail: { user: 'alice' } })));
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Changing member identity closes the previous account editor');
+    assert.equal(await page.evaluate(() => activePreviewURLs.size), 0, 'Changing member identity releases the selected picture');
+    checks.push('member account replacement clears editor credentials and selected picture');
+
     await open('cerro', 'qa-cerro-token'); await choose(landscape); await refresh();
     const lockedMetadata = gate(); pauseMetadata = lockedMetadata;
     await page.evaluate(() => { window.lockedRefresh = AnkiQuestAvatars.refresh(); }); await lockedMetadata.reached;
