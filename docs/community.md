@@ -1,6 +1,6 @@
 # Community, reminders, and challenges
 
-Open **Community** from the leaderboard, or visit `/community`. Public history can be explored without signing in. Choose a player, year, and, in the daily calendar, a month.
+Open **Community** from the leaderboard, or visit `/community`. On a private server, first unlock the site with a member token or the shared website password. Public servers can still be explored without signing in. Choose a player, year, and, in the daily calendar, a month. See [private access](private-site.md) for server setup.
 
 For **Reminders** or **Challenges**, select **Connect account** and use the player's existing AnkiQuest bearer token. The page keeps the token in memory only; disconnecting or leaving the page clears it. Each account can manage only its own preferences and invitations.
 
@@ -69,11 +69,11 @@ All open memberships remain accessible; the history limit applies only to the 10
 
 ## API reference
 
-Private routes require `Authorization: Bearer <token>` for the `{user}` in the path. JSON writes reject unknown fields.
+Private member routes require `Authorization: Bearer <token>` for the `{user}` in the path. JSON writes reject unknown fields. When private site access is enabled, history reads also require a valid site session or player bearer token; a shared website password never replaces the member's token on personal routes.
 
 | Route | Payload / result |
 | --- | --- |
-| `GET /api/community?year=2026&month=9` | Public `{meta, players, calendar, weeks, seasons, awards, records, head_to_head}`. Player counters cover all time; `year_review`, awards, and records use the selected year; `calendar` uses the selected month. |
+| `GET /api/community?year=2026&month=9` | Community `{meta, players, calendar, weeks, seasons, awards, records, head_to_head}`. Player counters cover all time; `year_review`, awards, and records use the selected year; `calendar` uses the selected month. |
 | `GET /api/community/reminders/{user}` | Current reminder settings. |
 | `POST /api/community/reminders/{user}` | Full replacement: booleans `gentle_daily`, `urgent_streak`, `freeze_used`, `freeze_refill`, `milestone`, `weekly_closing`, `weekly_recap`; numeric `reminder_hour`, `quiet_start`, `quiet_end`, `daily_limit`. Returns saved settings. |
 | `GET /api/community/challenges/{user}` | `{challenges, recipients}`; recipients are eligible configured accounts. |
