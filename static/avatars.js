@@ -90,20 +90,29 @@
 
   function open({ user, display = user, token = "" }) {
     if (editor || locked) return;
+    const native = nativeAccount();
+    token = typeof token === "string" ? token.trim() : "";
+    if (!token && native?.user === user) token = native.token;
     const dialog = document.createElement("dialog");
     editor = dialog;
     dialog.className = "avatar-editor";
     dialog.setAttribute("aria-labelledby", "avatar-editor-title");
-    dialog.innerHTML = `<form><h2 id="avatar-editor-title">Profile picture</h2><p>Choose a picture for ${esc(display)}. It will appear wherever your AnkiQuest community sees your profile.</p><div class="avatar-preview">${markup(user, display)}</div><label>Choose a picture<input name="picture" type="file" accept="image/jpeg,image/png"></label><p>JPEG or PNG, up to 20 MB. The center square is used.</p>${token ? "" : '<label>Your AnkiQuest token<input name="token" type="password" autocomplete="off" spellcheck="false" required></label><p>Your token stays only in this window’s memory.</p>'}<p class="avatar-status" role="status" aria-live="polite"></p><div class="avatar-actions"><button type="button" data-remove>Remove picture</button><button type="button" data-close>Close</button><button type="submit">Save picture</button></div></form>`;
+    dialog.innerHTML = `<form><h2 id="avatar-editor-title">Profile picture</h2><p>Choose a picture for ${esc(display)}. It will appear wherever your AnkiQuest community sees your profile.</p><div class="avatar-preview">${markup(user, display)}</div><label>Choose a picture<input name="picture" type="file" accept="image/jpeg,image/png"></label><p>JPEG or PNG, up to 20 MB. The center square is used.</p><div data-avatar-auth></div><p class="avatar-status" role="status" aria-live="polite"></p><div class="avatar-actions"><button type="button" data-remove>Remove picture</button><button type="button" data-close>Close</button><button type="submit">Save picture</button></div></form>`;
     document.body.append(dialog);
     const form = dialog.querySelector("form"), fileInput = form.elements.picture;
-    const password = form.elements.token, preview = dialog.querySelector(".avatar-preview");
+    const preview = dialog.querySelector(".avatar-preview");
     const status = dialog.querySelector(".avatar-status"), save = dialog.querySelector('[type="submit"]');
     const remove = dialog.querySelector("[data-remove]");
     let selected = null, previewUrl = "", busy = false, closed = false, selection = 0;
+    let password = null, cookieOwner = false, checkingSession = !token && !native;
     const controller = new AbortController();
     function message(text, error = false) { status.textContent = text; status.classList.toggle("error", error); }
-    function controls() { save.disabled = busy || !selected; remove.disabled = busy || !revisions[user]; fileInput.disabled = busy; if (password) password.disabled = busy; }
+    function controls() { const waiting = busy || checkingSession; save.disabled = waiting || !selected; remove.disabled = waiting || !revisions[user]; fileInput.disabled = waiting; if (password) password.disabled = waiting; }
+    function requestToken() {
+      if (password) return;
+      dialog.querySelector("[data-avatar-auth]").innerHTML = '<label>Your AnkiQuest token<input name="token" type="password" autocomplete="off" spellcheck="false" required></label><p>Your token stays only in this window’s memory.</p>';
+      password = form.elements.token;
+    }
     function releasePreview() { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = ""; }
     function close() {
       if (closed) return;
@@ -130,17 +139,22 @@
       } catch (error) { if (!closed && version === selection) { message(error.message, true); controls(); } }
     });
     async function update(deleting) {
-      if (busy || closed || (!deleting && !selected)) return;
+      if (busy || checkingSession || closed || (!deleting && !selected)) return;
       const credential = token || password?.value.trim();
-      if (!credential) { message("Enter your AnkiQuest token to change your picture.", true); password?.focus(); return; }
+      if (!credential && !cookieOwner) { message("Enter your AnkiQuest token to change your picture.", true); password?.focus(); return; }
       busy = true; controls(); message(deleting ? "Removing picture…" : "Saving picture…");
       try {
         const response = await fetch(`/api/avatar/${encodeURIComponent(user)}`, {
-          method: deleting ? "DELETE" : "POST", signal: controller.signal,
-          headers: { Authorization: "Bearer " + credential, ...(!deleting ? { "Content-Type": "image/png" } : {}) },
+          method: deleting ? "DELETE" : "POST", signal: controller.signal, credentials: "same-origin",
+          headers: { ...(credential ? { Authorization: "Bearer " + credential } : {}), "X-Ankiquest-CSRF": "1", ...(!deleting ? { "Content-Type": "image/png" } : {}) },
           ...(!deleting ? { body: selected } : {}),
         });
-        if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? "That token was not accepted for this player." : response.status === 413 ? "The picture is too large. Choose a smaller one." : "The picture could not be saved. Please try again.");
+        if (closed) return;
+        if (response.status === 401 || response.status === 403) {
+          token = ""; cookieOwner = false; requestToken(); password.value = "";
+          throw new Error(credential ? "That token was not accepted for this player. Enter your token to try again." : "Your member session expired or changed. Enter your token to reconnect and try again.");
+        }
+        if (!response.ok) throw new Error(response.status === 413 ? "The picture is too large. Choose a smaller one." : "The picture could not be saved. Please try again.");
         const result = deleting ? null : await response.json();
         if (closed) return;
         if (!deleting && (typeof result?.revision !== "string" || !/^\d{1,20}$/.test(result.revision))) throw new Error("The server returned an invalid picture response. Please try again.");
@@ -158,16 +172,34 @@
     dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
     dialog.addEventListener("close", close);
     window.addEventListener("pagehide", close);
+    // A different native account must not silently reuse the previous browser owner's cookie.
+    if (!token && !checkingSession) requestToken();
     controls(); hydrate(); dialog.showModal();
     refresh().then(() => { if (!closed) controls(); });
+    if (checkingSession) {
+      message("Checking your member session…");
+      // This lookup must not publish an initial identity event that closes its own editor.
+      Promise.resolve().then(() => window.AnkiQuestSite?.status(false, false)).then(access => {
+        if (closed) return;
+        cookieOwner = access?.member?.user === user;
+        if (!cookieOwner) requestToken();
+        message("");
+      }).catch(() => { if (!closed) { requestToken(); message(""); } }).finally(() => {
+        if (!closed) { checkingSession = false; controls(); }
+      });
+    }
   }
 
   window.AnkiQuestAvatars = { markup, refresh, open, isOpen: () => !!editor, close: () => closeEditor?.() };
   window.addEventListener("ankiquest:identity", () => closeEditor?.());
-  function nativeIdentityKey() {
+  function nativeAccount() {
     const session = window.ankiquestSession;
     return session && typeof session.user === "string" && session.user && typeof session.token === "string" && session.token.trim()
-      ? JSON.stringify([session.user, session.token.trim()]) : "";
+      ? { user: session.user, token: session.token.trim() } : null;
+  }
+  function nativeIdentityKey() {
+    const session = nativeAccount();
+    return session ? JSON.stringify([session.user, session.token]) : "";
   }
   let nativeIdentity = nativeIdentityKey();
   window.addEventListener("ankiquest-auth", () => {

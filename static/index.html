@@ -366,7 +366,7 @@ function connectSettingsAuth({ user, form, input, controller, load, clear, show,
     event.preventDefault();
     const token = input.value.trim() || settingsToken(user);
     unlock(token, token ? null : cookieSession);
-  });
+  }, { signal: controller.signal });
   const autoUnlock = () => {
     if (controller.signal.aborted) return;
     // An explicit host clear also revokes a cookie session loaded before the first host event.
@@ -396,7 +396,8 @@ function connectSettingsAuth({ user, form, input, controller, load, clear, show,
   addEventListener("ankiquest-auth", autoUnlock, { signal: controller.signal });
   autoUnlock();
   AnkiQuestSite.member(user).then(session => {
-    if (controller.signal.aborted || nativeSettingsCleared || !session || busy || unlocked || settingsToken(user)) return;
+    if (controller.signal.aborted || nativeSettingsCleared || !session || busy || unlocked || input.value.trim() || settingsToken(user) ||
+        (nativeSettingsIdentity() && !nativeSettingsToken(user))) return;
     cookieSession = session;
     unlock("", session);
   });
@@ -859,7 +860,8 @@ function openNotificationPreferences(user = "", display = "") {
   const controller = new AbortController();
   const fixedUser = user;
   const opener = document.activeElement;
-  let token = "", closed = false, busy = false;
+  let token = "", ownerSession = null, closed = false, busy = false, authController = null, authUser = null;
+  let resetAuth = () => {}, playerEdited = false;
   let remembered = "";
   if (!fixedUser) {
     try { remembered = localStorage.getItem("ankiquestPlayer") || ""; } catch (e) {}
@@ -875,7 +877,7 @@ function openNotificationPreferences(user = "", display = "") {
       </label>`}
       <label class="token-label" for="notification-token">Your AnkiQuest token</label>
       <input id="notification-token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="notification-token-help" data-notification-token>
-      <p id="notification-token-help" class="token-help">Use the token from your AnkiQuest settings. It is kept only while this window is open.</p>
+      <p id="notification-token-help" class="token-help">Connect once with your AnkiQuest token. Your connected account is reused across personal settings.</p>
       <button type="submit" class="freeze-button primary" data-notification-load>Load my settings</button>
     </form></div>
     <p id="notification-status" class="status" role="status" aria-live="polite" data-notification-status></p>
@@ -889,20 +891,31 @@ function openNotificationPreferences(user = "", display = "") {
   };
   const request = async body => {
     const loading = body === undefined;
-    const response = await fetch("/api/notification-preferences/" + encodeURIComponent(user), {
+    const requestUser = user, requestToken = token, requestSession = ownerSession, requestController = authController;
+    const active = () => current() && !requestController.signal.aborted && requestUser === user && requestToken === token && requestSession === ownerSession;
+    const response = await fetch("/api/notification-preferences/" + encodeURIComponent(requestUser), {
       method: loading ? "GET" : "POST",
-      headers: { Authorization: "Bearer " + token, ...(loading ? {} : { "Content-Type": "application/json" }) },
+      headers: AnkiQuestSite.ownerHeaders(requestToken ? {user:requestUser, token:requestToken} : requestSession, body),
       ...(loading ? {} : { body: JSON.stringify(body) }),
-      cache: "no-store", signal: controller.signal,
+      cache: "no-store", signal: requestController.signal,
     });
+    if (!active()) throw new DOMException("Settings changed.", "AbortError");
     if (!response.ok) {
-      if (response.status === 401 || response.status === 403) throw new Error(loading
-        ? "That token was not accepted for this player. Check your player name and token, then try again."
-        : "That token is no longer accepted. Close and reopen this window to enter it again.");
+      if (response.status === 401 || response.status === 403) {
+        if (!requestToken) await AnkiQuestSite.checkAccess(response);
+        if (!active()) throw new DOMException("Settings changed.", "AbortError");
+        forgetSettingsToken(requestUser, requestToken);
+        const message = loading
+          ? "That token was not accepted for this player. Check your player name and token, then try again."
+          : "That token is no longer accepted. Enter it again to reload your settings.";
+        resetAuth(message);
+        throw new Error(message);
+      }
       throw new Error(loading ? "Could not load your notification settings. Please try again."
         : "Could not save your notification settings. Your changes are still here; please try again.");
     }
     const data = await response.json();
+    if (!active()) throw new DOMException("Settings changed.", "AbortError");
     if (!data || typeof data.enabled !== "boolean" || !Array.isArray(data.muted_senders) ||
         !data.muted_senders.every(sender => typeof sender === "string" && sender.length > 0) ||
         !Array.isArray(data.senders) || !data.senders.every(sender => sender && typeof sender.user === "string" && sender.user.length > 0 && typeof sender.display === "string")) {
@@ -975,46 +988,41 @@ function openNotificationPreferences(user = "", display = "") {
     });
     syncControls();
   };
-  content.querySelector("form").addEventListener("submit", async event => {
-    event.preventDefault();
-    if (busy || !current()) return;
-    const form = event.currentTarget;
-    const input = form.querySelector("#notification-token");
-    const player = form.querySelector("#notification-player");
-    user = fixedUser || player.value.trim();
-    token = input.value.trim();
-    if (!user) { player.focus(); return; }
-    if (!token) { input.focus(); return; }
-    input.value = "";
-    busy = true;
-    form.setAttribute("aria-busy", "true");
-    const controls = [...form.querySelectorAll("input, button")];
-    controls.forEach(control => { control.disabled = true; });
-    say("Loading settings…");
-    try {
-      const data = await request();
-      if (current()) {
-        busy = false;
-        showSettings(data);
-        say("");
-        content.querySelector("#notification-enabled").focus();
-      }
-    } catch (error) {
-      token = "";
-      if (current()) say(error.message, true);
-    } finally {
-      busy = false;
-      if (current() && form.isConnected) {
-        form.setAttribute("aria-busy", "false");
-        controls.forEach(control => { control.disabled = false; });
-        input.focus();
-      }
-    }
+  const form = content.querySelector("form"), input = form.querySelector("#notification-token"), player = form.querySelector("#notification-player");
+  const bindAccount = target => {
+    if (!current() || !target || target === authUser) return;
+    authController?.abort();
+    authController = new AbortController();
+    const binding = authController;
+    controller.signal.addEventListener("abort", () => binding.abort(), {once:true});
+    authUser = user = target; token = ""; ownerSession = null;
+    if (player) player.value = target;
+    resetAuth = connectSettingsAuth({
+      user, form, input, controller:authController,
+      load: (value, identity) => { token = value; ownerSession = identity; return request(); },
+      clear: () => { token = ""; ownerSession = null; },
+      useSession: identity => { token = identity.token || ""; ownerSession = identity; },
+      show: data => { showSettings(data); content.querySelector("#notification-enabled").focus(); }, say,
+    });
+  };
+  // A leaderboard visitor may choose a player; once connected, the same shared
+  // auth helper used by deck/freeze preferences owns all loading and retries.
+  form.addEventListener("submit", event => {
+    playerEdited = true;
+    const target = fixedUser || player.value.trim();
+    if (target === authUser) return;
+    event.preventDefault();event.stopImmediatePropagation();
+    if (!target) { player.focus();return; }
+    bindAccount(target);
+    // A new task avoids the browser's re-entrant form-submission guard.
+    setTimeout(() => { if (current()) form.requestSubmit(); }, 0);
   });
+  player?.addEventListener("input", () => { playerEdited = true; });
   const finish = () => {
     if (closed) return;
     closed = true;
     token = "";
+    ownerSession = null;
     controller.abort();
     dialog.removeEventListener("close", onClose);
     dialog.removeEventListener("cancel", onCancel);
@@ -1034,6 +1042,14 @@ function openNotificationPreferences(user = "", display = "") {
   dialog.addEventListener("close", onClose);
   dialog.addEventListener("cancel", onCancel);
   dialog.showModal();
+  const native = window.ankiquestSession;
+  if (fixedUser) bindAccount(fixedUser);
+  else if (nativeSettingsIdentity()) bindAccount(native.user);
+  else AnkiQuestSite.member().then(identity => {
+    if (!current() || playerEdited || nativeSettingsCleared || nativeSettingsIdentity()) return;
+    if (identity) bindAccount(identity.user);
+    else if (remembered) bindAccount(remembered);
+  });
 }
 
 function openStreakFreezes(user, display) {
