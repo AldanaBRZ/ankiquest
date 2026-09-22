@@ -6,6 +6,8 @@ XP never depends on which answer button was pressed, so there is no incentive to
 
 ## Run
 
+Requires Rust 1.88 or later.
+
 ```sh
 cargo run -- ankiquest.json
 ```
@@ -35,6 +37,19 @@ Open `/community` for the winners calendar, weekly and monthly results, trophy c
 Sign in there with your own upload token to choose daily, urgent streak, freeze-used, freeze-refill, milestone, weekly closing, and weekly recap reminders, or invite friends to private challenges and shared goals. All seven reminder types are off by default, with personal quiet hours and a daily limit. The token stays in memory until you lock the page or leave. See [the community guide](docs/community.md) for details and API endpoints.
 
 The old server-wide `remind_hour` / NixOS `remindHour` setting is deprecated; enable personal reminders in `/community` instead. Existing device-only AnkiDroid and desktop add-on alarms are controlled separately in each client's settings.
+
+## Profile pictures
+
+Profile pictures are optional. Open your profile and choose **Profile picture**, or connect your account in Community and use the same control there. Choose a JPEG or PNG, preview its center square, then save with your own AnkiQuest token. **Remove picture** restores your initials. Photos appear on the leaderboard and community views; compatible Android clients also display them in widgets and offer a picture picker in AnkiQuest settings.
+
+The website accepts files up to 20 MB and reduces them before upload. The server accepts PNG/JPEG bodies up to 2 MiB and 4096 × 4096 pixels, stores a normalized 256 × 256 PNG in its existing database, and strips original file metadata. Pictures have the same visibility as the community’s player profiles. Uploading and removing require the owner’s bearer token; tokens are never stored by the picture editor.
+
+- `GET /api/avatars` returns an object mapping usernames with pictures to revision strings.
+- `GET /api/avatar/<user>?v=<revision>` returns the current PNG or 404. ETags revalidate replacements and removals.
+- `POST /api/avatar/<user>` accepts the raw picture body with `Authorization: Bearer <token>` and returns `{"revision":"1"}`.
+- `DELETE /api/avatar/<user>` removes the picture and returns 204.
+
+Browser regression checks are in `tests/avatar_layout.cjs`, `tests/avatar_index_layout.cjs`, and `tests/avatar_photos.cjs`. Run them with Node and Playwright installed; `PLAYWRIGHT_MODULE` and `ANKIQUEST_BROWSER_CHANNEL` optionally select an existing installation/browser. The tests use synthetic users and mocked requests.
 
 ## Getting reviews in
 

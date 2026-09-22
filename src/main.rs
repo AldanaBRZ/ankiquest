@@ -1,3 +1,4 @@
+mod avatars;
 mod challenges;
 mod competition;
 mod decks;
@@ -1376,6 +1377,7 @@ async fn main() -> Result<(), Error> {
     });
 
     let router = Router::new()
+        .merge(avatars::routes())
         .route("/", get(index))
         .route("/records", get(index))
         .route("/community", get(community_page))

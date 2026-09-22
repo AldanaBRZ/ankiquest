@@ -208,6 +208,8 @@ dialog.freeze-settings::backdrop { background: #0008; }
   dialog.freeze-settings { padding: 18px; }
 }
 </style>
+<link rel="stylesheet" href="/avatars.css">
+<script src="/avatars.js"></script>
 </head>
 <body>
 <main id="app"><p class="empty">Loading</p></main>
@@ -222,7 +224,7 @@ const pct = (a, b) => b ? Math.min(100, Math.round(a / b * 100)) : 0;
 let weekEnds = 0;
 let renderId = 0;
 const winnerState = { data: null, scope: "shared", metric: "day", error: false, request: 0 };
-const settingsOpen = () => document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open;
+const settingsOpen = () => AnkiQuestAvatars.isOpen() || document.getElementById("deck-sharing").open || document.getElementById("streak-freezes").open;
 const PERIODS = { hour: "This hour", day: "Today", week: "This week", month: "This month", year: "This year", all: "All time" };
 
 const WINDOWS = { hour: "Best hour", day: "Best day", week: "Best week", month: "Best month", year: "Best year" };
@@ -303,7 +305,7 @@ function board(rows, me) {
       <span class="rank">${["👑", "🥈", "🥉"][i] ?? i + 1}</span>
       <div>
         <div class="line">
-          <a class="name" href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a>
+          <a class="name avatar-name" href="#${encodeURIComponent(r.user)}">${AnkiQuestAvatars.markup(r.user,r.display)}<span>${esc(r.display)}</span></a>
           ${r.streak > 0 ? `<span class="streak">🔥${r.streak}</span>` : ""}
           <span class="lvl">Lv ${r.level}</span>
         </div>
@@ -443,7 +445,8 @@ function view(p, rows) {
 <section class="hero">
   <div class="level"><div><small>Level</small>${p.level}</div></div>
   <div>
-    <div class="name">${esc(p.display)}</div>
+    <div class="name avatar-name">${AnkiQuestAvatars.markup(p.user,p.display)}<span>${esc(p.display)}</span></div>
+    <div><button class="avatar-edit-button" type="button" id="manage-avatar">Profile picture</button></div>
     <div class="bar gold"><i style="width:${pct(p.xp_into_level, p.xp_for_next)}%"></i></div>
     <div class="sub">${num(p.xp_into_level)} / ${num(p.xp_for_next)} XP to level ${p.level + 1} · ${num(p.xp_total)} total</div>
   </div>
@@ -788,6 +791,7 @@ async function render() {
         document.title = `${p.display} · level ${p.level}`;
         try { localStorage.setItem("ankiquestPlayer", p.user); } catch (e) {}
         app.innerHTML = view(p, rows);
+        document.getElementById("manage-avatar").addEventListener("click", () => AnkiQuestAvatars.open({user:p.user,display:p.display}));
         document.getElementById("manage-decks").addEventListener("click", () => openDeckSharing(p.user, p.display));
         document.getElementById("manage-freezes").addEventListener("click", () => openStreakFreezes(p.user, p.display));
         return;

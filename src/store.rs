@@ -74,6 +74,7 @@ impl Store {
                  primary key (user, key)
              ) without rowid;",
         )?;
+        crate::avatars::initialize(&conn)?;
         crate::decks::initialize(&conn)?;
         crate::freezes::initialize(&conn)?;
         crate::competition::initialize(&conn)?;
