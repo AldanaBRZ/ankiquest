@@ -3,6 +3,7 @@ name = "ankiquest"
 version = "0.1.0"
 authors = ["hill <hill@hilll.dev>"]
 edition = "2024"
+rust-version = "1.88"
 license = "AGPL-3.0-only"
 repository = "https://github.com/float3/ankiquest"
 
@@ -11,6 +12,7 @@ axum = "0.8"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 getrandom = "0.2"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

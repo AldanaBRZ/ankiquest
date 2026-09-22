@@ -6,6 +6,8 @@ XP never depends on which answer button was pressed, so there is no incentive to
 
 ## Run
 
+Requires Rust 1.88 or later.
+
 ```sh
 cargo run -- ankiquest.json
 ```
@@ -36,6 +38,19 @@ Choose daily, urgent streak, freeze-used, freeze-refill, milestone, weekly closi
 
 The old server-wide `remind_hour` / NixOS `remindHour` setting is deprecated; enable personal reminders in `/community` instead. Existing device-only AnkiDroid and desktop add-on alarms are controlled separately in each client's settings.
 
+## Profile pictures
+
+Profile pictures are optional. Open your profile and choose **Profile picture**, or connect your account in Community and use the same control there. Choose a JPEG or PNG, preview its center square, then save with your own AnkiQuest token. **Remove picture** restores your initials. Photos appear on the leaderboard and community views; compatible Android clients also display them in widgets and offer a picture picker in AnkiQuest settings.
+
+The website accepts files up to 20 MB and reduces them before upload. The server accepts PNG/JPEG bodies up to 2 MiB and 4096 × 4096 pixels, stores a normalized 256 × 256 PNG in its existing database, and strips original file metadata. Pictures have the same visibility as the community’s player profiles: private sites require a browser session or a member’s token to read pictures and their revision list. Uploading and removing always require the owner’s bearer token; the shared site password and browser session do not grant permission to change someone’s picture. Tokens are never stored by the picture editor.
+
+- `GET /api/avatars` returns an object mapping usernames with pictures to revision strings.
+- `GET /api/avatar/<user>?v=<revision>` returns the current PNG or 404, with an ETag for conditional requests. Like other site data, responses use `Cache-Control: no-store` so photos cannot remain readable through a browser cache after logout.
+- `POST /api/avatar/<user>` accepts the raw picture body with `Authorization: Bearer <token>` and returns `{"revision":"1"}`.
+- `DELETE /api/avatar/<user>` removes the picture and returns 204.
+
+Browser regression checks are in `tests/avatar_layout.cjs`, `tests/avatar_index_layout.cjs`, and `tests/avatar_photos.cjs`. Run them with Node and Playwright installed; `PLAYWRIGHT_MODULE` and `ANKIQUEST_BROWSER_CHANNEL` optionally select an existing installation/browser. The tests use synthetic users and mocked requests.
+
 ## Private website access
 
 The leaderboard, profiles, records, and Community share the same navigation, colors, cards, and controls, including light and dark themes. Enable private access to put those pages and their data behind a sign-in screen:
@@ -61,7 +76,7 @@ services.ankiquest = {
 
 The module loads the password through a systemd credential. Use HTTPS and set `public_url` to the actual HTTPS address (the NixOS `domain` option does this). Browser sign-in creates an opaque, HttpOnly, SameSite cookie that lasts seven days. Select **Lock site** to end the session. Restarting the service clears browser sessions; restart after changing the password or token files to load the new credentials. Passwords and tokens are never placed in website URLs or browser storage.
 
-The shared password and browser session grant access to community pages and read data. Managing reminders, challenges, deck notifications, freezes, or an inbox still requires that player's own upload token; the shared password cannot impersonate members.
+The shared password and browser session grant access to community pages and read data. Managing profile pictures, reminders, challenges, deck notifications, freezes, or an inbox still requires that player's own upload token; the shared password cannot impersonate members.
 
 Update the Android app before enabling private mode: authenticated reads and automatic embedded-page sign-in are required. The desktop add-on already sends its configured token on API requests; when opening the website in an external browser, sign in there once. Configure each app with its player's token, not the shared website password. Tokenless clients cannot read a private server. See [the access guide](docs/private-site.md) for API behavior and rollout checks.
 
@@ -104,6 +119,10 @@ When a deck and its subdeck complete together with the same review total, each r
 
 Recipients receive announcements through the updated AnkiDroid client's background notification checks (roughly every 15 minutes, subject to Android's background limits), on desktop through the add-on's own check every five minutes, and through their configured ntfy topic when available (the server checks every 20 seconds). Each announcement can be answered once, with a cheer or your own words: from the Android notification itself, or from **Tools → ankiquest inbox…** on desktop. `POST /api/reply/<user>` with `{"notification": 1, "message": "Good job!"}` delivers the answer, which can be answered in turn. The upload response lists what it just announced, so the client that finished a deck can say who was told. Deck names and recipient preferences are private to the authenticated player; only selected recipients receive the completion message. The dashboard reuses the current server account session, or keeps a token only in page memory on older servers, shared between settings dialogs for that player. It never stores the token in URLs, local storage or session storage. AnkiDroid supplies its saved token only to its configured dashboard; browsing another player does not reuse that credential.
 
+To control announcements you receive, open **Notifications I receive** on the leaderboard or your dashboard profile and enter your player name and AnkiQuest token. Turn off **Receive deck completion notifications** to stop all deck-completion announcements, or mute individual people. These preferences belong to the recipient and apply to AnkiDroid, the desktop add-on, and ntfy. They work before you have uploaded any study history and do not require changes to your own shared decks.
+
+Receiving stays enabled by default for compatibility with existing settings. Muting a person or turning receiving off cancels queued completion pushes and removes those completions from the server inbox, including failed pushes waiting to retry. Turning receiving back on allows new completions only; it does not replay old alerts. Per-person mutes are remembered while the overall switch is off. Already delivered device notifications cannot be recalled. Streak reminders, nudges, messages, replies, and announcements you send have their own controls and are not changed by these recipient preferences.
+
 Players can opt into nudges through **Manage deck notifications** on the dashboard. When a place on the weekly board, their best day ever or the next level is within 150 XP, they hear about it once a day each, in reviews as well as XP. Nudges only arrive between 9:00 and 22:00 of a player's own day, and only after they have already reviewed something, so they never tell anyone to start studying.
 
 Messages can also be written by hand on the server: `sudo ankiquest-message --from cerro aldanita "you are doing great, keep going"`, or `ankiquest <config> message <player> <text>` without the NixOS module. They arrive like any other notification, and with `--from` the recipient can answer them.
@@ -115,6 +134,8 @@ The server and the client used to study must both be updated. Clients only repor
 Clients may include a `decks` array in the review upload. Each entry has `id` (a string), `name`, `remaining`, `reviewed_today`, and `day` (the local Anki day number, days since the Unix epoch after applying timezone and rollover). Omit this field when a reliable snapshot is unavailable. Initial silent uploads populate the deck list without announcing completions. Set `"catalog": true` when `decks` is the full deck list; decks missing from it are removed.
 
 `GET /api/decks/<user>` with the user's bearer token returns private deck preferences and available recipients. `POST` to the same endpoint accepts `{"decks":[{"id":"123","enabled":true,"recipients":["hill"]}]}`. `GET /api/notifications/<user>` with the recipient's bearer token returns their recent completion announcements, with `id`, `title`, `body`, `day`, and `created_at` (Unix seconds). These endpoints never expose another player's deck settings or notification inbox without that player's token.
+
+`GET /api/notification-preferences/<user>` requires that recipient's bearer token and returns `{"enabled":true,"muted_senders":[],"senders":[{"user":"hill","display":"Hill"}]}`. `POST` accepts only `{"enabled":false,"muted_senders":["hill"]}` and returns the updated settings plus available sender identities. At most 100 distinct sender IDs may be muted. IDs must be listed in that recipient's available senders; unknown fields, duplicates, and muting yourself are rejected. Sender choices include configured players and people who have shared with or been muted by the recipient, without revealing private deck names. Older clients saving outgoing deck preferences do not overwrite these incoming preferences.
 
 ## NixOS
 

@@ -1,0 +1,25 @@
+.avatar{box-sizing:border-box;position:relative;display:inline-grid;place-items:center;vertical-align:middle;overflow:hidden;width:36px;height:36px;flex-shrink:0;border:2px solid transparent;border-radius:12px;background:var(--soft,var(--line));font-size:12px;font-weight:750;line-height:1}
+.avatar[data-avatar-user] .avatar-photo{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;visibility:hidden}
+.avatar[data-avatar-user] .avatar-photo[data-loaded]{visibility:visible}
+.avatar[data-avatar-loaded] .avatar-initials{visibility:hidden}
+.avatar-name{display:inline-flex;align-items:center;gap:9px;min-width:0}
+.avatar-name>span:last-child{overflow-wrap:anywhere}
+.profile-hero .avatar-name .avatar{width:48px;height:48px;font-size:17px}
+.avatar-edit-button{margin-top:10px;font:inherit;cursor:pointer;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);padding:8px 12px}
+dialog.avatar-editor{box-sizing:border-box;width:min(450px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid var(--line);border-radius:16px;padding:24px;background:var(--card);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
+.avatar-editor::backdrop{background:#07101899}
+.avatar-editor h2{margin:0;font-size:22px}
+.avatar-editor p{margin:12px 0;color:var(--dim)}
+.avatar-editor .avatar-preview{display:grid;place-items:center;margin:20px auto;width:100px;height:100px}
+.avatar-editor .avatar-preview .avatar{width:100px;height:100px;font-size:30px;border-radius:24px}
+.avatar-editor .avatar-preview>img{width:100px;height:100px;border-radius:24px;object-fit:cover}
+.avatar-editor label{display:grid;gap:6px;margin:14px 0}
+.avatar-editor input{box-sizing:border-box;max-width:100%;width:100%;font:inherit;color:var(--ink)}
+.avatar-editor input[type=password]{padding:10px;background:var(--card);border:1px solid var(--line);border-radius:8px}
+.avatar-editor .avatar-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:18px}
+.avatar-editor button{font:inherit;cursor:pointer;min-height:42px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.avatar-editor button[type=submit]{background:var(--accent);color:var(--card);border-color:var(--accent)}
+.avatar-editor button:disabled{opacity:.55;cursor:default}
+.avatar-editor :focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.avatar-editor .avatar-status{min-height:24px;font-size:13px}
+.avatar-editor .avatar-status.error{color:var(--fire)}

@@ -184,3 +184,11 @@ test('a removed native account is not restored from its old browser cookie on pa
   assert.equal(await page.locator('#reminder-form').count(),0);
   assert.equal(await page.locator('.activity-item').count(),0);
 });
+
+test('a first null native event clears private Community views already loaded with a cookie', async t=>{
+  const {page,deliver}=await fixture(t,null,{cookieUser:'cerro'});
+  await page.locator('#reminder-form').waitFor();await deliver(null);
+  assert.equal(await page.locator('#reminder-form').count(),0);
+  assert.equal(await page.locator('.activity-item').count(),0);
+  await page.locator('#view-reminders [data-connect]').waitFor();
+});

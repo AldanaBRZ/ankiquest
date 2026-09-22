@@ -527,3 +527,28 @@ for(const spec of dialogs) {
     assert.equal(await f.page.locator(spec.ready).count(),0);
   });
 }
+
+for(const spec of dialogs) {
+  test(spec.name+': a first null native event clears settings already loaded with a cookie', async t=>{
+    const f=await fixture(t,null,'cerro',{modern:true,cookieUser:'cerro'});
+    await f.open(spec);await f.ready(spec);await f.deliver(null);
+    assert.equal(await f.page.locator(spec.ready).count(),0);
+    await f.page.locator(spec.input).waitFor();
+    assert.equal(f.settingsRequests().filter(request=>request.method==='POST').length,0);
+  });
+}
+
+test('native account cleanup closes recipient preferences while repeated valid identity preserves edits', async t=>{
+  const f=await fixture(t);
+  await f.page.route(origin+'/api/notification-preferences/cerro',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({enabled:true,muted_senders:[],senders:[]})}));
+  await f.page.locator('#manage-received-notifications').click();
+  await f.page.locator('#notification-token').fill('saved-token');
+  await f.page.locator('[data-notification-load]').click();
+  await f.page.locator('[data-notification-settings]').waitFor();
+  await f.page.locator('#notification-enabled').uncheck();await f.deliver();
+  assert.equal(await f.page.locator('#notification-preferences').evaluate(dialog=>dialog.open),true);
+  assert.equal(await f.page.locator('#notification-enabled').isChecked(),false);
+  await f.deliver(null);
+  assert.equal(await f.page.locator('#notification-preferences').evaluate(dialog=>dialog.open),false);
+  await f.page.waitForFunction(()=>document.getElementById('notification-preferences').innerHTML==='');
+});
