@@ -1,7 +1,7 @@
 /* Shared profile pictures. Tokens and selected photos live only in the open editor. */
 (() => {
   "use strict";
-  let revisions = Object.create(null), generation = 0, pending = null, editor = null;
+  let revisions = Object.create(null), generation = 0, pending = null, editor = null, closeEditor = null, locked = false;
   const failed = new Set();
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
   const imageUrl = (user, revision) => `/api/avatar/${encodeURIComponent(user)}?v=${encodeURIComponent(revision)}`;
@@ -41,6 +41,7 @@
   }
 
   async function refresh() {
+    if (locked) return;
     if (pending) return pending;
     const epoch = generation;
     pending = (async () => {
@@ -88,7 +89,7 @@
   }
 
   function open({ user, display = user, token = "" }) {
-    if (editor) return;
+    if (editor || locked) return;
     const dialog = document.createElement("dialog");
     editor = dialog;
     dialog.className = "avatar-editor";
@@ -108,10 +109,13 @@
       if (closed) return;
       closed = true; selection++; controller.abort(); token = ""; selected = null;
       if (password) password.value = "";
+      fileInput.value = "";
       releasePreview();
-      dialog.close(); dialog.remove(); editor = null;
+      preview.replaceChildren();
+      dialog.close(); dialog.remove(); editor = null; closeEditor = null;
       window.removeEventListener("pagehide", close);
     }
+    closeEditor = close;
     fileInput.addEventListener("change", async () => {
       const version = ++selection, file = fileInput.files[0];
       selected = null; releasePreview(); preview.innerHTML = markup(user, display); hydrate(); controls();
@@ -158,7 +162,15 @@
     refresh().then(() => { if (!closed) controls(); });
   }
 
-  window.AnkiQuestAvatars = { markup, refresh, open, isOpen: () => !!editor, close: () => editor?.close() };
+  window.AnkiQuestAvatars = { markup, refresh, open, isOpen: () => !!editor, close: () => closeEditor?.() };
+  window.addEventListener("ankiquest:locked", () => {
+    locked = true;
+    generation++;
+    revisions = Object.create(null);
+    failed.clear();
+    closeEditor?.();
+    hydrate();
+  });
   function start() {
     new MutationObserver(hydrate).observe(document.body, { childList: true, subtree: true });
     refresh();

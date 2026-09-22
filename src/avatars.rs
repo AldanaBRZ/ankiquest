@@ -272,18 +272,26 @@ mod tests {
     use super::*;
     use crate::{Config, game::Week};
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use image::{GenericImageView, Rgb, RgbImage};
     use std::path::PathBuf;
     use std::sync::{Mutex, RwLock};
+    use tower::ServiceExt;
 
     fn fixture() -> (Arc<App>, PathBuf) {
+        fixture_with_private_site(false)
+    }
+
+    fn fixture_with_private_site(private_site: bool) -> (Arc<App>, PathBuf) {
         let (store, path) = crate::decks::tests::temporary_store();
         let config: Config = serde_json::from_value(serde_json::json!({
+            "private_site": private_site,
             "users": {"cerro": {"token": "cerro-secret"}, "hill": {"token": "hill-secret"}}
         }))
         .unwrap();
         (
             Arc::new(App {
+                access: crate::access::Access::from_config(&config).unwrap(),
                 config,
                 week: Week::default(),
                 store: Mutex::new(store),
@@ -329,6 +337,174 @@ mod tests {
 
     async fn json(response: Response) -> serde_json::Value {
         serde_json::from_slice(&to_bytes(response.into_body(), MAX_UPLOAD).await.unwrap()).unwrap()
+    }
+
+    async fn routed(
+        app: &Arc<App>,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Response {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .extension(ConnectInfo(
+                "192.0.2.1:40000".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        crate::router(app.clone())
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn private_site_guards_avatar_metadata_photos_assets_and_conditional_reads() {
+        let (app, path) = fixture_with_private_site(true);
+        save(
+            &app.store.lock().unwrap(),
+            "cerro",
+            Some(&sample(ImageFormat::Png)),
+        )
+        .unwrap();
+        for endpoint in ["/api/avatars", "/api/avatar/cerro?v=1"] {
+            for headers in [Vec::new(), vec![("if-none-match", "\"avatar-1\"")]] {
+                let response = routed(&app, "GET", endpoint, &headers, Vec::new()).await;
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{endpoint}");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            }
+        }
+        for endpoint in ["/avatars.js", "/avatars.css"] {
+            assert_eq!(
+                routed(&app, "GET", endpoint, &[], Vec::new())
+                    .await
+                    .status(),
+                StatusCode::SEE_OTHER
+            );
+        }
+        let reader = [("authorization", "Bearer hill-secret")];
+        assert_eq!(
+            json(routed(&app, "GET", "/api/avatars", &reader, Vec::new()).await).await,
+            serde_json::json!({"cerro":"1"})
+        );
+        let response = routed(&app, "GET", "/api/avatar/cerro?v=1", &reader, Vec::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
+    async fn private_browser_sessions_read_avatars_but_only_owner_tokens_can_change_them() {
+        let (app, path) = fixture_with_private_site(true);
+        let photo = sample(ImageFormat::Png);
+        save(&app.store.lock().unwrap(), "cerro", Some(&photo)).unwrap();
+        let session = routed(
+            &app,
+            "POST",
+            "/auth/session",
+            &[("authorization", "Bearer hill-secret")],
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(session.status(), StatusCode::NO_CONTENT);
+        let cookie = session.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let browser = [("cookie", cookie.as_str())];
+        for endpoint in [
+            "/api/avatars",
+            "/api/avatar/cerro?v=1",
+            "/avatars.js",
+            "/avatars.css",
+        ] {
+            let response = routed(&app, "GET", endpoint, &browser, Vec::new()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        for credentials in [
+            browser.to_vec(),
+            vec![("authorization", "Bearer hill-secret")],
+        ] {
+            for method in ["POST", "DELETE"] {
+                assert_eq!(
+                    routed(
+                        &app,
+                        method,
+                        "/api/avatar/cerro",
+                        &credentials,
+                        photo.clone()
+                    )
+                    .await
+                    .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
+        }
+        let owner = [
+            ("cookie", cookie.as_str()),
+            ("authorization", "Bearer cerro-secret"),
+        ];
+        assert_eq!(
+            json(routed(&app, "POST", "/api/avatar/cerro", &owner, photo).await).await,
+            serde_json::json!({"revision":"2"})
+        );
+        assert_eq!(
+            routed(&app, "DELETE", "/api/avatar/cerro", &owner, Vec::new())
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        let logout = [("cookie", cookie.as_str()), ("x-ankiquest-csrf", "1")];
+        assert_eq!(
+            routed(&app, "POST", "/auth/logout", &logout, Vec::new())
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        for endpoint in ["/api/avatars", "/api/avatar/cerro?v=1"] {
+            let response = routed(&app, "GET", endpoint, &browser, Vec::new()).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
+    async fn public_site_keeps_avatar_reads_public_and_honors_image_etags() {
+        let (app, path) = fixture();
+        save(
+            &app.store.lock().unwrap(),
+            "cerro",
+            Some(&sample(ImageFormat::Png)),
+        )
+        .unwrap();
+        assert_eq!(
+            json(routed(&app, "GET", "/api/avatars", &[], Vec::new()).await).await,
+            serde_json::json!({"cerro":"1"})
+        );
+        let image = routed(&app, "GET", "/api/avatar/cerro?v=1", &[], Vec::new()).await;
+        assert_eq!(image.status(), StatusCode::OK);
+        let etag = image.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert_eq!(image.headers()[header::CACHE_CONTROL], "no-store");
+        let unchanged = routed(
+            &app,
+            "GET",
+            "/api/avatar/cerro?v=1",
+            &[("if-none-match", &etag)],
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(unchanged.headers()[header::CACHE_CONTROL], "no-store");
+        cleanup(app, path);
     }
 
     #[test]

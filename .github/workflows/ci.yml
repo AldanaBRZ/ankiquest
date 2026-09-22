@@ -49,6 +49,8 @@ jobs:
                     services.ankiquest = {
                       enable = true;
                       domain = "anki.example.com";
+                      privateSite = true;
+                      sitePasswordFile = "/run/secrets/ankiquest-site-password";
                       ntfy = "https://ntfy.sh";
                       users.hill = {
                         ntfyTopic = "example";

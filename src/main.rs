@@ -1,3 +1,4 @@
+mod access;
 mod avatars;
 mod challenges;
 mod competition;
@@ -46,6 +47,11 @@ struct Config {
     #[serde(default, rename = "remind_hour")]
     legacy_remind_hour: Option<i64>,
     public_url: Option<String>,
+    #[serde(default)]
+    private_site: bool,
+    site_password_file: Option<PathBuf>,
+    #[serde(default)]
+    site_trust_proxy: bool,
     #[serde(default = "default_week_timezone")]
     week_timezone: String,
     #[serde(default = "default_week_rollover_hour")]
@@ -80,6 +86,7 @@ struct Player {
 
 struct App {
     config: Config,
+    access: access::Access,
     week: Week,
     store: Mutex<Store>,
     players: RwLock<HashMap<String, Player>>,
@@ -1344,6 +1351,7 @@ async fn main() -> Result<(), Error> {
         }
     }
 
+    let access = access::Access::from_config(&config)?;
     let store = Store::open(&config.state_dir)?;
     let mut players = HashMap::new();
     for user in store.users()? {
@@ -1362,6 +1370,7 @@ async fn main() -> Result<(), Error> {
     let app = Arc::new(App {
         week,
         config,
+        access,
         players: RwLock::new(players),
         store: Mutex::new(store),
     });
@@ -1376,7 +1385,20 @@ async fn main() -> Result<(), Error> {
         }
     });
 
-    let router = Router::new()
+    let router = router(app.clone());
+
+    let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;
+    println!("ankiquest listening on http://{}", app.config.addr);
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+
+fn router(app: Arc<App>) -> Router {
+    Router::new()
         .merge(avatars::routes())
         .route("/", get(index))
         .route("/records", get(index))
@@ -1384,6 +1406,15 @@ async fn main() -> Result<(), Error> {
         .route("/{period}", get(period_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
+        .route("/site.css", get(access::site_css))
+        .route("/site.js", get(access::site_js))
+        .route("/login", get(access::login))
+        .route("/auth/status", get(access::status))
+        .route(
+            "/auth/session",
+            post(access::session).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route("/auth/logout", post(access::logout))
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/records", get(records))
         .route("/api/winners", get(winners))
@@ -1411,12 +1442,11 @@ async fn main() -> Result<(), Error> {
         )
         .route("/api/notifications/{user}", get(notifications))
         .route("/api/reply/{user}", post(reply))
-        .with_state(app.clone());
-
-    let listener = tokio::net::TcpListener::bind(&app.config.addr).await?;
-    println!("ankiquest listening on http://{}", app.config.addr);
-    axum::serve(listener, router).await?;
-    Ok(())
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            access::gate,
+        ))
+        .with_state(app)
 }
 
 #[cfg(test)]
@@ -1436,6 +1466,7 @@ mod tests {
         (
             Arc::new(App {
                 config,
+                access: access::Access::default(),
                 week: Week::default(),
                 store: Mutex::new(store),
                 players: RwLock::new(HashMap::new()),
@@ -2088,6 +2119,7 @@ mod tests {
         let player = load_player(&store, "cerro").unwrap();
         let reloaded = App {
             config,
+            access: access::Access::default(),
             week: Week::default(),
             store: Mutex::new(store),
             players: RwLock::new(HashMap::from([("cerro".into(), player)])),

@@ -1,5 +1,6 @@
 // Browser-only regression suite: all requests use synthetic users and mocked routes.
 // Optional PLAYWRIGHT_MODULE and ANKIQUEST_BROWSER_CHANNEL work as in avatar_layout.cjs.
+// ANKIQUEST_AVATAR_WIDTH and ANKIQUEST_AVATAR_THEME select a viewport/theme (390/light by default).
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -7,6 +8,8 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const script = fs.readFileSync(path.join(root, 'static/avatars.js'), 'utf8');
 const stylesheet = fs.readFileSync(path.join(root, 'static/avatars.css'), 'utf8');
+const siteStyles = fs.readFileSync(path.join(root, 'static/site.css'), 'utf8');
+const siteScript = fs.readFileSync(path.join(root, 'static/site.js'), 'utf8');
 
 async function main() {
   const browser = await chromium.launch({ headless: true, ...(process.env.ANKIQUEST_BROWSER_CHANNEL ? { channel: process.env.ANKIQUEST_BROWSER_CHANNEL } : {}) });
@@ -14,7 +17,7 @@ async function main() {
   const metadata = Object.create(null), broken = new Set();
   let image, imageRequests = 0, pauseWrite = null, pauseMetadata = null;
   try {
-    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    const page = await browser.newPage({ viewport: { width: Number(process.env.ANKIQUEST_AVATAR_WIDTH || 390), height: 844 }, colorScheme: process.env.ANKIQUEST_AVATAR_THEME || 'light' });
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
       window.activePreviewURLs = new Set();
@@ -25,7 +28,9 @@ async function main() {
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
       assert.equal(url.origin, 'https://avatar.test', 'No external network requests');
-      if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/avatars.css"><script src="/avatars.js" defer></script></head><body><div id="avatars"></div></body></html>' });
+      if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/site.css"><link rel="stylesheet" href="/avatars.css"><script src="/site.js" defer></script><script src="/avatars.js" defer></script></head><body><div id="avatars"></div></body></html>' });
+      if (url.pathname === '/site.js') return route.fulfill({ contentType: 'text/javascript', body: siteScript });
+      if (url.pathname === '/site.css') return route.fulfill({ contentType: 'text/css', body: siteStyles });
       if (url.pathname === '/avatars.js') return route.fulfill({ contentType: 'text/javascript', body: script });
       if (url.pathname === '/avatars.css') return route.fulfill({ contentType: 'text/css', body: stylesheet });
       if (url.pathname === '/api/avatars') {
@@ -99,7 +104,7 @@ async function main() {
 
     const escapedUser = 'qa-"/<player>?&', escapedName = '<img src=x> Alice';
     await page.evaluate(({ escapedUser, escapedName }) => {
-      document.getElementById('avatars').innerHTML = AnkiQuestAvatars.markup('cerro', 'Cerro') + AnkiQuestAvatars.markup('missing', 'Missing Picture') + AnkiQuestAvatars.markup('broken', 'Broken Picture') + AnkiQuestAvatars.markup(escapedUser, escapedName);
+      document.getElementById('avatars').innerHTML = AnkiQuestSite.avatar('cerro', 'Cerro') + AnkiQuestSite.avatar('missing', 'Missing Picture') + AnkiQuestSite.avatar('broken', 'Broken Picture') + AnkiQuestSite.avatar(escapedUser, escapedName);
     }, { escapedUser, escapedName });
     assert.equal(await page.locator('#avatars img').count(), 0, 'Absent metadata uses initials without image requests');
     assert.equal(await page.locator('#avatars .avatar').last().getAttribute('data-avatar-user'), escapedUser);
@@ -193,6 +198,20 @@ async function main() {
     staleMetadata.release(); await page.evaluate(() => heldRefresh);
     await cerro.locator(`img[data-revision="${savedRevision}"][data-loaded]`).waitFor();
     await close(); checks.push('stale metadata response cannot undo a saved revision');
+
+    await open('cerro', 'qa-cerro-token'); await choose(landscape); await refresh();
+    const lockedMetadata = gate(); pauseMetadata = lockedMetadata;
+    await page.evaluate(() => { window.lockedRefresh = AnkiQuestAvatars.refresh(); }); await lockedMetadata.reached;
+    await page.evaluate(() => dispatchEvent(new Event('ankiquest:locked')));
+    assert.equal(await page.evaluate(() => AnkiQuestAvatars.isOpen()), false, 'Locking the site closes the authenticated picture editor');
+    assert.equal(await page.locator('.avatar-photo').count(), 0, 'Locking the site clears displayed pictures');
+    lockedMetadata.release(); await page.evaluate(() => lockedRefresh);
+    await page.evaluate(() => {
+      document.getElementById('avatars').insertAdjacentHTML('beforeend', AnkiQuestAvatars.markup('cerro', 'Cerro'));
+      return AnkiQuestAvatars.refresh();
+    });
+    assert.equal(await page.locator('.avatar-photo').count(), 0, 'Late metadata and later refreshes cannot restore pictures after locking');
+    checks.push('site lock clears editor, tokens, preview URLs and photo memory; late responses stay cleared');
 
     const privateState = await page.evaluate(() => ({ local: JSON.stringify(localStorage), session: JSON.stringify(sessionStorage), html: document.body.innerHTML, open: AnkiQuestAvatars.isOpen(), previews: activePreviewURLs.size }));
     for (const value of [privateState.local, privateState.session, privateState.html]) assert(!value.includes('qa-cerro-token') && !value.includes('qa-alice-token'), 'Tokens do not survive in page or storage');

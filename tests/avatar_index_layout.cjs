@@ -11,6 +11,9 @@ const source = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(ma
 const renderer = source.slice(0, source.indexOf('async function render()'));
 const sharedStyles = fs.readFileSync(path.join(root, 'static/avatars.css'), 'utf8');
 const sharedScript = fs.readFileSync(path.join(root, 'static/avatars.js'), 'utf8');
+const siteStyles = fs.readFileSync(path.join(root, 'static/site.css'), 'utf8');
+const siteScript = fs.readFileSync(path.join(root, 'static/site.js'), 'utf8');
+const scaffold = html.match(/<body\b[^>]*>([\s\S]*?)<script>/)[1];
 const evidence = process.env.ANKIQUEST_AVATAR_EVIDENCE;
 if (evidence) fs.mkdirSync(evidence, { recursive: true });
 
@@ -21,28 +24,30 @@ async function main() {
     for (const width of [320, 390, 1440]) for (const colorScheme of ['light', 'dark']) {
       const page = await browser.newPage({ viewport: { width, height: 1100 }, colorScheme });
       await page.route('**/*', route => route.abort());
-      await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>${styles}</style><style>${sharedStyles}</style></head><body><main id="app"></main></body></html>`);
+      await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>${siteStyles}</style><style>${styles}</style><style>${sharedStyles}</style></head><body>${scaffold}</body></html>`);
       await page.addScriptTag({ content: sharedScript });
+      await page.addScriptTag({ content: siteScript });
       await page.addScriptTag({ content: renderer });
       await page.evaluate(() => {
         const names = ['Cerro', 'Alice Brown', 'Alice & <team>'];
         const rows = names.map((display, index) => ({ user: 'qa-player-' + index, display, xp: 12500 - 1000 * index, week_xp: 12500 - 1000 * index, streak: 100, level: 20, today_reviews: 150 }));
-        let content = `<section><h2>Leaderboard</h2>${board(rows, rows[0].user)}</section>`;
+        let content = `<section class="card"><h2>Leaderboard</h2>${board(rows, rows[0].user)}</section>`;
         for (const row of rows) {
           const profile = { ...row, achievements: [], quests: [], heatmap: [{ date: '2026-09-22', reviews: 150, xp: 1500 }], today: { reviews: 150, xp: 1500 }, lifetime: { reviews: 12345, hours: 150, best_streak: 100, best_combo: 75, days_active: 100 }, xp_into_level: 250, xp_for_next: 2000, xp_total: 145000 };
           const wrapper = document.createElement('div'); wrapper.innerHTML = view(profile, rows);
-          content += wrapper.querySelector('.hero').outerHTML;
+          content += wrapper.querySelector('.profile-hero').outerHTML;
         }
         app.innerHTML = content;
       });
       await page.evaluate(() => document.fonts.ready);
       const measurement = await page.evaluate(() => ({
         pageWidth: innerWidth, scrollWidth: document.documentElement.scrollWidth,
-        names: [...document.querySelectorAll('.avatar-name')].map(link => {
-          const bounds = link.getBoundingClientRect(), avatar = link.querySelector('.avatar').getBoundingClientRect(), text = link.lastElementChild;
+        names: [...document.querySelectorAll('.board .player-cell, .profile-hero .avatar-name')].map(container => {
+          const isBoard = !!container.closest('.board');
+          const bounds = container.getBoundingClientRect(), avatar = container.querySelector('.avatar').getBoundingClientRect(), text = isBoard ? container.querySelector('.name') : container.lastElementChild;
           const textBounds = text.getBoundingClientRect(), range = document.createRange(); range.selectNodeContents(text);
           const letters = range.getBoundingClientRect(), style = getComputedStyle(text);
-          return { context: link.closest('.board') ? 'board' : 'profile', text: text.textContent, width: bounds.width, textWidth: textBounds.width, avatarWidth: avatar.width, avatarVisible: avatar.left >= bounds.left - 0.5 && avatar.right <= bounds.right + 0.5, textVisible: letters.left >= bounds.left - 0.5 && letters.right <= bounds.right + 0.5, textOverflow: style.textOverflow, overflow: style.overflow, whiteSpace: style.whiteSpace };
+          return { context: isBoard ? 'board' : 'profile', text: text.textContent, width: bounds.width, textWidth: textBounds.width, avatarCount: container.querySelectorAll('.avatar').length, avatarWidth: avatar.width, avatarVisible: avatar.left >= bounds.left - 0.5 && avatar.right <= bounds.right + 0.5, textVisible: letters.left >= textBounds.left - 0.5 && letters.right <= textBounds.right + 0.5, textOverflow: style.textOverflow, overflow: style.overflow, whiteSpace: style.whiteSpace };
         }),
       }));
       results.push({ width, colorScheme, ...measurement });
@@ -52,6 +57,8 @@ async function main() {
         const label = `${width}px ${colorScheme} ${name.context} ${name.text}`;
         try {
           assert(name.avatarVisible, `${label}: avatar is clipped by its name link (${name.width.toFixed(1)}px available for ${name.avatarWidth}px avatar)`);
+          assert.equal(name.avatarCount, 1, `${label}: exactly one avatar is rendered`);
+          assert.equal(name.avatarWidth, name.context === 'profile' ? 48 : width <= 620 ? 30 : 36, `${label}: avatar retains the theme's intended size`);
           assert(name.textWidth >= 40, `${label}: no usable space remains for the name`);
           assert(name.textVisible || (name.textOverflow === 'ellipsis' && name.overflow === 'hidden'), `${label}: name is silently clipped without ellipsis`);
         } catch (error) { failures.push(error.message); }

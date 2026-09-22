@@ -8,7 +8,9 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const repository = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(repository, 'static/community.html'), 'utf8');
-const styles = [...source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)].map(match => match[1]).join('\n');
+const siteStyles = fs.readFileSync(path.join(repository, 'static/site.css'), 'utf8');
+const siteScript = fs.readFileSync(path.join(repository, 'static/site.js'), 'utf8');
+const styles = siteStyles + '\n' + [...source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)].map(match => match[1]).join('\n');
 const sharedStylePath = path.join(repository, 'static/avatars.css');
 const sharedScriptPath = path.join(repository, 'static/avatars.js');
 const sharedStyles = fs.existsSync(sharedStylePath) ? fs.readFileSync(sharedStylePath, 'utf8') : '';
@@ -38,6 +40,7 @@ async function main() {
         await page.emulateMedia({ colorScheme });
         await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>${styles}</style><style>${sharedStyles}</style></head><body><div id="fixture" class="shell stack"></div></body></html>`);
         if (sharedScript) await page.addScriptTag({ content: sharedScript });
+        await page.addScriptTag({ content: siteScript });
         await page.addScriptTag({ content: renderer });
         await page.evaluate(() => {
           const single = avatar('qa-cerro', 'Cerro');

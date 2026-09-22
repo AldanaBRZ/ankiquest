@@ -4,7 +4,7 @@
 .avatar[data-avatar-loaded] .avatar-initials{visibility:hidden}
 .avatar-name{display:inline-flex;align-items:center;gap:9px;min-width:0}
 .avatar-name>span:last-child{overflow-wrap:anywhere}
-.hero .avatar-name .avatar{width:48px;height:48px;font-size:17px}
+.profile-hero .avatar-name .avatar{width:48px;height:48px;font-size:17px}
 .avatar-edit-button{margin-top:10px;font:inherit;cursor:pointer;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);padding:8px 12px}
 dialog.avatar-editor{box-sizing:border-box;width:min(450px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid var(--line);border-radius:16px;padding:24px;background:var(--card);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
 .avatar-editor::backdrop{background:#07101899}
@@ -23,7 +23,3 @@ dialog.avatar-editor{box-sizing:border-box;width:min(450px,calc(100% - 32px));ma
 .avatar-editor :focus-visible{outline:3px solid var(--accent);outline-offset:3px}
 .avatar-editor .avatar-status{min-height:24px;font-size:13px}
 .avatar-editor .avatar-status.error{color:var(--fire)}
-
-.board .line{align-items:center}
-.board .avatar-name>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:480px){.board .line{flex-wrap:wrap;row-gap:4px}.board .avatar-name{flex-basis:100%}}
