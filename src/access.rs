@@ -1,6 +1,6 @@
 //! Private site access is deliberately separate from each player's write permission.
-//! Browser sessions unlock the shared pages; personal endpoints still require the
-//! owning player's bearer token in main::authorized.
+//! A master session unlocks shared pages; a member session owns exactly one player.
+//! Browser mutations also pass the same-origin/custom-header CSRF gate.
 use crate::{App, Config, Error, now_ms};
 use axum::Json;
 use axum::body::Bytes;
@@ -22,8 +22,14 @@ const MAX_FAILURE_CLIENTS: usize = 4096;
 
 #[derive(Default)]
 struct Sessions {
-    expires: HashMap<String, i64>,
+    expires: HashMap<String, Session>,
     failures: HashMap<IpAddr, Attempts>,
+}
+
+#[derive(Clone)]
+struct Session {
+    expires: i64,
+    member: Option<String>,
 }
 
 struct Attempts {
@@ -75,13 +81,22 @@ impl Access {
         session_cookie(headers).is_some_and(|cookie| {
             let mut sessions = self.sessions.lock().unwrap();
             match sessions.expires.get(cookie) {
-                Some(expires) if *expires > now => true,
+                Some(session) if session.expires > now => true,
                 _ => {
                     sessions.expires.remove(cookie);
                     false
                 }
             }
         })
+    }
+
+    fn member(&self, headers: &HeaderMap, now: i64) -> Option<String> {
+        let cookie = session_cookie(headers)?;
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions.expires.get(cookie)?;
+        (session.expires > now)
+            .then(|| session.member.clone())
+            .flatten()
     }
 
     fn throttled(&self, client: IpAddr, now: i64) -> bool {
@@ -114,12 +129,17 @@ impl Access {
         attempts.failures = attempts.failures.saturating_add(1);
     }
 
-    fn create_session(&self, headers: &HeaderMap, now: i64) -> Result<String, Error> {
+    fn create_session(
+        &self,
+        headers: &HeaderMap,
+        member: Option<String>,
+        now: i64,
+    ) -> Result<String, Error> {
         let mut random = [0u8; 32];
         getrandom::getrandom(&mut random).map_err(|_| "session randomness unavailable")?;
         let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let mut sessions = self.sessions.lock().unwrap();
-        sessions.expires.retain(|_, expires| *expires > now);
+        sessions.expires.retain(|_, session| session.expires > now);
         // Rotate an existing browser session when signing in again.
         if let Some(old) = session_cookie(headers) {
             sessions.expires.remove(old);
@@ -128,14 +148,18 @@ impl Access {
             && let Some(oldest) = sessions
                 .expires
                 .iter()
-                .min_by_key(|(_, expires)| *expires)
+                .min_by_key(|(_, session)| session.expires)
                 .map(|(key, _)| key.clone())
         {
             sessions.expires.remove(&oldest);
         }
-        sessions
-            .expires
-            .insert(token.clone(), now + SESSION_SECONDS * 1000);
+        sessions.expires.insert(
+            token.clone(),
+            Session {
+                expires: now + SESSION_SECONDS * 1000,
+                member,
+            },
+        );
         Ok(token)
     }
 }
@@ -166,6 +190,49 @@ fn member_token(app: &App, given: &str) -> bool {
         .fold(false, |matched, expected| {
             constant_eq(expected, given) | matched
         })
+}
+
+// A duplicated configured token cannot select a member identity implicitly.
+fn token_owner(app: &App, given: &str) -> Option<String> {
+    let matches: Vec<_> = app
+        .config
+        .users
+        .iter()
+        .filter_map(|(name, user)| {
+            user.token
+                .as_deref()
+                .filter(|expected| constant_eq(expected, given))
+                .map(|_| name.clone())
+        })
+        .collect();
+    (matches.len() == 1).then(|| matches[0].clone())
+}
+
+fn member(app: &App, headers: &HeaderMap) -> Option<String> {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return bearer(headers).and_then(|given| token_owner(app, given));
+    }
+    let owner = app.access.member(headers, now_ms())?;
+    app.config
+        .users
+        .get(&owner)?
+        .token
+        .as_ref()
+        .filter(|token| !token.is_empty())?;
+    Some(owner)
+}
+
+pub(crate) fn authorized(app: &App, user: &str, headers: &HeaderMap) -> bool {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return app
+            .config
+            .users
+            .get(user)
+            .and_then(|user| user.token.as_deref())
+            .zip(bearer(headers))
+            .is_some_and(|(expected, given)| constant_eq(expected, given));
+    }
+    member(app, headers).as_deref() == Some(user)
 }
 
 fn authenticated(app: &App, headers: &HeaderMap) -> bool {
@@ -243,6 +310,17 @@ pub(crate) async fn gate(State(app): State<Arc<App>>, request: Request, next: Ne
                 .map_or("/", |path| path.as_str());
             Redirect::to(&format!("/login?next={}", encoded_next(destination))).into_response()
         }
+    } else if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) && app.access.authenticated(request.headers(), now_ms())
+        && !bearer(request.headers()).is_some_and(|given| member_token(&app, given))
+        && (!csrf(request.headers()) || !same_origin(&app, request.headers()))
+    {
+        error(
+            StatusCode::FORBIDDEN,
+            "Send changes from this site with the request header.",
+        )
     } else {
         next.run(request).await
     };
@@ -317,7 +395,8 @@ pub(crate) async fn status(
     headers: HeaderMap,
 ) -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"private_site": app.config.private_site, "authenticated": authenticated(&app, &headers)}),
+        serde_json::json!({"private_site": app.config.private_site, "authenticated": authenticated(&app, &headers),
+            "member": member(&app, &headers).map(|user| serde_json::json!({"display":app.display(&user),"user":user}))}),
     )
 }
 
@@ -351,6 +430,7 @@ pub(crate) async fn session(
         return error(StatusCode::FORBIDDEN, "Sign in from this site.");
     }
     let valid_token = bearer(&headers).is_some_and(|given| member_token(&app, given));
+    let mut owner = bearer(&headers).and_then(|given| token_owner(&app, given));
     if bearer(&headers).is_some() && !valid_token {
         return error(StatusCode::UNAUTHORIZED, "Token not recognized.");
     }
@@ -388,8 +468,19 @@ pub(crate) async fn session(
                 "Password or token not recognized.",
             );
         }
+        // The shared password is always read-only, even if a deployment reused it
+        // as a token. Explicit bearer clients retain their established behavior.
+        let credential = credential.unwrap();
+        if !app
+            .access
+            .password
+            .as_deref()
+            .is_some_and(|expected| constant_eq(expected, &credential.password))
+        {
+            owner = token_owner(&app, &credential.password);
+        }
     }
-    match app.access.create_session(&headers, now_ms()) {
+    match app.access.create_session(&headers, owner, now_ms()) {
         Ok(token) => (
             StatusCode::NO_CONTENT,
             [(header::SET_COOKIE, cookie(&app, &token, SESSION_SECONDS))],
@@ -536,6 +627,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_member_bootstrap_rotates_owner_and_never_falls_back_from_a_bad_bearer() {
+        // Member-cookie CSRF is enforced in public mode too.
+        let (app, path) = fixture(false);
+        let first = request(
+            &app,
+            "POST",
+            "/auth/session",
+            &[("authorization", "Bearer alice-token")],
+            "",
+        )
+        .await;
+        let alice = session_header(&first);
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/activity/alice",
+                &[("cookie", &alice)],
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let second = request(
+            &app,
+            "POST",
+            "/auth/session",
+            &[("authorization", "Bearer bob-token"), ("cookie", &alice)],
+            "",
+        )
+        .await;
+        let bob = session_header(&second);
+        assert_ne!(alice, bob);
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/activity/alice",
+                &[("cookie", &alice)],
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&app, "GET", "/api/activity/bob", &[("cookie", &bob)], "")
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        for authorization in ["Bearer alice-token", "Bearer wrong", "Basic anything"] {
+            assert_eq!(
+                request(
+                    &app,
+                    "GET",
+                    "/api/activity/bob",
+                    &[("cookie", &bob), ("authorization", authorization)],
+                    ""
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/activity/bob/read",
+                &[("cookie", &bob), ("content-type", "application/json")],
+                r#"{"ids":[]}"#
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/activity/bob/read",
+                &[
+                    ("cookie", &bob),
+                    ("x-ankiquest-csrf", "1"),
+                    ("content-type", "application/json")
+                ],
+                r#"{"ids":[]}"#
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/auth/logout",
+                &[("cookie", &bob), ("x-ankiquest-csrf", "1")],
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        let status = request(&app, "GET", "/auth/status", &[("cookie", &bob)], "").await;
+        let status: serde_json::Value =
+            serde_json::from_slice(&to_bytes(status.into_body(), 4096).await.unwrap()).unwrap();
+        assert!(status["member"].is_null());
+        assert_eq!(status["authenticated"], false);
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
+    async fn master_secret_and_ambiguous_tokens_never_select_an_owner() {
+        let (mut app, path) = fixture(true);
+        Arc::get_mut(&mut app)
+            .unwrap()
+            .config
+            .users
+            .get_mut("alice")
+            .unwrap()
+            .token = Some("shared-master".into());
+        let master = session_header(&sign_in(&app, "shared-master").await);
+        assert!(!authorized(
+            &app,
+            "alice",
+            &HeaderMap::from_iter([(header::COOKIE, master.parse().unwrap())])
+        ));
+        Arc::get_mut(&mut app)
+            .unwrap()
+            .config
+            .users
+            .get_mut("alice")
+            .unwrap()
+            .token = Some("bob-token".into());
+        let ambiguous = session_header(&sign_in(&app, "bob-token").await);
+        let headers = HeaderMap::from_iter([(header::COOKIE, ambiguous.parse().unwrap())]);
+        assert!(member(&app, &headers).is_none());
+        assert!(!authorized(&app, "alice", &headers));
+        assert!(!authorized(&app, "bob", &headers));
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
+    async fn activity_api_is_owner_scoped_and_old_notification_array_stays_compatible() {
+        let (app, path) = fixture(true);
+        let (alice, bob) = {
+            let mut store = app.store.lock().unwrap();
+            let mut send = |to| {
+                store
+                    .send(
+                        &crate::decks::Outgoing {
+                            to,
+                            from: "",
+                            title: "Hello",
+                            body: "Inbox",
+                            kind: "message",
+                        },
+                        0,
+                        now_ms(),
+                    )
+                    .unwrap()
+            };
+            (send("alice"), send("bob"))
+        };
+        let headers = [
+            ("authorization", "Bearer alice-token"),
+            ("content-type", "application/json"),
+        ];
+        let response = request(&app, "GET", "/api/activity/alice", &headers, "").await;
+        let activity: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(activity["unread_count"], 1);
+        assert_eq!(activity["window_days"], 90);
+        assert_eq!(activity["items"][0]["id"], alice);
+        assert!(activity["items"][0]["read_at"].is_null());
+        for _ in 0..2 {
+            assert_eq!(
+                request(
+                    &app,
+                    "POST",
+                    "/api/activity/alice/read",
+                    &headers,
+                    &serde_json::json!({"ids":[alice,bob,alice]}).to_string()
+                )
+                .await
+                .status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/activity/bob/read",
+                &headers,
+                &serde_json::json!({"ids":[bob]}).to_string()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let legacy = request(&app, "GET", "/api/notifications/alice", &headers, "").await;
+        let legacy: serde_json::Value =
+            serde_json::from_slice(&to_bytes(legacy.into_body(), 4096).await.unwrap()).unwrap();
+        assert!(legacy.is_array());
+        assert_eq!(legacy[0]["id"], alice);
+        assert!(legacy[0]["read_at"].is_i64());
+        assert_eq!(
+            app.store
+                .lock()
+                .unwrap()
+                .activity("bob", now_ms(), 90, None, 100)
+                .unwrap()
+                .unread_count,
+            1
+        );
+        for query in ["days=7", "days=91", "limit=0", "limit=201", "before=0"] {
+            assert_eq!(
+                request(
+                    &app,
+                    "GET",
+                    &format!("/api/activity/alice?{query}"),
+                    &headers,
+                    ""
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
     async fn private_router_closes_every_data_route_but_keeps_login_assets_public() {
         let (app, path) = fixture(true);
         for endpoint in [
@@ -597,7 +925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn master_and_token_sessions_read_shared_data_but_never_unlock_personal_endpoints() {
+    async fn master_is_readonly_and_member_sessions_own_only_their_personal_endpoints() {
         let (app, path) = fixture(true);
         for password in ["shared-master", "alice-token"] {
             let response = sign_in(&app, password).await;
@@ -623,13 +951,33 @@ mod tests {
                 "/api/notifications/alice",
                 "/api/community/reminders/alice",
                 "/api/decks/alice",
+                "/api/activity/alice",
+                "/api/community/challenges/alice",
             ] {
                 assert_eq!(
                     request(&app, "GET", endpoint, &[("cookie", &cookie)], "")
                         .await
                         .status(),
-                    StatusCode::UNAUTHORIZED
+                    if password == "alice-token" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
                 );
+            }
+            assert_eq!(
+                request(&app, "GET", "/api/activity/bob", &[("cookie", &cookie)], "")
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let status = request(&app, "GET", "/auth/status", &[("cookie", &cookie)], "").await;
+            let status: serde_json::Value =
+                serde_json::from_slice(&to_bytes(status.into_body(), 4096).await.unwrap()).unwrap();
+            if password == "alice-token" {
+                assert_eq!(status["member"]["user"], "alice");
+            } else {
+                assert!(status["member"].is_null());
             }
             assert_eq!(
                 request(
@@ -641,8 +989,33 @@ mod tests {
                 )
                 .await
                 .status(),
-                StatusCode::UNAUTHORIZED
+                StatusCode::FORBIDDEN
             );
+            for origin in ["https://anki.example.test", "https://evil.example"] {
+                let response = request(
+                    &app,
+                    "POST",
+                    "/api/activity/alice/read",
+                    &[
+                        ("cookie", &cookie),
+                        ("content-type", "application/json"),
+                        ("x-ankiquest-csrf", "1"),
+                        ("origin", origin),
+                    ],
+                    r#"{"ids":[]}"#,
+                )
+                .await;
+                assert_eq!(
+                    response.status(),
+                    if origin.contains("evil") {
+                        StatusCode::FORBIDDEN
+                    } else if password == "alice-token" {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+            }
         }
         assert_eq!(
             request(
@@ -767,7 +1140,7 @@ mod tests {
             .unwrap()
             .expires
             .values_mut()
-            .for_each(|expiry| *expiry = now_ms() - 1);
+            .for_each(|session| session.expires = now_ms() - 1);
         assert_eq!(
             request(&app, "GET", "/api/leaderboard", &[("cookie", &cookie)], "")
                 .await
