@@ -15,12 +15,14 @@ pub struct Store {
     signatures: HashMap<String, Signature>,
 }
 
-fn signature(collection: &Path) -> Signature {
+fn signature(collection: &Path) -> Result<Signature, Error> {
     [collection.to_path_buf(), wal_of(collection)]
         .iter()
-        .map(|p| {
-            let meta = fs::metadata(p).ok()?;
-            Some((meta.modified().ok()?, meta.len()))
+        .enumerate()
+        .map(|(index, path)| match fs::metadata(path) {
+            Ok(metadata) => Ok(Some((metadata.modified()?, metadata.len()))),
+            Err(error) if index == 1 && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
         })
         .collect()
 }
@@ -74,6 +76,10 @@ impl Store {
         )?;
         crate::decks::initialize(&conn)?;
         crate::freezes::initialize(&conn)?;
+        crate::competition::initialize(&conn)?;
+        crate::reminders::initialize(&conn)?;
+        crate::challenges::initialize(&conn)?;
+        conn.execute_batch("create table if not exists community_refresh (id integer primary key, refreshed_at integer not null);")?;
         Ok(Self {
             conn,
             scratch,
@@ -142,8 +148,8 @@ impl Store {
 
     pub fn ingest(&mut self, sync_base: &Path, user: &str) -> Result<bool, Error> {
         let source = sync_base.join(user).join("collection.anki2");
-        let before = signature(&source);
-        if before[0].is_none() || self.signatures.get(user) == Some(&before) {
+        let before = signature(&source)?;
+        if self.signatures.get(user) == Some(&before) {
             return Ok(false);
         }
 
@@ -154,8 +160,10 @@ impl Store {
         if before[1].is_some() {
             fs::copy(wal_of(&source), wal_of(&copy))?;
         }
-        if signature(&source) != before {
-            return Ok(false);
+        if signature(&source)? != before {
+            return Err(
+                format!("collection changed while importing {user}; retry required").into(),
+            );
         }
 
         let (reviews, clock) = read_collection(&copy)?;
@@ -285,7 +293,7 @@ mod tests {
 
         assert!(store.mark_seen("hill", "level:2").unwrap());
         assert!(!store.mark_seen("hill", "level:2").unwrap());
-        assert!(!store.ingest(&base, "missing").unwrap());
+        assert!(store.ingest(&base, "missing").is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

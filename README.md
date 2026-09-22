@@ -15,7 +15,6 @@ cargo run -- ankiquest.json
   "addr": "127.0.0.1:8097",
   "state_dir": "state",
   "ntfy": "https://ntfy.sh",
-  "remind_hour": 20,
   "public_url": "https://anki.example.com",
   "week_timezone": "Europe/Berlin",
   "week_rollover_hour": 4,
@@ -28,6 +27,14 @@ cargo run -- ankiquest.json
 Open `/#<user>` for a profile, `/` for the leaderboard. `/hour`, `/day`, `/week`, `/month`, `/year` and `/all` show the same board for another period, as does `GET /api/leaderboard?period=<name>`; each standing carries `xp` for the requested period and `periods` with all of them. The hour is the last 60 minutes and counts review XP only, the day is each player's own Anki day, and month and year follow the calendar in `week_timezone`. The leaderboard week runs Monday to Sunday in `week_timezone` and turns over at `week_rollover_hour` for everyone at once; each Anki day counts towards the week it started in. Streaks, quests and "today" still follow each player's own Anki day.
 
 `/records` and `GET /api/records` name whoever has had the best hour, day, week, month and year here, with the XP and the review count of each and the two who came closest, along with the longest streak and the most days studied; a profile shows the same as personal bests. The record hour is any 60 minutes, not a clock hour.
+
+## Community and reminders
+
+Open `/community` for the winners calendar, weekly and monthly results, trophy cabinet, improvement and consistency awards, head-to-head history, comeback recognition, records, and year in review. Coverage starts with the earliest retained reviews and is labeled **available history**. Historical reconstructions and provisional results are identified; results become permanent after a 24-hour late-sync window. Existing review XP weights are unchanged.
+
+Sign in there with your own upload token to choose daily, urgent streak, freeze-used, freeze-refill, milestone, weekly closing, and weekly recap reminders, or invite friends to private challenges and shared goals. All seven reminder types are off by default, with personal quiet hours and a daily limit. The token stays in memory until you lock the page or leave. See [the community guide](docs/community.md) for details and API endpoints.
+
+The old server-wide `remind_hour` / NixOS `remindHour` setting is deprecated; enable personal reminders in `/community` instead. Existing device-only AnkiDroid and desktop add-on alarms are controlled separately in each client's settings.
 
 ## Getting reviews in
 
@@ -70,7 +77,7 @@ Players can opt into nudges through **Manage deck notifications** on the dashboa
 
 Messages can also be written by hand on the server: `sudo ankiquest-message --from cerro aldanita "you are doing great, keep going"`, or `ankiquest <config> message <player> <text>` without the NixOS module. They arrive like any other notification, and with `--from` the recipient can answer them.
 
-An ntfy push is marked delivered only after a successful HTTP response. Pushes request high priority for vibration and pop-up alerts, subject to the phone's notification settings. Failed pushes retry after 20 seconds, backing off to at most 15 minutes; missing ntfy configuration leaves inbox messages pending. The queue and inbox retain messages for seven days. Retries take turns between recipients and limit network work to 20 seconds per server check. Unlocks and streak warnings retain their existing ntfy-only delivery; they do not add duplicate inbox alerts. A queued streak warning is cancelled when its Anki day ends or the player studies. A server restart or a lost HTTP response can occasionally cause a duplicate push, but retries keep the same inbox notification.
+An ntfy push is marked delivered only after a successful HTTP response. Urgent streak warnings and existing notification types request high priority; other community reminders use normal priority, subject to the phone's notification settings. Failed pushes retry after 20 seconds, backing off to at most 15 minutes; missing ntfy configuration leaves inbox messages pending. The queue and inbox retain messages for seven days. Retries take turns between recipients and limit network work to 20 seconds per server check. Unlocks retain their existing ntfy-only delivery. Community reminders are available through both the inbox and ntfy; their relevance and quiet hours are rechecked before delivery. Upgrading retires pending legacy streak warnings. A server restart or a lost HTTP response can occasionally cause a duplicate push, but retries keep the same inbox notification.
 
 The server and the client used to study must both be updated. Clients only report progress for decks you share, so players who never enable a deck send no deck data. Sending the deck list again replaces the stored one, which removes deleted decks.
 

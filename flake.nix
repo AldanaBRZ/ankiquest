@@ -51,6 +51,7 @@
         remind_hour = cfg.remindHour;
         week_timezone = cfg.weekTimezone;
         week_rollover_hour = cfg.weekRolloverHour;
+        competition_start_date = cfg.competitionStartDate;
         public_url =
           if cfg.domain == null
           then null
@@ -125,7 +126,12 @@
         remindHour = lib.mkOption {
           type = lib.types.ints.between 0 23;
           default = 20;
-          description = "Local hour after which a streak-at-risk reminder is sent.";
+          description = "Deprecated: reminder times and types are configured per player at /community.";
+        };
+        competitionStartDate = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional YYYY-MM-DD competition start date. Null uses the earliest available review history.";
         };
         users = lib.mkOption {
           type = lib.types.attrsOf user;
