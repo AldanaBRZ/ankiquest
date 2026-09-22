@@ -1,7 +1,7 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 const SESSION_GAP_MS: i64 = 300_000;
 const MATURE_IVL: i64 = 21;
@@ -9,9 +9,6 @@ pub const MAX_FREEZES: u32 = 3;
 const QUEST_XP: u64 = 50;
 const ALL_QUESTS_XP: u64 = 100;
 const RECENT_DAYS: usize = 14;
-/// Each further answer of the same card on the same day is worth this much of the
-/// last one, so repeating a card you keep failing cannot out-earn learning it once.
-const REPEAT_DECAY: f64 = 0.5;
 /// How close something has to be before a nudge mentions it, in XP.
 const WITHIN_REACH: u64 = 150;
 const NUDGE_FROM_HOUR: i64 = 9;
@@ -854,9 +851,8 @@ fn review_base_xp(r: &Review) -> f64 {
         return 1.0;
     }
     let base = match r.kind {
-        0 => 9.0,
         1 => 10.0,
-        2 => 6.0,
+        0 | 2 => 6.0,
         _ => 2.0,
     };
     if r.last_ivl >= MATURE_IVL {
@@ -885,7 +881,6 @@ fn collect_days_with_quests(
     let mut combo = 0u64;
     let mut session_ms = 0i64;
     let mut prev: Option<(i64, i64)> = None;
-    let mut answers: HashMap<i64, i32> = HashMap::new();
     let mut counted_day = None;
     let mut recent = VecDeque::new();
     let mut quests = Vec::new();
@@ -900,7 +895,6 @@ fn collect_days_with_quests(
                 }
             }
             quests = gen_quests(seed, day, &recent);
-            answers.clear();
             counted_day = Some(day);
         }
         let s = days.entry(day).or_default();
@@ -941,10 +935,7 @@ fn collect_days_with_quests(
         if hour >= 23 || !morning {
             s.late = true;
         }
-        let again = answers.entry(r.cid).or_insert(0);
-        let xp =
-            review_base_xp(r) * REPEAT_DECAY.powi(*again) * (1.0 + combo.min(100) as f64 / 200.0);
-        *again += 1;
+        let xp = review_base_xp(r) * (1.0 + combo.min(100) as f64 / 200.0);
         s.review_xp += xp;
         earned.push((r.id, xp));
         if s.quests_completed_at.is_none() && quests.iter().all(|q| q.progress(s) >= q.target) {
@@ -1699,6 +1690,40 @@ mod tests {
     }
 
     #[test]
+    fn freeze_reward_matches_visible_quest_completion_after_day_rollover() {
+        let mut reviews = perfect_history(&[1]);
+        let first_today = reviews.len();
+        reviews.extend(perfect_day(&reviews, 2, &utc()));
+        // Read the visible quest state independently of the collector's saved
+        // completion timestamp, including the previous day's adaptive targets.
+        let completed = (first_today..reviews.len())
+            .find(|&i| {
+                protected(&reviews[..=i], reviews[i].id, &[])
+                    .quests
+                    .iter()
+                    .all(|quest| quest.done)
+            })
+            .expect("the second day completes its displayed quests");
+        let completion = reviews[completed].id;
+        assert!(
+            protected(&reviews[..completed], completion - 1, &[])
+                .quests
+                .iter()
+                .any(|quest| !quest.done)
+        );
+        assert_eq!(
+            protected(&reviews, at(2), &[protection(completion, true)]).stored_freezes,
+            1,
+            "opting in at the visible completion earns today's freeze"
+        );
+        assert_eq!(
+            protected(&reviews, at(2), &[protection(completion + 1, true)]).stored_freezes,
+            0,
+            "opting in after completion cannot claim a past reward"
+        );
+    }
+
+    #[test]
     fn preference_at_first_completion_controls_earning_without_backfill() {
         let mut reviews = perfect_history(&[1]);
         let completion = first_completion(&reviews, 1);
@@ -1918,7 +1943,7 @@ mod tests {
     }
 
     #[test]
-    fn a_card_answered_again_the_same_day_earns_less_each_time() {
+    fn repeating_a_card_keeps_the_same_xp_as_answering_different_cards() {
         let answer = |day: i64, index: i64, cid: i64| Review {
             id: day * DAY_MS + NOON + index * 10_000,
             cid,
@@ -1926,75 +1951,34 @@ mod tests {
             time_ms: 5_000,
             kind: 1,
         };
-        let total = |earned: &[(i64, f64)]| earned.iter().map(|(_, xp)| xp).sum::<f64>();
-
-        let stuck: Vec<Review> = (0..6).map(|i| answer(1, i, 7)).collect();
-        let (_, _, repeated) = collect_days(&stuck, &utc());
-        for index in 1..repeated.len() {
-            assert!(
-                repeated[index].1 < repeated[index - 1].1,
-                "answer {index} should pay less than the one before it"
-            );
-        }
-        assert!(
-            total(&repeated) < 3.0 * repeated[0].1,
-            "one card cannot be farmed: {} from a first answer worth {}",
-            total(&repeated),
-            repeated[0].1
-        );
-
+        let same_card: Vec<Review> = (0..6).map(|i| answer(1, i, 7)).collect();
+        let (_, _, repeated) = collect_days(&same_card, &utc());
         let varied: Vec<Review> = (0..6).map(|i| answer(1, i, 7 + i)).collect();
         let (_, _, spread) = collect_days(&varied, &utc());
-        assert!(
-            total(&spread) > 2.0 * total(&repeated),
-            "studying six cards must beat answering one card six times"
-        );
+        assert_eq!(repeated, spread, "card identity does not reduce review XP");
+        assert!(repeated[5].1 > repeated[0].1, "the combo bonus still grows");
 
         let (_, _, fresh) = collect_days(&[answer(1, 0, 7), answer(2, 0, 7)], &utc());
-        assert_eq!(fresh[0].1, fresh[1].1, "a new day starts the card over");
+        assert_eq!(fresh[0].1, fresh[1].1, "a new day resets the combo");
     }
 
     #[test]
-    fn learning_a_new_card_is_worth_about_as_much_as_knowing_an_old_one() {
-        let answer = |index: i64, kind: u8, last_ivl: i64| Review {
-            id: DAY_MS + NOON + index * 600_000,
-            cid: 7,
-            last_ivl,
-            time_ms: 5_000,
-            kind,
-        };
-        let steps = [answer(0, 0, 0), answer(1, 0, 0), answer(2, 0, 0)];
-        let (_, _, learning) = collect_days(&steps, &utc());
-        let learned: f64 = learning.iter().map(|(_, xp)| xp).sum();
-        let (_, _, review) = collect_days(&[answer(0, 1, 30)], &utc());
-        let known = review[0].1;
-        assert!(
-            (learned - known).abs() < 2.0,
-            "learning a card pays {learned}, knowing one pays {known}"
-        );
-        assert!(
-            learning[0].1 < known,
-            "a single learning step is not a whole review"
-        );
-    }
-
-    #[test]
-    fn a_lapse_no_longer_pays_more_than_the_relearning_it_causes() {
-        let step = |index: i64, last_ivl: i64, kind: u8| Review {
-            id: DAY_MS + NOON + index * 600_000,
-            cid: 7,
-            last_ivl,
-            time_ms: 5_000,
-            kind,
-        };
-        let lapse = [step(0, 30, 1), step(1, 0, 2), step(2, 0, 2)];
-        let (_, _, earned) = collect_days(&lapse, &utc());
-        let relearning: f64 = earned[1..].iter().map(|(_, xp)| xp).sum();
-        assert!(
-            relearning < earned[0].1 / 2.0,
-            "picking a card back up is worth less than knowing it: {relearning} vs {}",
-            earned[0].1
-        );
+    fn learning_and_relearning_keep_the_original_rate_for_every_step() {
+        for kind in [0, 2] {
+            let steps: Vec<Review> = (0..3)
+                .map(|index| Review {
+                    id: DAY_MS + NOON + index * 600_000,
+                    cid: 7,
+                    last_ivl: 0,
+                    time_ms: 5_000,
+                    kind,
+                })
+                .collect();
+            let (_, _, earned) = collect_days(&steps, &utc());
+            for (_, xp) in earned {
+                assert!((xp - 6.03).abs() < 1e-9, "kind {kind} earned {xp}");
+            }
+        }
     }
 
     #[test]

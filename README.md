@@ -2,7 +2,7 @@
 
 XP, levels, streaks, daily quests, achievements and a leaderboard for Anki. Clients send review log rows (card id, timestamp, previous interval, time taken, review type), never card content. Deck names and daily counts are only sent by players who use deck completion notifications.
 
-XP never depends on which answer button was pressed, so there is no incentive to grade dishonestly. Answering the same card again on the same day is worth half as much each time, so a card you keep failing cannot out-earn one you learn.
+XP never depends on which answer button was pressed, so there is no incentive to grade dishonestly.
 
 ## Run
 
@@ -69,6 +69,8 @@ Recipients receive announcements through the updated AnkiDroid client's backgrou
 Players can opt into nudges through **Manage deck notifications** on the dashboard. When a place on the weekly board, their best day ever or the next level is within 150 XP, they hear about it once a day each, in reviews as well as XP. Nudges only arrive between 9:00 and 22:00 of a player's own day, and only after they have already reviewed something, so they never tell anyone to start studying.
 
 Messages can also be written by hand on the server: `sudo ankiquest-message --from cerro aldanita "you are doing great, keep going"`, or `ankiquest <config> message <player> <text>` without the NixOS module. They arrive like any other notification, and with `--from` the recipient can answer them.
+
+An ntfy push is marked delivered only after a successful HTTP response. Pushes request high priority for vibration and pop-up alerts, subject to the phone's notification settings. Failed pushes retry after 20 seconds, backing off to at most 15 minutes; missing ntfy configuration leaves inbox messages pending. The queue and inbox retain messages for seven days. Retries take turns between recipients and limit network work to 20 seconds per server check. Unlocks and streak warnings retain their existing ntfy-only delivery; they do not add duplicate inbox alerts. A queued streak warning is cancelled when its Anki day ends or the player studies. A server restart or a lost HTTP response can occasionally cause a duplicate push, but retries keep the same inbox notification.
 
 The server and the client used to study must both be updated. Clients only report progress for decks you share, so players who never enable a deck send no deck data. Sending the deck list again replaces the stored one, which removes deleted decks.
 

@@ -18,7 +18,7 @@ use store::{Error, Store};
 
 const POLL: Duration = Duration::from_secs(20);
 const MAX_PENDING: usize = 5000;
-const MAX_SEPARATE_PUSHES: usize = 3;
+const PUSH_BUDGET: Duration = Duration::from_secs(20);
 /// How many people a record names: the holder and whoever came closest.
 const PODIUM: usize = 3;
 
@@ -627,25 +627,36 @@ async fn icon() -> impl IntoResponse {
     )
 }
 
-fn push(config: &Config, user: &str, title: &str, body: &str, tag: &str) {
-    let (Some(base), Some(topic)) = (
-        config.ntfy.as_deref(),
-        config.users.get(user).and_then(|u| u.ntfy_topic.as_deref()),
-    ) else {
-        return;
-    };
+fn push_destination<'a>(config: &'a Config, user: &str) -> Option<(&'a str, &'a str)> {
+    let base = config.ntfy.as_deref()?.trim();
+    let topic = config.users.get(user)?.ntfy_topic.as_deref()?.trim();
+    (!base.is_empty() && !topic.is_empty()).then_some((base, topic))
+}
+
+fn push(
+    config: &Config,
+    user: &str,
+    title: &str,
+    body: &str,
+    tag: &str,
+    timeout: Duration,
+) -> Result<(), Error> {
+    let (base, topic) = push_destination(config, user).ok_or("no ntfy destination")?;
     let mut request = ureq::post(&format!("{}/{topic}", base.trim_end_matches('/')))
         .config()
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(timeout))
         .build()
         .header("Title", title)
+        .header("Priority", "high")
         .header("Tags", tag);
     if let Some(url) = &config.public_url {
         request = request.header("Click", format!("{}/#{user}", url.trim_end_matches('/')));
     }
-    if let Err(e) = request.send(body) {
-        eprintln!("ntfy push for {user} failed: {e}");
+    let response = request.send(body)?;
+    if !response.status().is_success() {
+        return Err(format!("ntfy returned {}", response.status()).into());
     }
+    Ok(())
 }
 
 fn load_player(store: &Store, user: &str) -> Result<Player, Error> {
@@ -690,6 +701,20 @@ fn import(app: &App, store: &mut Store, base: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+fn streak_warning_body(profile: &Profile) -> String {
+    format!(
+        "Your {} day streak ends tonight. {}",
+        profile.streak,
+        if !profile.freezes_enabled {
+            "Streak freezes are turned off."
+        } else if profile.freezes > 0 {
+            "A freeze would cover you, but why spend it?"
+        } else {
+            "No freezes left."
+        }
+    )
+}
+
 fn tick(app: &App) -> Result<(), Error> {
     let mut store = app.store.lock().unwrap();
     if let Some(base) = &app.config.sync_base {
@@ -702,21 +727,8 @@ fn tick(app: &App) -> Result<(), Error> {
         let Some(profile) = app.profile(&user) else {
             continue;
         };
-        let mut fresh = Vec::new();
-        for event in &profile.events {
-            if store.mark_seen(&user, &event.key)? {
-                fresh.push(event);
-            }
-        }
-        if fresh.len() > MAX_SEPARATE_PUSHES {
-            let titles: Vec<&str> = fresh.iter().map(|e| e.title.as_str()).collect();
-            let title = format!("{} new unlocks", fresh.len());
-            push(&app.config, &user, &title, &titles.join(", "), "tada");
-        } else {
-            for event in fresh {
-                push(&app.config, &user, &event.title, &event.body, "tada");
-            }
-        }
+        let push_enabled = push_destination(&app.config, &user).is_some();
+        store.queue_events(&user, &profile.events, profile.day, now_ms(), push_enabled)?;
         if store.nudges_enabled(&user)? {
             let gap = |other: &Profile| (other.display.clone(), other.week_xp);
             let ahead = ranking
@@ -725,49 +737,100 @@ fn tick(app: &App) -> Result<(), Error> {
                 .min_by_key(|other| other.week_xp)
                 .map(gap);
             for nudge in game::nudges(&profile, ahead.as_ref().map(|(w, xp)| (w.as_str(), *xp))) {
-                if store.mark_seen(&user, &nudge.key)? {
-                    store.send(
-                        &decks::Outgoing {
-                            to: &user,
-                            from: "",
-                            title: &nudge.title,
-                            body: &nudge.body,
-                            kind: "nudge",
-                        },
-                        profile.day,
-                        now_ms(),
-                    )?;
-                }
+                store.send_once(
+                    &decks::Outgoing {
+                        to: &user,
+                        from: "",
+                        title: &nudge.title,
+                        body: &nudge.body,
+                        kind: "nudge",
+                    },
+                    &nudge.key,
+                    profile.day,
+                    now_ms(),
+                    false,
+                )?;
             }
         }
-        if profile.at_risk
-            && profile.local_hour >= app.config.remind_hour
-            && store.mark_seen(&user, &format!("risk:{}", profile.day))?
-        {
-            let body = format!(
-                "Your {} day streak ends tonight. {}",
-                profile.streak,
-                if !profile.freezes_enabled {
-                    "Streak freezes are turned off."
-                } else if profile.freezes > 0 {
-                    "A freeze would cover you, but why spend it?"
-                } else {
-                    "No freezes left."
-                }
-            );
-            push(&app.config, &user, "Streak at risk", &body, "fire");
+        if profile.at_risk && profile.local_hour >= app.config.remind_hour {
+            let body = streak_warning_body(&profile);
+            let key = format!("risk:{}", profile.day);
+            if push_enabled {
+                store.send_once(
+                    &decks::Outgoing {
+                        to: &user,
+                        from: "",
+                        title: "Streak at risk",
+                        body: &body,
+                        kind: "risk",
+                    },
+                    &key,
+                    profile.day,
+                    now_ms(),
+                    true,
+                )?;
+            } else {
+                store.mark_seen(&user, &key)?;
+            }
         }
     }
-    let deliveries = store.take_deck_deliveries(now_ms())?;
     drop(store);
+    deliver_notifications(app, PUSH_BUDGET)
+}
+
+fn deliver_notifications(app: &App, budget: Duration) -> Result<(), Error> {
+    let deliveries = app.store.lock().unwrap().take_deck_deliveries(now_ms())?;
+    let started = std::time::Instant::now();
     for delivery in deliveries {
-        push(
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let id = delivery.notification.id;
+        let current_warning = if delivery.notification.kind == "risk" {
+            match app.profile(&delivery.user) {
+                Some(profile) if profile.day == delivery.notification.day && profile.at_risk => {
+                    Some(streak_warning_body(&profile))
+                }
+                _ => {
+                    app.store.lock().unwrap().cancel_streak_warning(id)?;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        if push_destination(&app.config, &delivery.user).is_none() {
+            app.store.lock().unwrap().defer_push(id, now_ms())?;
+            continue;
+        }
+        if !app.store.lock().unwrap().begin_push(id, now_ms())? {
+            continue;
+        }
+        let result = push(
             &app.config,
             &delivery.user,
             &delivery.notification.title,
-            &delivery.notification.body,
-            "white_check_mark",
+            current_warning
+                .as_deref()
+                .unwrap_or(&delivery.notification.body),
+            match delivery.notification.kind.as_str() {
+                "event" => "tada",
+                "risk" => "fire",
+                _ => "white_check_mark",
+            },
+            remaining.min(Duration::from_secs(10)),
         );
+        app.store
+            .lock()
+            .unwrap()
+            .finish_push(id, result.is_ok(), now_ms())?;
+        if let Err(e) = result {
+            eprintln!(
+                "ntfy push for {} failed; queued for retry: {e}",
+                delivery.user
+            );
+        }
     }
     Ok(())
 }
@@ -1185,6 +1248,516 @@ mod tests {
         assert_eq!(reloaded.profile("cerro").unwrap().stored_freezes, 1);
         assert!(!reloaded.profile("cerro").unwrap().freezes_enabled);
         drop(reloaded);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    fn queued_message(app: &App, user: &str) -> i64 {
+        app.store
+            .lock()
+            .unwrap()
+            .send(
+                &decks::Outgoing {
+                    to: user,
+                    from: "",
+                    title: "Hello",
+                    body: "Do not lose this",
+                    kind: "message",
+                },
+                Clock::default().day(now_ms()),
+                now_ms(),
+            )
+            .unwrap()
+    }
+
+    fn was_pushed(app: &App, id: i64) -> bool {
+        app.store
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "select pushed from notifications where id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn local_push(status: u16) -> (String, std::thread::JoinHandle<String>) {
+        local_push_with_check(status, || {})
+    }
+
+    fn local_push_with_check(
+        status: u16,
+        check: impl FnOnce() + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "no push request arrived"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("accept push: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 2048];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            check();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            String::from_utf8(request).unwrap()
+        });
+        (address, server)
+    }
+
+    #[test]
+    fn missing_push_configuration_does_not_consume_a_queued_message() {
+        let (app, path) = fixture();
+        let id = queued_message(&app, "hill");
+        tick(&app).unwrap();
+        assert!(
+            !was_pushed(&app, id),
+            "an inbox-only delivery has not been pushed"
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn stale_streak_warnings_are_cancelled_after_rollover_or_studying() {
+        for studied in [false, true] {
+            let (app, path) = fixture();
+            let now = now_ms();
+            let day = Clock::default().day(now);
+            let review = Review {
+                id: if studied { now } else { now - 86_400_000 },
+                cid: 1,
+                last_ivl: 30,
+                time_ms: 5000,
+                kind: 1,
+            };
+            {
+                let mut store = app.store.lock().unwrap();
+                store
+                    .upsert("hill", &[review], &[], Clock::default())
+                    .unwrap();
+                app.players
+                    .write()
+                    .unwrap()
+                    .insert("hill".into(), load_player(&store, "hill").unwrap());
+                store
+                    .send_once(
+                        &decks::Outgoing {
+                            to: "hill",
+                            from: "",
+                            title: "Streak at risk",
+                            body: "Your streak ends tonight",
+                            kind: "risk",
+                        },
+                        "risk:test",
+                        if studied { day } else { day - 1 },
+                        now,
+                        true,
+                    )
+                    .unwrap();
+            }
+            deliver_notifications(&app, PUSH_BUDGET).unwrap();
+            assert_eq!(
+                app.store
+                    .lock()
+                    .unwrap()
+                    .conn
+                    .query_row(
+                        "select count(*) from notifications where kind = 'risk'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0,
+                "an obsolete warning must not be sent on a later retry"
+            );
+            assert!(
+                !app.store
+                    .lock()
+                    .unwrap()
+                    .mark_seen("hill", "risk:test")
+                    .unwrap(),
+                "cancelling a stale warning must not generate it again"
+            );
+            drop(app);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_streak_warnings_follow_freeze_setting_changes_before_retry() {
+        for enabled in [false, true] {
+            let (mut app, path) = fixture();
+            let (base, failed) = local_push(503);
+            let config = &mut Arc::get_mut(&mut app).unwrap().config;
+            config.ntfy = Some(base);
+            config.users.get_mut("hill").unwrap().ntfy_topic = Some("hill-topic".into());
+            let clock = Clock::default();
+            let day = clock.day(now_ms());
+            let start = (day - 1) * 86_400_000;
+            let reviews: Vec<_> = (0..60)
+                .map(|i| Review {
+                    id: start + 6 * 3_600_000 + i * 10_000 + if i >= 30 { 600_000 } else { 0 },
+                    cid: i,
+                    last_ivl: 30,
+                    time_ms: 10_000,
+                    kind: 0,
+                })
+                .collect();
+            {
+                let mut store = app.store.lock().unwrap();
+                store.upsert("hill", &reviews, &[], clock).unwrap();
+                store.set_freezes_enabled("hill", true, start).unwrap();
+                app.players
+                    .write()
+                    .unwrap()
+                    .insert("hill".into(), load_player(&store, "hill").unwrap());
+            }
+            // Both directions retain one earned freeze: only its availability changes.
+            let settings = set_freezes(
+                State(app.clone()),
+                UrlPath("hill".into()),
+                headers("hill"),
+                Json(FreezeUpdate { enabled: !enabled }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(settings.enabled, !enabled);
+            let before = app.profile("hill").unwrap();
+            assert_eq!(before.stored_freezes, 1);
+            assert_eq!(before.freezes_enabled, !enabled);
+            assert!(before.at_risk);
+            let old_tail = if enabled {
+                "Streak freezes are turned off."
+            } else {
+                "A freeze would cover you, but why spend it?"
+            };
+            let old_body = format!("Your {} day streak ends tonight. {old_tail}", before.streak);
+            let id = {
+                let mut store = app.store.lock().unwrap();
+                store
+                    .send_once(
+                        &decks::Outgoing {
+                            to: "hill",
+                            from: "",
+                            title: "Streak at risk",
+                            body: &old_body,
+                            kind: "risk",
+                        },
+                        &format!("risk:{day}"),
+                        day,
+                        now_ms(),
+                        true,
+                    )
+                    .unwrap();
+                store.conn.last_insert_rowid()
+            };
+            deliver_notifications(&app, PUSH_BUDGET).unwrap();
+            assert!(failed.join().unwrap().ends_with(&old_body));
+            assert!(!was_pushed(&app, id));
+
+            let settings = set_freezes(
+                State(app.clone()),
+                UrlPath("hill".into()),
+                headers("hill"),
+                Json(FreezeUpdate { enabled }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(settings.enabled, enabled);
+            assert_eq!(settings.freezes, 1);
+            let current = app.profile("hill").unwrap();
+            assert_eq!(current.stored_freezes, 1);
+            assert_eq!(current.freezes, u32::from(enabled));
+            let (base, success) = local_push(200);
+            Arc::get_mut(&mut app).unwrap().config.ntfy = Some(base);
+            app.store
+                .lock()
+                .unwrap()
+                .conn
+                .execute("update notifications set retry_at = 0 where id = ?1", [id])
+                .unwrap();
+            deliver_notifications(&app, PUSH_BUDGET).unwrap();
+            let request = success.join().unwrap();
+            let expected_tail = if enabled {
+                "A freeze would cover you, but why spend it?"
+            } else {
+                "Streak freezes are turned off."
+            };
+            assert!(
+                request.ends_with(expected_tail),
+                "retried warning must describe the current setting (enabled={enabled})"
+            );
+            assert!(!request.ends_with(old_tail));
+            assert!(was_pushed(&app, id));
+            assert!(
+                app.store
+                    .lock()
+                    .unwrap()
+                    .notifications("hill", now_ms())
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(app);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_http_push_is_not_acknowledged() {
+        let (mut app, path) = fixture();
+        let (base, server) = local_push(500);
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        config.users.get_mut("hill").unwrap().ntfy_topic = Some("hill-topic".into());
+        let id = queued_message(&app, "hill");
+        tick(&app).unwrap();
+        assert!(server.join().unwrap().starts_with("POST /hill-topic "));
+        assert!(
+            !was_pushed(&app, id),
+            "an HTTP error must leave the message retryable"
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn ntfy_pushes_request_high_priority_for_vibration_and_pop_up_alerts() {
+        let (mut app, path) = fixture();
+        let (base, server) = local_push(200);
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        config.users.get_mut("hill").unwrap().ntfy_topic = Some("hill-topic".into());
+        let id = queued_message(&app, "hill");
+        deliver_notifications(&app, PUSH_BUDGET).unwrap();
+        let request = server.join().unwrap();
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("priority: high")),
+            "ntfy needs high priority to request vibration and a pop-up"
+        );
+        assert!(was_pushed(&app, id));
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn successful_retry_acknowledges_the_same_message_without_holding_the_store_lock() {
+        let (mut app, path) = fixture();
+        let (base, failed) = local_push(503);
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        config.users.get_mut("hill").unwrap().ntfy_topic = Some("hill-topic".into());
+        let id = queued_message(&app, "hill");
+        deliver_notifications(&app, PUSH_BUDGET).unwrap();
+        failed.join().unwrap();
+        assert!(!was_pushed(&app, id));
+        let app_for_check = Arc::new(Mutex::new(std::sync::Weak::<App>::new()));
+        let check = app_for_check.clone();
+        let (base, success) = local_push_with_check(200, move || {
+            let app = check.lock().unwrap().upgrade().unwrap();
+            assert!(
+                app.store.try_lock().is_ok(),
+                "HTTP must not block uploads or inbox reads"
+            );
+        });
+        Arc::get_mut(&mut app).unwrap().config.ntfy = Some(base);
+        *app_for_check.lock().unwrap() = Arc::downgrade(&app);
+        app.store
+            .lock()
+            .unwrap()
+            .conn
+            .execute("update notifications set retry_at = 0 where id = ?1", [id])
+            .unwrap();
+        deliver_notifications(&app, PUSH_BUDGET).unwrap();
+        let request = success.join().unwrap();
+        assert!(request.starts_with("POST /hill-topic "));
+        assert!(request.ends_with("Do not lose this"));
+        assert!(was_pushed(&app, id));
+        deliver_notifications(&app, PUSH_BUDGET).unwrap();
+        let store = app.store.lock().unwrap();
+        assert_eq!(store.notifications("hill", now_ms()).unwrap()[0].id, id);
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "select push_attempts from notifications where id = ?1",
+                    [id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        drop(store);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn unconfigured_front_rows_do_not_block_a_configured_recipient() {
+        let (mut app, path) = fixture();
+        let (base, server) = local_push(200);
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        config.users.get_mut("friend").unwrap().ntfy_topic = Some("friend-topic".into());
+        for _ in 0..101 {
+            queued_message(&app, "hill");
+        }
+        let id = queued_message(&app, "friend");
+        deliver_notifications(&app, PUSH_BUDGET).unwrap();
+        assert!(server.join().unwrap().starts_with("POST /friend-topic "));
+        assert!(was_pushed(&app, id));
+        assert_eq!(app.store.lock().unwrap().conn.query_row("select sum(push_attempts + pushed) from notifications where recipient = 'hill'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn network_budget_leaves_unattempted_messages_ready_for_the_next_tick() {
+        let (mut app, path) = fixture();
+        let (base, server) =
+            local_push_with_check(200, || std::thread::sleep(Duration::from_millis(500)));
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        for user in ["hill", "friend"] {
+            config.users.get_mut(user).unwrap().ntfy_topic = Some(user.into());
+        }
+        let first = queued_message(&app, "hill");
+        let second = queued_message(&app, "friend");
+        deliver_notifications(&app, Duration::ZERO).unwrap();
+        let start = std::time::Instant::now();
+        deliver_notifications(&app, Duration::from_millis(100)).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the request timeout respects the remaining budget"
+        );
+        server.join().unwrap();
+        assert!(!was_pushed(&app, first));
+        let store = app.store.lock().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "select push_attempts + retry_at from notifications where id = ?1",
+                    [second],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "skipped messages must not be leased or marked delivered"
+        );
+        drop(store);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn failed_server_game_events_remain_durable_without_duplicating_the_inbox() {
+        let (mut app, path) = fixture();
+        let (base, server) = local_push(500);
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        config.users.get_mut("cerro").unwrap().ntfy_topic = Some("cerro-topic".into());
+        let now = now_ms();
+        let reviews: Vec<_> = (0..100)
+            .map(|i| Review {
+                id: now - (100 - i) * 10_000,
+                cid: i,
+                last_ivl: 30,
+                time_ms: 5000,
+                kind: 0,
+            })
+            .collect();
+        {
+            let mut store = app.store.lock().unwrap();
+            store
+                .upsert("cerro", &reviews, &[], Clock::default())
+                .unwrap();
+            app.players
+                .write()
+                .unwrap()
+                .insert("cerro".into(), load_player(&store, "cerro").unwrap());
+        }
+        assert!(!app.profile("cerro").unwrap().events.is_empty());
+        tick(&app).unwrap();
+        server.join().unwrap();
+        let count: i64 = app
+            .store
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "select count(*) from notifications where recipient = 'cerro' and pushed = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count > 0, "failed server unlocks need a durable retry");
+        tick(&app).unwrap();
+        assert!(
+            app.store
+                .lock()
+                .unwrap()
+                .notifications("cerro", now_ms())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            app.store
+                .lock()
+                .unwrap()
+                .conn
+                .query_row(
+                    "select count(*) from notifications where recipient = 'cerro'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            count
+        );
+        drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }
 

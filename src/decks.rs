@@ -1,4 +1,4 @@
-use crate::game::Clock;
+use crate::game::{Clock, Event};
 use crate::store::{Error, Store};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,8 @@ use std::collections::HashSet;
 pub const MAX_DECKS: usize = 2000;
 const MAX_RECIPIENTS: usize = 100;
 const INBOX_AGE_MS: i64 = 7 * 86_400_000;
+const PUSH_LEASE_MS: i64 = 60_000;
+const MAX_SEPARATE_PUSHES: usize = 3;
 pub const MAX_MESSAGE: usize = 200;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -183,6 +185,9 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
         ("sender", "text not null default ''"),
         ("replied", "integer not null default 0"),
         ("kind", "text not null default 'message'"),
+        ("push_only", "integer not null default 0"),
+        ("retry_at", "integer not null default 0"),
+        ("push_attempts", "integer not null default 0"),
     ] {
         let present = conn
             .prepare("select 1 from pragma_table_info('notifications') where name = ?1")?
@@ -194,7 +199,26 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
             )?;
         }
     }
+    conn.execute(
+        "create index if not exists notifications_pending on notifications (pushed, retry_at, id)",
+        [],
+    )?;
     Ok(())
+}
+
+fn insert_notification(
+    conn: &Connection,
+    message: &Outgoing<'_>,
+    day: i64,
+    now_ms: i64,
+    push_only: bool,
+) -> Result<i64, Error> {
+    conn.execute(
+        "insert into notifications (recipient, sender, title, body, day, created_at, kind, push_only)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![message.to, message.from, message.title, message.body, day, now_ms, message.kind, push_only],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
 impl Store {
@@ -335,7 +359,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "select id, title, body, day, created_at / 1000, sender, replied, kind from (
                  select id, title, body, day, created_at, sender, replied, kind from notifications
-                 where recipient = ?1 and created_at >= ?2 order by id desc limit 500
+                 where recipient = ?1 and push_only = 0 and created_at >= ?2 order by id desc limit 500
              ) order by id",
         )?;
         Ok(stmt
@@ -378,20 +402,87 @@ impl Store {
     /// Puts one message straight into a player's inbox, for the `message` command.
     /// The delivery loop pushes it like any other notification.
     pub fn send(&mut self, message: &Outgoing<'_>, day: i64, now_ms: i64) -> Result<i64, Error> {
-        self.conn.execute(
-            "insert into notifications (recipient, sender, title, body, day, created_at, kind)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                message.to,
-                message.from,
-                message.title,
-                message.body,
-                day,
-                now_ms,
-                message.kind
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        insert_notification(&self.conn, message, day, now_ms, false)
+    }
+
+    /// The seen key and its durable delivery commit or roll back together.
+    pub fn send_once(
+        &mut self,
+        message: &Outgoing<'_>,
+        key: &str,
+        day: i64,
+        now_ms: i64,
+        push_only: bool,
+    ) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        if tx.execute(
+            "insert or ignore into seen (user, key) values (?1, ?2)",
+            [message.to, key],
+        )? > 0
+        {
+            insert_notification(&tx, message, day, now_ms, push_only)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Preserve the existing grouped ntfy announcements without duplicating phone
+    /// inbox alerts. Accounts without ntfy retain the existing silent baseline.
+    pub fn queue_events(
+        &mut self,
+        user: &str,
+        events: &[Event],
+        day: i64,
+        now_ms: i64,
+        push_enabled: bool,
+    ) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        let mut fresh = Vec::new();
+        for event in events {
+            if tx.execute(
+                "insert or ignore into seen (user, key) values (?1, ?2)",
+                [user, &event.key],
+            )? > 0
+            {
+                fresh.push(event);
+            }
+        }
+        if push_enabled {
+            if fresh.len() > MAX_SEPARATE_PUSHES {
+                let titles: Vec<_> = fresh.iter().map(|event| event.title.as_str()).collect();
+                insert_notification(
+                    &tx,
+                    &Outgoing {
+                        to: user,
+                        from: "",
+                        title: &format!("{} new unlocks", fresh.len()),
+                        body: &titles.join(", "),
+                        kind: "event",
+                    },
+                    day,
+                    now_ms,
+                    true,
+                )?;
+            } else {
+                for event in fresh {
+                    insert_notification(
+                        &tx,
+                        &Outgoing {
+                            to: user,
+                            from: "",
+                            title: &event.title,
+                            body: &event.body,
+                            kind: "event",
+                        },
+                        day,
+                        now_ms,
+                        true,
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Answers one notification, once, and lets the answer be answered in turn.
@@ -429,8 +520,8 @@ impl Store {
         Ok(Some(sender))
     }
 
-    /// Claim each push before network I/O, matching existing notification behavior:
-    /// retries never spam recipients; the private inbox remains durable on failure.
+    /// Read a bounded batch, leaving it pending until ntfy confirms success.
+    /// Retry times put newly queued messages ahead of previously failed pushes.
     pub fn take_deck_deliveries(&mut self, now_ms: i64) -> Result<Vec<Delivery>, Error> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -439,9 +530,18 @@ impl Store {
         )?;
         let deliveries = {
             let mut stmt = tx.prepare(
-                "select recipient, id, title, body, day, created_at / 1000, sender, replied, kind from notifications where pushed = 0 order by id limit 100",
+                "with ready as (
+                     select *, row_number() over (partition by recipient order by retry_at, id) as turn
+                     from notifications where pushed = 0 and retry_at <= ?1
+                 ), attempted as (
+                     select recipient, max(retry_at) as last_retry from notifications
+                     where push_attempts > 0 group by recipient
+                 )
+                 select ready.recipient, id, title, body, day, created_at / 1000, sender, replied, kind
+                 from ready left join attempted using (recipient)
+                 order by turn, coalesce(last_retry, 0), retry_at, id limit 100",
             )?;
-            stmt.query_map([], |r| {
+            stmt.query_map([now_ms], |r| {
                 Ok(Delivery {
                     user: r.get(0)?,
                     notification: Notification {
@@ -458,14 +558,50 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
-        for delivery in &deliveries {
-            tx.execute(
-                "update notifications set pushed = 1 where id = ?1",
-                [delivery.notification.id],
-            )?;
-        }
         tx.commit()?;
         Ok(deliveries)
+    }
+
+    /// Lease only the message about to be attempted. A stopped worker is retried
+    /// after a minute, while unattempted messages stay available to the next tick.
+    pub fn begin_push(&mut self, id: i64, now_ms: i64) -> Result<bool, Error> {
+        Ok(self.conn.execute(
+            "update notifications set retry_at = ?2, push_attempts = min(push_attempts + 1, 31)
+             where id = ?1 and pushed = 0 and retry_at <= ?3",
+            params![id, now_ms + PUSH_LEASE_MS, now_ms],
+        )? > 0)
+    }
+
+    pub fn defer_push(&mut self, id: i64, now_ms: i64) -> Result<(), Error> {
+        self.conn.execute(
+            "update notifications set retry_at = ?2 where id = ?1 and pushed = 0",
+            params![id, now_ms + PUSH_LEASE_MS],
+        )?;
+        Ok(())
+    }
+
+    pub fn cancel_streak_warning(&mut self, id: i64) -> Result<(), Error> {
+        // These were always ntfy-only. Keep the seen key, and never delete a
+        // message from the player's inbox when discarding stale warnings.
+        self.conn.execute(
+            "delete from notifications where id = ?1 and push_only = 1 and kind = 'risk'",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_push(&mut self, id: i64, succeeded: bool, now_ms: i64) -> Result<(), Error> {
+        let attempts: u32 = self.conn.query_row(
+            "select push_attempts from notifications where id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let delay = (20_000 * (1_i64 << attempts.saturating_sub(1).min(6))).min(15 * 60_000);
+        self.conn.execute(
+            "update notifications set pushed = ?2, retry_at = ?3 where id = ?1 and pushed = 0",
+            params![id, succeeded, now_ms + delay],
+        )?;
+        Ok(())
     }
 }
 
@@ -476,6 +612,257 @@ pub(crate) mod tests {
 
     const DAY: i64 = 20_000;
     const NOW: i64 = DAY * 86_400_000 + 12 * 3_600_000;
+
+    #[test]
+    fn taking_a_delivery_does_not_mark_an_unconfirmed_push_delivered() {
+        let (mut store, path) = temporary_store();
+        let id = store
+            .send(
+                &Outgoing {
+                    to: "hill",
+                    from: "",
+                    title: "Hello",
+                    body: "Try again",
+                    kind: "message",
+                },
+                DAY,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(store.take_deck_deliveries(NOW).unwrap().len(), 1);
+        let pushed: bool = store
+            .conn
+            .query_row(
+                "select pushed from notifications where id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!pushed, "selecting a message is not confirmation from ntfy");
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_backlogged_recipient_does_not_hide_other_recipients() {
+        let (mut store, path) = temporary_store();
+        for _ in 0..101 {
+            store
+                .send(
+                    &Outgoing {
+                        to: "hill",
+                        from: "",
+                        title: "Queued",
+                        body: "Waiting",
+                        kind: "message",
+                    },
+                    DAY,
+                    NOW,
+                )
+                .unwrap();
+        }
+        let friend = store
+            .send(
+                &Outgoing {
+                    to: "friend",
+                    from: "",
+                    title: "Ready",
+                    body: "Deliver me",
+                    kind: "message",
+                },
+                DAY,
+                NOW,
+            )
+            .unwrap();
+        let batch = store.take_deck_deliveries(NOW).unwrap();
+        assert!(
+            batch
+                .iter()
+                .take(2)
+                .any(|delivery| delivery.notification.id == friend),
+            "take turns between recipients before draining a large backlog"
+        );
+        assert!(store.begin_push(batch[0].notification.id, NOW).unwrap());
+        assert_eq!(
+            store.take_deck_deliveries(NOW).unwrap()[0].notification.id,
+            friend,
+            "a new tick favors recipients that have not had an attempt yet"
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn failed_pushes_back_off_survive_restart_and_stop_after_success() {
+        let (mut store, path) = temporary_store();
+        let id = store
+            .send(
+                &Outgoing {
+                    to: "hill",
+                    from: "",
+                    title: "Retry",
+                    body: "Keep me",
+                    kind: "message",
+                },
+                DAY,
+                NOW,
+            )
+            .unwrap();
+        let mut at = NOW;
+        for attempt in 0..9 {
+            assert_eq!(
+                store.take_deck_deliveries(at).unwrap()[0].notification.id,
+                id
+            );
+            assert!(store.begin_push(id, at).unwrap());
+            assert!(
+                !store.begin_push(id, at).unwrap(),
+                "another worker cannot claim the same attempt"
+            );
+            store.finish_push(id, false, at).unwrap();
+            let delay = (20_000 * (1_i64 << attempt.min(6))).min(15 * 60_000);
+            assert!(
+                store
+                    .take_deck_deliveries(at + delay - 1)
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(store);
+            store = Store::open(&path).unwrap();
+            at += delay;
+        }
+        assert!(store.begin_push(id, at).unwrap());
+        store.finish_push(id, true, at).unwrap();
+        assert!(store.take_deck_deliveries(at + 900_000).unwrap().is_empty());
+        assert_eq!(
+            store.notifications("hill", at).unwrap().len(),
+            1,
+            "retry never creates a new inbox notification"
+        );
+        assert!(
+            store
+                .take_deck_deliveries(NOW + INBOX_AGE_MS + 1)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("select count(*) from notifications", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn interrupted_pushes_retry_after_the_lease_and_leave_other_messages_available() {
+        let (mut store, path) = temporary_store();
+        let first = store
+            .send(
+                &Outgoing {
+                    to: "hill",
+                    from: "",
+                    title: "First",
+                    body: "Retry",
+                    kind: "message",
+                },
+                DAY,
+                NOW,
+            )
+            .unwrap();
+        let second = store
+            .send(
+                &Outgoing {
+                    to: "friend",
+                    from: "",
+                    title: "Second",
+                    body: "Ready",
+                    kind: "message",
+                },
+                DAY,
+                NOW,
+            )
+            .unwrap();
+        assert!(store.begin_push(first, NOW).unwrap());
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let ready = store.take_deck_deliveries(NOW + PUSH_LEASE_MS - 1).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].notification.id, second);
+        assert_eq!(
+            store
+                .take_deck_deliveries(NOW + PUSH_LEASE_MS)
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn seen_keys_and_notifications_commit_together_and_push_only_stays_private() {
+        let (mut store, path) = temporary_store();
+        let event = Event {
+            key: "level:2".into(),
+            title: "Level 2".into(),
+            body: "Well done".into(),
+        };
+        let message = Outgoing {
+            to: "hill",
+            from: "",
+            title: "Nudge",
+            body: "Almost there",
+            kind: "nudge",
+        };
+        store.conn.execute_batch("create temp trigger reject_notification before insert on notifications begin select raise(abort, 'test failure'); end;").unwrap();
+        assert!(
+            store
+                .queue_events("hill", std::slice::from_ref(&event), DAY, NOW, true)
+                .is_err()
+        );
+        assert!(
+            store
+                .send_once(&message, "nudge:today", DAY, NOW, false)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("select count(*) from seen", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store
+            .conn
+            .execute_batch("drop trigger reject_notification")
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .queue_events("hill", std::slice::from_ref(&event), DAY, NOW, true)
+                .unwrap();
+            store
+                .send_once(&message, "nudge:today", DAY, NOW, false)
+                .unwrap();
+        }
+        let inbox = store.notifications("hill", NOW).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, "nudge");
+        assert_eq!(store.take_deck_deliveries(NOW).unwrap().len(), 2);
+        store
+            .queue_events("friend", &[event], DAY, NOW, false)
+            .unwrap();
+        assert!(store.notifications("friend", NOW).unwrap().is_empty());
+        assert!(
+            !store.mark_seen("friend", "level:2").unwrap(),
+            "accounts without ntfy keep their silent event baseline"
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     pub fn temporary_store() -> (Store, std::path::PathBuf) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -622,6 +1009,16 @@ pub(crate) mod tests {
         );
         let deliveries = store.take_deck_deliveries(NOW + 86_400_000).unwrap();
         assert_eq!(deliveries.len(), 5);
+        for delivery in deliveries {
+            assert!(
+                store
+                    .begin_push(delivery.notification.id, NOW + 86_400_000)
+                    .unwrap()
+            );
+            store
+                .finish_push(delivery.notification.id, true, NOW + 86_400_000)
+                .unwrap();
+        }
         assert!(
             store
                 .take_deck_deliveries(NOW + 86_400_000)
