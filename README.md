@@ -2,7 +2,7 @@
 
 XP, levels, streaks, daily quests, achievements and a leaderboard for Anki. Clients send review log rows (card id, timestamp, previous interval, time taken, review type), never card content. Deck names and daily counts are only sent by players who use deck completion notifications.
 
-XP never depends on which answer button was pressed, so there is no incentive to grade dishonestly. Answering the same card again on the same day is worth half as much each time, so a card you keep failing cannot out-earn one you learn.
+XP never depends on which answer button was pressed, so there is no incentive to grade dishonestly.
 
 ## Run
 
