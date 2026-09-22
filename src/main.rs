@@ -1544,6 +1544,83 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn disabling_nudges_cancels_failed_pushes_without_losing_inbox_history() {
+        for enable_again in [false, true] {
+            let (mut app, path) = fixture();
+            let (base, failed) = local_push(503);
+            let config = &mut Arc::get_mut(&mut app).unwrap().config;
+            config.ntfy = Some(base);
+            config.users.get_mut("hill").unwrap().ntfy_topic = Some("hill-topic".into());
+            let id = {
+                let mut store = app.store.lock().unwrap();
+                store.set_nudges("hill", true).unwrap();
+                store
+                    .send_once(
+                        &decks::Outgoing {
+                            to: "hill",
+                            from: "",
+                            title: "Almost there",
+                            body: "Level 2 is 90 XP away.",
+                            kind: "nudge",
+                        },
+                        "nudge:test",
+                        Clock::default().day(now_ms()),
+                        now_ms(),
+                        false,
+                    )
+                    .unwrap();
+                store.conn.last_insert_rowid()
+            };
+            deliver_notifications(&app, PUSH_BUDGET).unwrap();
+            assert!(failed.join().unwrap().ends_with("Level 2 is 90 XP away."));
+            assert!(!was_pushed(&app, id));
+            let settings = set_decks(
+                State(app.clone()),
+                UrlPath("hill".into()),
+                headers("hill"),
+                Json(decks::SettingsUpdate {
+                    decks: vec![],
+                    nudges: Some(false),
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert!(!settings.nudges);
+            if enable_again {
+                let settings = set_decks(
+                    State(app.clone()),
+                    UrlPath("hill".into()),
+                    headers("hill"),
+                    Json(decks::SettingsUpdate {
+                        decks: vec![],
+                        nudges: Some(true),
+                    }),
+                )
+                .await
+                .unwrap()
+                .0;
+                assert!(settings.nudges);
+            }
+            drop(app);
+            let mut store = Store::open(&path).unwrap();
+            let retry_at = now_ms() + 60_000;
+            assert!(
+                store.take_deck_deliveries(retry_at).unwrap().is_empty(),
+                "opting out must cancel a failed nudge even after restart and re-enabling"
+            );
+            assert!(!store.begin_push(id, retry_at).unwrap());
+            let inbox = store.notifications("hill", retry_at).unwrap();
+            assert_eq!(inbox.len(), 1);
+            assert_eq!(inbox[0].id, id);
+            assert_eq!(inbox[0].body, "Level 2 is 90 XP away.");
+            assert!(!store.mark_seen("hill", "nudge:test").unwrap());
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
     #[test]
     fn failed_http_push_is_not_acknowledged() {
         let (mut app, path) = fixture();
