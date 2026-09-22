@@ -136,6 +136,22 @@ async function fixture(t, session = savedSession, user = 'cerro') {
   };
 }
 
+test('decks: an unexpected response can be retried without reopening', async t => {
+  const f = await fixture(t);
+  const spec = dialogs.find(dialog => dialog.name === 'decks');
+  await f.page.route(`${origin}/api/decks/**`, route => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify({ decks: null, recipients: [], nudges: false }),
+  }), { times: 1 });
+  await f.open(spec);
+  await f.page.locator(spec.id).getByRole('status').filter({ hasText: /sort|unexpected|try again/i }).waitFor();
+  const retry = f.page.locator(spec.unlock).getByRole('button');
+  assert.equal(await retry.isEnabled(), true);
+  await retry.click();
+  await f.ready(spec);
+  assert.equal(f.settingsRequests().length, 2);
+  assert.ok(f.settingsRequests().every(request => request.auth === 'Bearer saved-token'));
+});
+
 for (const spec of dialogs) {
   test(`${spec.name}: saved native credentials automatically load settings before opening`, async t => {
     const f = await fixture(t);

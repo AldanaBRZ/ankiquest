@@ -279,8 +279,8 @@ function connectSettingsAuth({ user, form, input, controller, load, clear, show,
         } else {
           settingsTokens.set(user, token);
         }
-        unlocked = true;
         show(data);
+        unlocked = true;
         say("");
       }
     } catch (error) {
