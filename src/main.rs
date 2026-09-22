@@ -1,6 +1,9 @@
+mod challenges;
+mod competition;
 mod decks;
 mod freezes;
 mod game;
+mod reminders;
 mod store;
 
 use axum::extract::{Path as UrlPath, Query, State};
@@ -8,6 +11,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Datelike;
 use game::{Clock, Periods, Profile, Records, Review, Week};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -38,13 +42,15 @@ struct Config {
     #[serde(default = "default_state")]
     state_dir: PathBuf,
     ntfy: Option<String>,
-    #[serde(default = "default_remind_hour")]
-    remind_hour: i64,
+    #[serde(default, rename = "remind_hour")]
+    legacy_remind_hour: Option<i64>,
     public_url: Option<String>,
     #[serde(default = "default_week_timezone")]
     week_timezone: String,
     #[serde(default = "default_week_rollover_hour")]
     week_rollover_hour: u32,
+    #[serde(default)]
+    competition_start_date: Option<String>,
     #[serde(default)]
     users: HashMap<String, UserConfig>,
 }
@@ -63,10 +69,6 @@ fn default_addr() -> String {
 
 fn default_state() -> PathBuf {
     "state".into()
-}
-
-fn default_remind_hour() -> i64 {
-    20
 }
 
 struct Player {
@@ -117,6 +119,31 @@ impl App {
     fn profiles(&self) -> Vec<Profile> {
         let users: Vec<String> = self.players.read().unwrap().keys().cloned().collect();
         users.iter().filter_map(|u| self.profile(u)).collect()
+    }
+
+    fn participants(&self) -> Vec<competition::Participant> {
+        let players = self.players.read().unwrap();
+        let users: BTreeSet<_> = self
+            .config
+            .users
+            .keys()
+            .chain(players.keys())
+            .cloned()
+            .collect();
+        users
+            .into_iter()
+            .map(|user| {
+                let player = players.get(&user);
+                competition::Participant {
+                    display: self.display(&user),
+                    reviews: player.map_or_else(Vec::new, |p| p.reviews.clone()),
+                    clock: player.map_or_else(Clock::default, |p| p.clock),
+                    freeze_policy: player
+                        .map_or_else(game::FreezePolicy::default, |p| p.freeze_policy.clone()),
+                    user,
+                }
+            })
+            .collect()
     }
 }
 
@@ -443,6 +470,11 @@ async fn set_decks(
         .map_err(store_error)
 }
 
+fn store_error(error: Error) -> StatusCode {
+    eprintln!("community storage failed: {error}");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
 async fn notifications(
     State(app): State<Arc<App>>,
     UrlPath(user): UrlPath<String>,
@@ -451,15 +483,31 @@ async fn notifications(
     if !authorized(&app, &user, &headers) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    app.store
-        .lock()
-        .unwrap()
-        .notifications(&user, now_ms())
-        .map(Json)
-        .map_err(|e| {
-            eprintln!("notifications for {user} failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    let mut store = app.store.lock().unwrap();
+    let now = now_ms();
+    let profile = app.profile(&user);
+    let clock = app.players.read().unwrap().get(&user).map(|p| p.clock);
+    if let (Some(profile), Some(clock)) = (&profile, &clock) {
+        reminders::cancel_stale(&mut store, &user, profile, clock, &app.week, now)
+            .map_err(store_error)?;
+    }
+    let mut result = Vec::new();
+    for mut notice in store.notifications(&user, now).map_err(store_error)? {
+        if notice.kind.starts_with("reminder_") {
+            let (Some(profile), Some(clock)) = (&profile, &clock) else {
+                continue;
+            };
+            if reminders::delivery_guard(&store, &user, &notice, profile, clock, &app.week, now)
+                .map_err(store_error)?
+                != reminders::DeliveryGuard::Deliver
+            {
+                continue;
+            }
+            notice.body = reminders::current_body(&notice, profile, clock, &app.week, now);
+        }
+        result.push(notice);
+    }
+    Ok(Json(result))
 }
 
 #[derive(Debug, Serialize)]
@@ -604,6 +652,223 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
 
+async fn community_page() -> Html<&'static str> {
+    Html(include_str!("../static/community.html"))
+}
+
+#[derive(Deserialize, Default)]
+struct CommunityQuery {
+    year: Option<i32>,
+    month: Option<u32>,
+}
+
+fn refresh_community(
+    app: &App,
+    store: &mut Store,
+    players: &[competition::Participant],
+    now: i64,
+) -> Result<(), Error> {
+    use rusqlite::OptionalExtension;
+    let last: Option<i64> = store
+        .conn
+        .query_row(
+            "select refreshed_at from community_refresh where id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if last.is_some_and(|last| now >= last && now - last < 60_000) {
+        return Ok(());
+    }
+    competition::refresh(
+        store,
+        players,
+        &app.week,
+        now,
+        app.config.competition_start_date.as_deref(),
+    )?;
+    store.conn.execute(
+        "insert into community_refresh(id,refreshed_at) values (1,?1)
+         on conflict(id) do update set refreshed_at=excluded.refreshed_at",
+        [now],
+    )?;
+    Ok(())
+}
+
+async fn community_dashboard(
+    State(app): State<Arc<App>>,
+    Query(query): Query<CommunityQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let now = now_ms();
+    let date = app.week.competition_date(now);
+    let year = query.year.unwrap_or(date.year());
+    let month = query.month.unwrap_or(date.month());
+    if !(1970..=2100).contains(&year) || !(1..=12).contains(&month) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut store = app.store.lock().unwrap();
+    if let Some(base) = &app.config.sync_base {
+        import(&app, &mut store, base).map_err(|error| {
+            eprintln!("community sync import incomplete: {error}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    }
+    let participants = app.participants();
+    refresh_community(&app, &mut store, &participants, now).map_err(store_error)?;
+    competition::dashboard(&store, &participants, &app.week, now, year, month)
+        .map(Json)
+        .map_err(store_error)
+}
+
+async fn get_reminders(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<reminders::Settings>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    reminders::settings(&app.store.lock().unwrap(), &user)
+        .map(Json)
+        .map_err(store_error)
+}
+
+async fn set_reminders(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Json(settings): Json<reminders::Settings>,
+) -> Result<Json<reminders::Settings>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !settings.valid() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    reminders::save_settings(&mut app.store.lock().unwrap(), &user, &settings)
+        .map_err(store_error)?;
+    Ok(Json(settings))
+}
+
+#[derive(Serialize)]
+struct ChallengeList {
+    challenges: Vec<challenges::Challenge>,
+    recipients: Vec<decks::Recipient>,
+}
+
+type ChallengeFailure = (StatusCode, Json<serde_json::Value>);
+
+fn challenge_error(error: challenges::Error) -> ChallengeFailure {
+    let (status, message) = match error {
+        challenges::Error::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+        challenges::Error::Forbidden => (StatusCode::FORBIDDEN, "This challenge is private."),
+        challenges::Error::NotFound => (StatusCode::NOT_FOUND, "Challenge not found."),
+        challenges::Error::Storage(error) => {
+            eprintln!("challenge storage failed: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The challenge could not be saved. Please try again.",
+            )
+        }
+    };
+    (status, Json(serde_json::json!({"error":message})))
+}
+
+fn challenge_list(
+    app: &App,
+    store: &Store,
+    user: &str,
+    players: &[competition::Participant],
+) -> Result<ChallengeList, challenges::Error> {
+    let mut recipients: Vec<_> = app
+        .config
+        .users
+        .iter()
+        .filter(|(name, config)| {
+            name.as_str() != user
+                && config
+                    .token
+                    .as_deref()
+                    .is_some_and(|token| !token.is_empty())
+        })
+        .map(|(name, _)| decks::Recipient {
+            user: name.clone(),
+            display: app.display(name),
+        })
+        .collect();
+    recipients.sort_by(|a, b| a.display.cmp(&b.display).then_with(|| a.user.cmp(&b.user)));
+    Ok(ChallengeList {
+        challenges: challenges::list(store, user, players, now_ms())?,
+        recipients,
+    })
+}
+
+async fn get_challenges(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<ChallengeList>, ChallengeFailure> {
+    if !authorized(&app, &user, &headers) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"Check your player and token."})),
+        ));
+    }
+    let store = app.store.lock().unwrap();
+    let participants = app.participants();
+    challenge_list(&app, &store, &user, &participants)
+        .map(Json)
+        .map_err(challenge_error)
+}
+
+async fn create_challenge(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<challenges::Create>,
+) -> Result<Json<ChallengeList>, ChallengeFailure> {
+    if !authorized(&app, &user, &headers) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"Check your player and token."})),
+        ));
+    }
+    let eligible = app
+        .config
+        .users
+        .iter()
+        .filter(|(_, config)| config.token.as_deref().is_some_and(|t| !t.is_empty()))
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut store = app.store.lock().unwrap();
+    let participants = app.participants();
+    challenges::create(&mut store, &user, &request, &eligible, now_ms())
+        .map_err(challenge_error)?;
+    challenge_list(&app, &store, &user, &participants)
+        .map(Json)
+        .map_err(challenge_error)
+}
+
+async fn act_on_challenge(
+    State(app): State<Arc<App>>,
+    UrlPath((user, id)): UrlPath<(String, i64)>,
+    headers: HeaderMap,
+    Json(action): Json<challenges::Action>,
+) -> Result<Json<ChallengeList>, ChallengeFailure> {
+    if !authorized(&app, &user, &headers) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"Check your player and token."})),
+        ));
+    }
+    let mut store = app.store.lock().unwrap();
+    let participants = app.participants();
+    challenges::act(&mut store, &user, id, &action.action, now_ms()).map_err(challenge_error)?;
+    challenge_list(&app, &store, &user, &participants)
+        .map(Json)
+        .map_err(challenge_error)
+}
+
 /// The dashboard is one page; `/day`, `/month` and the rest pick a leaderboard period.
 async fn period_page(UrlPath(period): UrlPath<String>) -> Result<Html<&'static str>, StatusCode> {
     if Periods::NAMES.contains(&period.as_str()) {
@@ -639,6 +904,7 @@ fn push(
     title: &str,
     body: &str,
     tag: &str,
+    priority: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
     let (base, topic) = push_destination(config, user).ok_or("no ntfy destination")?;
@@ -647,7 +913,7 @@ fn push(
         .timeout_global(Some(timeout))
         .build()
         .header("Title", title)
-        .header("Priority", "high")
+        .header("Priority", priority)
         .header("Tags", tag);
     if let Some(url) = &config.public_url {
         request = request.header("Click", format!("{}/#{user}", url.trim_end_matches('/')));
@@ -667,38 +933,65 @@ fn load_player(store: &Store, user: &str) -> Result<Player, Error> {
     })
 }
 
-fn sync_users(base: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().join("collection.anki2").is_file())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
+fn sync_users(base: &Path) -> Result<Vec<String>, Error> {
+    let mut users = Vec::new();
+    let mut errors = Vec::new();
+    for entry in std::fs::read_dir(base)? {
+        let result = (|| -> Result<Option<String>, Error> {
+            let entry = entry?;
+            if !std::fs::metadata(entry.path())?.is_dir() {
+                return Ok(None);
+            }
+            let collection = entry.path().join("collection.anki2");
+            match std::fs::metadata(&collection) {
+                Ok(metadata) if metadata.is_file() => entry
+                    .file_name()
+                    .into_string()
+                    .map(Some)
+                    .map_err(|name| format!("invalid sync user name: {name:?}").into()),
+                Ok(_) => Err(format!("{} is not a collection file", collection.display()).into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!("{}: {error}", collection.display()).into()),
+            }
+        })();
+        match result {
+            Ok(Some(user)) => users.push(user),
+            Ok(None) => {}
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        Ok(users)
+    } else {
+        Err(errors.join("; ").into())
+    }
 }
 
 fn import(app: &App, store: &mut Store, base: &Path) -> Result<(), Error> {
-    for user in sync_users(base) {
-        let first_import = !store.is_known(&user)?;
-        let changed = match store.ingest(base, &user) {
-            Ok(changed) => changed,
-            Err(e) => {
-                eprintln!("ingest for {user} failed: {e}");
-                continue;
+    let mut errors = Vec::new();
+    for user in sync_users(base)? {
+        let result = (|| -> Result<(), Error> {
+            let first_import = !store.is_known(&user)?;
+            if store.ingest(base, &user)? {
+                let player = load_player(store, &user)?;
+                app.players.write().unwrap().insert(user.clone(), player);
             }
-        };
-        if changed {
-            let player = load_player(store, &user)?;
-            app.players.write().unwrap().insert(user.clone(), player);
-        }
-        if first_import && let Some(profile) = app.profile(&user) {
-            for event in &profile.events {
-                store.mark_seen(&user, &event.key)?;
+            if first_import && let Some(profile) = app.profile(&user) {
+                for event in &profile.events {
+                    store.mark_seen(&user, &event.key)?;
+                }
             }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            errors.push(format!("ingest for {user} failed: {error}"));
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; ").into())
+    }
 }
 
 fn streak_warning_body(profile: &Profile) -> String {
@@ -717,8 +1010,21 @@ fn streak_warning_body(profile: &Profile) -> String {
 
 fn tick(app: &App) -> Result<(), Error> {
     let mut store = app.store.lock().unwrap();
-    if let Some(base) = &app.config.sync_base {
-        import(app, &mut store, base)?;
+    let import_complete =
+        app.config
+            .sync_base
+            .as_ref()
+            .is_none_or(|base| match import(app, &mut store, base) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("competition refresh deferred until sync import succeeds: {error}");
+                    false
+                }
+            });
+    let participants = app.participants();
+    let now = now_ms();
+    if import_complete {
+        refresh_community(app, &mut store, &participants, now)?;
     }
     let users: Vec<String> = app.players.read().unwrap().keys().cloned().collect();
     // One snapshot of the standings, so a nudge knows who is just out of reach.
@@ -752,26 +1058,17 @@ fn tick(app: &App) -> Result<(), Error> {
                 )?;
             }
         }
-        if profile.at_risk && profile.local_hour >= app.config.remind_hour {
-            let body = streak_warning_body(&profile);
-            let key = format!("risk:{}", profile.day);
-            if push_enabled {
-                store.send_once(
-                    &decks::Outgoing {
-                        to: &user,
-                        from: "",
-                        title: "Streak at risk",
-                        body: &body,
-                        kind: "risk",
-                    },
-                    &key,
-                    profile.day,
-                    now_ms(),
-                    true,
-                )?;
-            } else {
-                store.mark_seen(&user, &key)?;
-            }
+        if let Some(participant) = participants.iter().find(|p| p.user == user) {
+            let recap = competition::weekly_recap(&store, &user, &app.week, now)?;
+            reminders::tick(
+                &mut store,
+                &user,
+                &profile,
+                &participant.clock,
+                &app.week,
+                now,
+                recap,
+            )?;
         }
     }
     drop(store);
@@ -787,6 +1084,50 @@ fn deliver_notifications(app: &App, budget: Duration) -> Result<(), Error> {
             break;
         }
         let id = delivery.notification.id;
+        let mut reminder_body = None;
+        if delivery.notification.kind.starts_with("reminder_") {
+            let mut store = app.store.lock().unwrap();
+            let now = now_ms();
+            let profile = app.profile(&delivery.user);
+            let clock = app
+                .players
+                .read()
+                .unwrap()
+                .get(&delivery.user)
+                .map(|p| p.clock);
+            let guard = match (profile, clock) {
+                (Some(profile), Some(clock)) => {
+                    reminder_body = Some(reminders::current_body(
+                        &delivery.notification,
+                        &profile,
+                        &clock,
+                        &app.week,
+                        now,
+                    ));
+                    reminders::delivery_guard(
+                        &store,
+                        &delivery.user,
+                        &delivery.notification,
+                        &profile,
+                        &clock,
+                        &app.week,
+                        now,
+                    )?
+                }
+                _ => reminders::DeliveryGuard::Cancel,
+            };
+            match guard {
+                reminders::DeliveryGuard::Cancel => {
+                    reminders::cancel(&mut store, id)?;
+                    continue;
+                }
+                reminders::DeliveryGuard::Defer => {
+                    store.defer_push(id, now)?;
+                    continue;
+                }
+                reminders::DeliveryGuard::Deliver => {}
+            }
+        }
         let current_warning = if delivery.notification.kind == "risk" {
             match app.profile(&delivery.user) {
                 Some(profile) if profile.day == delivery.notification.day && profile.at_risk => {
@@ -798,7 +1139,7 @@ fn deliver_notifications(app: &App, budget: Duration) -> Result<(), Error> {
                 }
             }
         } else {
-            None
+            reminder_body
         };
         if push_destination(&app.config, &delivery.user).is_none() {
             app.store.lock().unwrap().defer_push(id, now_ms())?;
@@ -816,8 +1157,15 @@ fn deliver_notifications(app: &App, budget: Duration) -> Result<(), Error> {
                 .unwrap_or(&delivery.notification.body),
             match delivery.notification.kind.as_str() {
                 "event" => "tada",
-                "risk" => "fire",
+                "risk" | "reminder_urgent" => "fire",
                 _ => "white_check_mark",
+            },
+            if delivery.notification.kind.starts_with("reminder_")
+                && delivery.notification.kind != "reminder_urgent"
+            {
+                "default"
+            } else {
+                "high"
             },
             remaining.min(Duration::from_secs(10)),
         );
@@ -951,6 +1299,22 @@ async fn main() -> Result<(), Error> {
         &std::fs::read(&path).map_err(|e| format!("cannot read config {path}: {e}"))?,
     )?;
 
+    if config.legacy_remind_hour.is_some() {
+        eprintln!("remind_hour is superseded by personal reminder preferences at /community.");
+    }
+    if let Some(date) = &config.competition_start_date {
+        let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| "competition_start_date must be YYYY-MM-DD")?;
+        if date.year() < 1970
+            || date
+                > chrono::DateTime::from_timestamp_millis(now_ms())
+                    .unwrap()
+                    .date_naive()
+        {
+            return Err("competition_start_date must be between 1970 and today".into());
+        }
+    }
+
     // Sending needs no tokens, and the running service holds the only readable copy.
     if let Some(message) = message {
         return send_message(&config, &message);
@@ -999,11 +1363,25 @@ async fn main() -> Result<(), Error> {
     let router = Router::new()
         .route("/", get(index))
         .route("/records", get(index))
+        .route("/community", get(community_page))
         .route("/{period}", get(period_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/records", get(records))
+        .route("/api/community", get(community_dashboard))
+        .route(
+            "/api/community/reminders/{user}",
+            get(get_reminders).post(set_reminders),
+        )
+        .route(
+            "/api/community/challenges/{user}",
+            get(get_challenges).post(create_challenge),
+        )
+        .route(
+            "/api/community/challenges/{user}/{id}",
+            post(act_on_challenge),
+        )
         .route("/api/week", get(week_info))
         .route("/api/profile/{user}", get(profile))
         .route("/api/preview/{user}", post(preview))
@@ -1055,6 +1433,416 @@ mod tests {
             format!("Bearer {user}-secret").parse().unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn community_reminder_preferences_require_owner_auth_and_validate_before_saving() {
+        let (app, path) = fixture();
+        assert_eq!(
+            get_reminders(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                HeaderMap::new()
+            )
+            .await
+            .err()
+            .unwrap(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_reminders(State(app.clone()), UrlPath("cerro".into()), headers("hill"))
+                .await
+                .err()
+                .unwrap(),
+            StatusCode::UNAUTHORIZED
+        );
+        let prefs = get_reminders(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!prefs.urgent_streak);
+        let mut enabled = prefs.clone();
+        enabled.urgent_streak = true;
+        let _ = set_reminders(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(enabled.clone()),
+        )
+        .await
+        .unwrap();
+        let mut invalid = enabled.clone();
+        invalid.quiet_start = 24;
+        assert_eq!(
+            set_reminders(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("cerro"),
+                Json(invalid)
+            )
+            .await
+            .err()
+            .unwrap(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get_reminders(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("cerro")
+            )
+            .await
+            .unwrap()
+            .0,
+            enabled
+        );
+        assert!(
+            !get_reminders(State(app.clone()), UrlPath("hill".into()), headers("hill"))
+                .await
+                .unwrap()
+                .0
+                .urgent_streak
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn community_challenges_are_owner_authenticated_and_membership_is_opt_in() {
+        let (app, path) = fixture();
+        let request = || challenges::Create {
+            title: "Five study days".into(),
+            kind: challenges::Kind::StudyDays,
+            cooperative: false,
+            target: 5,
+            duration_days: 7,
+            recipients: vec!["hill".into()],
+        };
+        assert_eq!(
+            create_challenge(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("hill"),
+                Json(request())
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let created = create_challenge(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(request()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(created.challenges.len(), 1);
+        let id = created.challenges[0].id;
+        assert_eq!(
+            created.challenges[0]
+                .members
+                .iter()
+                .find(|m| m.user == "hill")
+                .unwrap()
+                .status,
+            "invited"
+        );
+        assert!(
+            get_challenges(
+                State(app.clone()),
+                UrlPath("friend".into()),
+                headers("friend")
+            )
+            .await
+            .unwrap()
+            .0
+            .challenges
+            .is_empty()
+        );
+        assert_eq!(
+            act_on_challenge(
+                State(app.clone()),
+                UrlPath(("friend".into(), id)),
+                headers("friend"),
+                Json(challenges::Action {
+                    action: "accept".into()
+                })
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let accepted = act_on_challenge(
+            State(app.clone()),
+            UrlPath(("hill".into(), id)),
+            headers("hill"),
+            Json(challenges::Action {
+                action: "accept".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            accepted.challenges[0]
+                .members
+                .iter()
+                .find(|m| m.user == "hill")
+                .unwrap()
+                .status,
+            "accepted"
+        );
+        assert_eq!(
+            act_on_challenge(
+                State(app.clone()),
+                UrlPath(("hill".into(), id)),
+                headers("hill"),
+                Json(challenges::Action {
+                    action: "cancel".into()
+                })
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let cancelled = act_on_challenge(
+            State(app.clone()),
+            UrlPath(("cerro".into(), id)),
+            headers("cerro"),
+            Json(challenges::Action {
+                action: "cancel".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(cancelled.challenges[0].status, "cancelled");
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn community_empty_history_has_no_invented_champions_and_rejects_bad_filters() {
+        let (app, path) = fixture();
+        let board = community_dashboard(State(app.clone()), Query(CommunityQuery::default()))
+            .await
+            .unwrap()
+            .0;
+        assert!(board["calendar"].as_array().unwrap().is_empty());
+        assert_eq!(board["players"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            community_dashboard(
+                State(app.clone()),
+                Query(CommunityQuery {
+                    year: Some(2026),
+                    month: Some(13)
+                })
+            )
+            .await
+            .err()
+            .unwrap(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(serde_json::from_value::<challenges::Create>(serde_json::json!({"title":"No injected creator","kind":"reviews","cooperative":true,"target":10,"duration_days":7,"recipients":["hill"],"creator":"hill"})).is_err());
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    fn community_sync_fixture() -> (Arc<App>, PathBuf, PathBuf) {
+        let (mut app, path) = fixture();
+        let base = path.join("sync");
+        std::fs::create_dir_all(&base).unwrap();
+        Arc::get_mut(&mut app).unwrap().config.sync_base = Some(base.clone());
+        (app, path, base)
+    }
+
+    fn community_history(count: i64) -> (chrono::NaiveDate, Vec<Review>) {
+        let day = Week::default().competition_date(now_ms()) - chrono::Duration::days(3);
+        let at = Week::default().boundary_ms(day) + 3_600_000;
+        let reviews = (0..count)
+            .map(|index| Review {
+                id: at + index * 1000,
+                cid: at + index,
+                last_ivl: 10,
+                time_ms: 10_000,
+                kind: 1,
+            })
+            .collect();
+        (day, reviews)
+    }
+
+    fn community_collection(base: &Path, user: &str, reviews: &[Review]) {
+        std::fs::create_dir_all(base.join(user)).unwrap();
+        let mut conn =
+            rusqlite::Connection::open(base.join(user).join("collection.anki2")).unwrap();
+        conn.execute_batch(
+            "create table revlog (id integer primary key, cid integer, lastIvl integer,
+                 time integer, type integer, ease integer);",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        for review in reviews {
+            tx.execute(
+                "insert into revlog values (?1,?2,?3,?4,?5,3)",
+                rusqlite::params![
+                    review.id,
+                    review.cid,
+                    review.last_ivl,
+                    review.time_ms,
+                    review.kind
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn community_query(day: chrono::NaiveDate) -> Query<CommunityQuery> {
+        Query(CommunityQuery {
+            year: Some(day.year()),
+            month: Some(day.month()),
+        })
+    }
+
+    #[tokio::test]
+    async fn community_first_request_imports_fresh_sync_before_finalizing_stale_history() {
+        let (app, path, base) = community_sync_fixture();
+        let (day, reviews) = community_history(100);
+        {
+            let mut store = app.store.lock().unwrap();
+            for (user, count) in [("hill", 1), ("cerro", 2)] {
+                store
+                    .upsert(user, &reviews[..count], &[], Clock::default())
+                    .unwrap();
+                app.players
+                    .write()
+                    .unwrap()
+                    .insert(user.into(), load_player(&store, user).unwrap());
+            }
+        }
+        community_collection(&base, "hill", &reviews);
+
+        let board = community_dashboard(State(app.clone()), community_query(day))
+            .await
+            .unwrap()
+            .0;
+        let archived = board["calendar"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|period| period["key"] == day.to_string())
+            .unwrap();
+        assert_eq!(archived["status"], "final");
+        assert_eq!(archived["winners"], serde_json::json!(["hill"]));
+        assert_eq!(archived["standings"][0]["reviews"], 100);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn community_failed_import_defers_archive_until_every_collection_recovers() {
+        let (app, path, base) = community_sync_fixture();
+        let (day, reviews) = community_history(100);
+        community_collection(&base, "cerro", &reviews[..2]);
+        for user in ["hill", "friend"] {
+            std::fs::create_dir_all(base.join(user)).unwrap();
+            std::fs::write(
+                base.join(user).join("collection.anki2"),
+                b"invalid database",
+            )
+            .unwrap();
+        }
+        {
+            let mut store = app.store.lock().unwrap();
+            let error = import(&app, &mut store, &base).unwrap_err().to_string();
+            assert!(error.contains("hill"));
+            assert!(error.contains("friend"));
+            assert_eq!(store.reviews("cerro").unwrap().len(), 2);
+        }
+        assert_eq!(
+            community_dashboard(State(app.clone()), community_query(day))
+                .await
+                .unwrap_err(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        tick(&app).unwrap();
+        {
+            let store = app.store.lock().unwrap();
+            for table in [
+                "competition_meta",
+                "competition_periods",
+                "community_refresh",
+            ] {
+                assert_eq!(
+                    store
+                        .conn
+                        .query_row(&format!("select count(*) from {table}"), [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        for (user, count) in [("hill", 100), ("friend", 1)] {
+            std::fs::remove_file(base.join(user).join("collection.anki2")).unwrap();
+            community_collection(&base, user, &reviews[..count]);
+        }
+        let board = community_dashboard(State(app.clone()), community_query(day))
+            .await
+            .unwrap()
+            .0;
+        let archived = board["calendar"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|period| period["key"] == day.to_string())
+            .unwrap();
+        assert_eq!(archived["status"], "final");
+        assert_eq!(archived["winners"], serde_json::json!(["hill"]));
+        assert_eq!(archived["standings"][0]["reviews"], 100);
+        assert_eq!(archived["standings"].as_array().unwrap().len(), 3);
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn community_unreadable_sync_directory_never_initializes_archive() {
+        let (mut app, path, base) = community_sync_fixture();
+        Arc::get_mut(&mut app).unwrap().config.sync_base = Some(base.join("missing"));
+        assert!(sync_users(&base.join("missing")).is_err());
+        assert_eq!(
+            community_dashboard(State(app.clone()), Query(CommunityQuery::default()))
+                .await
+                .unwrap_err(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        tick(&app).unwrap();
+        assert_eq!(
+            app.store
+                .lock()
+                .unwrap()
+                .conn
+                .query_row("select count(*) from competition_periods", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]
