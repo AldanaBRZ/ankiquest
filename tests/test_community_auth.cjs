@@ -7,7 +7,7 @@ const { test, before, after } = require('node:test');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const html = fs.readFileSync(path.join(__dirname, '../static/community.html'), 'utf8');
-const siteScript = fs.readFileSync(path.join(__dirname, '../static/site.js'), 'utf8');
+const siteScript = require('./site_assets.cjs').siteScript();
 const origin = 'http://ankiquest.test';
 const saved = { user: 'cerro', token: 'saved-token' };
 let browser;
@@ -19,13 +19,13 @@ before(async () => {
 after(async () => browser?.close());
 
 async function fixture(t, session = saved, options = {}) {
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, locale: options.locale || 'en-US' });
   t.after(() => context.close());
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
   page.setDefaultNavigationTimeout(15000);
   const errors = [], requests = [];
-  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, replies:[], receiving:false, nudged:false };
+  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, replies: [], receiving:false, nudged:false };
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(session => {
     window.storageWrites = [];
@@ -87,6 +87,48 @@ async function fixture(t, session = saved, options = {}) {
     },
   };
 }
+
+test('Spanish community labels follow the selected language without translating player names or authored messages', async t => {
+  const {page} = await fixture(t, saved, {locale:'es-ES'});
+  assert.equal(await page.locator('#tab-challenges').innerText(), 'Amigos');
+  assert.equal(await page.locator('#tab-reminders').innerText(), 'Recordatorios');
+  await page.locator('#reminder-form').waitFor();
+  assert.equal(await page.locator('#view-reminders .auth-status strong').innerText(), 'Cerro');
+  await page.locator('#tab-activity').click();
+  await page.getByText('Nice studying!', {exact:true}).waitFor();
+});
+
+test('Spanish friend nudges preserve the selected recipient and daily limit', async t => {
+  const {page,requests}=await fixture(t,saved,{locale:'es-ES'});
+  await page.getByRole('tab',{name:'Amigos',exact:true}).click();
+  await page.getByRole('button',{name:'Dar un toque a amigos',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Da un toque a tus amigos',exact:true});
+  await dialog.locator('[data-nudge-user="hill"]').waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="friend"]').isEnabled(),false);
+  await dialog.locator('[data-nudge-user="hill"]').click();
+  await dialog.getByText('¡Toque enviado!',{exact:true}).waitFor();
+  await dialog.getByText('Toque enviado hoy',{exact:true}).waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="hill"]').isEnabled(),false);
+  assert.deepEqual(requests.filter(r=>r.method==='POST'&&r.url.startsWith('/api/friend-nudges/')).map(r=>r.body),[{recipient:'hill'}]);
+});
+
+test('Spanish achievements and thanks preserve friend messages and send contextual replies', async t => {
+  const now=Math.floor(Date.now()/1000);
+  const {page,control}=await fixture(t,saved,{locale:'es-ES',activityItems:[
+    {id:1,sender:'hill',kind:'completion',title:'Deck complete',body:'Hill finished Friends::{0}.',created_at:now,read_at:null},
+    {id:2,sender:'hill',kind:'reply',title:'💬 Hill',body:'Good job!',created_at:now,read_at:null},
+  ]});
+  await page.getByRole('tab',{name:'Amigos',exact:true}).click();
+  const feed=page.getByRole('region',{name:'Logros de tus amigos',exact:true});
+  await feed.getByText('Hill finished Friends::{0}.',{exact:true}).waitFor();
+  await feed.getByRole('button',{name:'Felicitar',exact:true}).click();
+  await feed.getByText('Felicitación enviada',{exact:true}).waitFor();
+  await page.locator('#tab-activity').click();
+  const reply=page.locator('.activity-item[data-notice="2"]');
+  await reply.getByText('Good job!',{exact:true}).waitFor();
+  await reply.getByRole('button',{name:'¡Gracias!',exact:true}).click();
+  assert.deepEqual(control.replies.map(r=>r.body),[{notification:1,message:'¡Buen trabajo!'},{notification:2,message:'¡Gracias!'}]);
+});
 
 test('community reminders reuse the saved account, including saves, without persisting its token', async t => {
   const { page, requests } = await fixture(t);
@@ -228,6 +270,36 @@ test('a first null native event clears private Community views already loaded wi
   await page.locator('#view-reminders [data-connect]').waitFor();
 });
 
+test('friend nudges select the recipient and show opt-out and daily limits', async t => {
+  const {page,requests}=await fixture(t);
+  await page.evaluate(()=>showView('challenges'));
+  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Nudge your friends',exact:true});
+  await dialog.locator('[data-nudge-user="hill"]').waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="friend"]').isEnabled(),false);
+  await dialog.locator('[data-nudge-receiving]').check();
+  await dialog.getByText('Preference saved.',{exact:true}).waitFor();
+  await dialog.locator('[data-nudge-user="hill"]').click();
+  await dialog.getByText('Nudge sent!',{exact:true}).waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="hill"]').isEnabled(),false);
+  const posts=requests.filter(request=>request.method==='POST'&&request.url.startsWith('/api/friend-nudges/'));
+  assert.deepEqual(posts.map(request=>request.body),[{enabled:true},{recipient:'hill'}]);
+  assert.ok(posts.every(request=>request.auth==='Bearer saved-token'));
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+});
+
+test('friend nudge dialog discards pending private data when the account changes', async t => {
+  const {page,control,deliver}=await fixture(t);
+  await page.evaluate(()=>showView('challenges'));
+  let release;control.hold=new Promise(resolve=>release=resolve);
+  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
+  await page.getByText('Loading friends…',{exact:true}).waitFor();
+  await deliver(null);release();control.hold=null;
+  await page.waitForTimeout(100);
+  assert.equal(await page.getByRole('dialog',{name:'Nudge your friends',exact:true}).count(),0);
+  assert.equal(await page.locator('[data-nudge-user]').count(),0);
+});
+
 test('friends achievements show only shared friend completions and congratulate once', async t => {
   const now=Math.floor(Date.now()/1000);
   const {page,control}=await fixture(t,saved,{activityItems:[
@@ -257,34 +329,4 @@ test('friends achievements show an honest empty state and clear on account remov
   await deliver(null);
   assert.equal(await page.locator('.friend-achievement').count(),0);
   assert.equal(await page.getByRole('region',{name:"Friends' achievements",exact:true}).count(),0);
-});
-
-test('friend nudges select the recipient and show opt-out and daily limits', async t => {
-  const {page,requests}=await fixture(t);
-  await page.evaluate(()=>showView('challenges'));
-  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
-  const dialog=page.getByRole('dialog',{name:'Nudge your friends',exact:true});
-  await dialog.locator('[data-nudge-user="hill"]').waitFor();
-  assert.equal(await dialog.locator('[data-nudge-user="friend"]').isEnabled(),false);
-  await dialog.locator('[data-nudge-receiving]').check();
-  await dialog.getByText('Preference saved.',{exact:true}).waitFor();
-  await dialog.locator('[data-nudge-user="hill"]').click();
-  await dialog.getByText('Nudge sent!',{exact:true}).waitFor();
-  assert.equal(await dialog.locator('[data-nudge-user="hill"]').isEnabled(),false);
-  const posts=requests.filter(request=>request.method==='POST'&&request.url.startsWith('/api/friend-nudges/'));
-  assert.deepEqual(posts.map(request=>request.body),[{enabled:true},{recipient:'hill'}]);
-  assert.ok(posts.every(request=>request.auth==='Bearer saved-token'));
-  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
-});
-
-test('friend nudge dialog discards pending private data when the account changes', async t => {
-  const {page,control,deliver}=await fixture(t);
-  await page.evaluate(()=>showView('challenges'));
-  let release;control.hold=new Promise(resolve=>release=resolve);
-  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
-  await page.getByText('Loading friends…',{exact:true}).waitFor();
-  await deliver(null);release();control.hold=null;
-  await page.waitForTimeout(100);
-  assert.equal(await page.getByRole('dialog',{name:'Nudge your friends',exact:true}).count(),0);
-  assert.equal(await page.locator('[data-nudge-user]').count(),0);
 });

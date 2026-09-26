@@ -1,6 +1,8 @@
 /* Shared profile pictures. Tokens and selected photos live only in the open editor. */
 (() => {
   "use strict";
+  const {t:aqText,html:aqHtml} = AnkiQuestI18n;
+
   let revisions = Object.create(null), generation = 0, pending = null, editor = null, closeEditor = null, locked = false;
   const failed = new Set();
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
@@ -11,7 +13,7 @@
     const initials = String(display || user).trim().split(/\s+/).map(part => Array.from(part)[0] || "").slice(0, 2).join("").toUpperCase();
     let hash = 0;
     for (const char of String(user)) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-    return `<span class="avatar" data-avatar-user="${esc(user)}" style="border-color:hsl(${Math.abs(hash) % 360} 55% 55%)" aria-hidden="true"><span class="avatar-initials">${esc(initials)}</span></span>`;
+    return aqHtml`<span class="avatar" data-avatar-user="${esc(user)}" style="border-color:hsl(${Math.abs(hash) % 360} 55% 55%)" aria-hidden="true"><span class="avatar-initials">${esc(initials)}</span></span>`;
   }
 
   function hydrate() {
@@ -68,14 +70,14 @@
   }
 
   async function decode(file) {
-    if (file.size > 20 * 1024 * 1024) throw new Error("Choose a picture smaller than 20 MB.");
+    if (file.size > 20 * 1024 * 1024) throw new Error(aqText("Choose a picture smaller than 20 MB."));
     const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
     const png = [137,80,78,71,13,10,26,10].every((byte, index) => bytes[index] === byte);
     const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-    if (!png && !jpeg) throw new Error("Choose a JPEG or PNG picture.");
+    if (!png && !jpeg) throw new Error(aqText("Choose a JPEG or PNG picture."));
     try {
       return await createImageBitmap(file, { resizeWidth: 1024, resizeQuality: "high", imageOrientation: "from-image" });
-    } catch (_) { throw new Error("Could not read this picture. Try another JPEG or PNG."); }
+    } catch (_) { throw new Error(aqText("Could not read this picture. Try another JPEG or PNG.")); }
   }
 
   function open({ user, display = user, token = "" }) {
@@ -87,7 +89,7 @@
     editor = dialog;
     dialog.className = "avatar-editor";
     dialog.setAttribute("aria-labelledby", "avatar-editor-title");
-    dialog.innerHTML = `<form><h2 id="avatar-editor-title">Profile picture</h2><p>Choose a picture for ${esc(display)}. It will appear wherever your AnkiQuest community sees your profile.</p><div class="avatar-preview">${markup(user, display)}</div><div class="avatar-crop-controls" hidden><p>Drag the picture to position it, or use the arrow keys.</p><label>Zoom<input name="zoom" type="range" min="1" max="4" step="0.01" value="1"></label><button type="button" data-reset-crop>Reset crop</button></div><label>Choose a picture<input name="picture" type="file" accept="image/jpeg,image/png"></label><p>JPEG or PNG, up to 20 MB.</p><div data-avatar-auth></div><p class="avatar-status" role="status" aria-live="polite"></p><div class="avatar-actions"><button type="button" data-remove>Remove picture</button><button type="button" data-close>Close</button><button type="submit">Save picture</button></div></form>`;
+    dialog.innerHTML = aqHtml`<form><h2 id="avatar-editor-title">Profile picture</h2><p>Choose a picture for ${esc(display)}. It will appear wherever your AnkiQuest community sees your profile.</p><div class="avatar-preview">${markup(user, display)}</div><div class="avatar-crop-controls" hidden><p>Drag the picture to position it, or use the arrow keys.</p><label>Zoom<input name="zoom" type="range" min="1" max="4" step="0.01" value="1"></label><button type="button" data-reset-crop>Reset crop</button></div><label>Choose a picture<input name="picture" type="file" accept="image/jpeg,image/png"></label><p>JPEG or PNG, up to 20 MB.</p><div data-avatar-auth></div><p class="avatar-status" role="status" aria-live="polite"></p><div class="avatar-actions"><button type="button" data-remove>Remove picture</button><button type="button" data-close>Close</button><button type="submit">Save picture</button></div></form>`;
     document.body.append(dialog);
     const form = dialog.querySelector("form"), fileInput = form.elements.picture;
     const preview = dialog.querySelector(".avatar-preview");
@@ -102,7 +104,7 @@
     function controls() { const waiting = busy || checkingSession; save.disabled = waiting || !selected; remove.disabled = waiting || !revisions[user]; fileInput.disabled = waiting; zoomInput.disabled = waiting || !selected; dialog.querySelector("[data-reset-crop]").disabled = waiting || !selected; if (password) password.disabled = waiting; }
     function requestToken() {
       if (password) return;
-      dialog.querySelector("[data-avatar-auth]").innerHTML = '<label>Your AnkiQuest token<input name="token" type="password" autocomplete="off" spellcheck="false" required></label><p>Your token stays only in this window’s memory.</p>';
+      dialog.querySelector("[data-avatar-auth]").innerHTML = aqHtml(['<label>Your AnkiQuest token<input name="token" type="password" autocomplete="off" spellcheck="false" required></label><p>Your token stays only in this window’s memory.</p>']);
       password = form.elements.token;
     }
     function releasePreview() { selected?.close(); selected = null; canvas = null; cropControls.hidden = true; }
@@ -130,7 +132,7 @@
       canvas.className = "avatar-crop-canvas";
       canvas.tabIndex = 0;
       canvas.setAttribute("role", "img");
-      canvas.setAttribute("aria-label", "Profile picture crop. Drag to reposition, use arrow keys to move, or use the zoom slider.");
+      canvas.setAttribute("aria-label", aqText("Profile picture crop. Drag to reposition, use arrow keys to move, or use the zoom slider."));
       const pointers = new Map();
       let pinch = null;
       canvas.addEventListener("pointerdown", event => {
@@ -198,18 +200,18 @@
       const version = ++selection, file = fileInput.files[0];
       releasePreview(); preview.innerHTML = markup(user, display); hydrate(); controls();
       if (!file) { message(""); return; }
-      message("Preparing preview…");
+      message(aqText("Preparing preview…"));
       try {
         const bitmap = await decode(file);
         if (closed || version !== selection) { bitmap.close(); return; }
-        prepareCanvas(bitmap); message("Ready to save."); controls();
+        prepareCanvas(bitmap); message(aqText("Ready to save.")); controls();
       } catch (error) { if (!closed && version === selection) { message(error.message, true); controls(); } }
     });
     async function update(deleting) {
       if (busy || checkingSession || closed || (!deleting && !selected)) return;
       const credential = token || password?.value.trim();
-      if (!credential && !cookieOwner) { message("Enter your AnkiQuest token to change your picture.", true); password?.focus(); return; }
-      busy = true; controls(); message(deleting ? "Removing picture…" : "Saving picture…");
+      if (!credential && !cookieOwner) { message(aqText("Enter your AnkiQuest token to change your picture."), true); password?.focus(); return; }
+      busy = true; controls(); message(deleting ? aqText("Removing picture…") : aqText("Saving picture…"));
       try {
         const image = deleting ? null : await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
         if (!deleting && !image) throw new Error("Could not prepare this picture. Try another JPEG or PNG.");
@@ -222,17 +224,17 @@
         if (closed) return;
         if (response.status === 401 || response.status === 403) {
           token = ""; cookieOwner = false; requestToken(); password.value = "";
-          throw new Error(credential ? "That token was not accepted for this player. Enter your token to try again." : "Your member session expired or changed. Enter your token to reconnect and try again.");
+          throw new Error(credential ? aqText("That token was not accepted for this player. Enter your token to try again.") : aqText("Your member session expired or changed. Enter your token to reconnect and try again."));
         }
-        if (!response.ok) throw new Error(response.status === 413 ? "The picture is too large. Choose a smaller one." : "The picture could not be saved. Please try again.");
+        if (!response.ok) throw new Error(response.status === 413 ? aqText("The picture is too large. Choose a smaller one.") : aqText("The picture could not be saved. Please try again."));
         const result = deleting ? null : await response.json();
         if (closed) return;
-        if (!deleting && (typeof result?.revision !== "string" || !/^\d{1,20}$/.test(result.revision))) throw new Error("The server returned an invalid picture response. Please try again.");
+        if (!deleting && (typeof result?.revision !== "string" || !/^\d{1,20}$/.test(result.revision))) throw new Error(aqText("The server returned an invalid picture response. Please try again."));
         generation++;
         if (deleting) delete revisions[user]; else revisions[user] = result.revision;
         failed.clear(); fileInput.value = ""; releasePreview();
         preview.innerHTML = markup(user, display); hydrate();
-        message(deleting ? "Picture removed. Your initials are shown again." : "Profile picture saved.");
+        message(deleting ? aqText("Picture removed. Your initials are shown again.") : aqText("Profile picture saved."));
       } catch (error) { if (!closed) message(error.message, true); }
       finally { if (!closed) { busy = false; controls(); } }
     }
@@ -249,7 +251,7 @@
     controls(); hydrate(); dialog.showModal();
     refresh().then(() => { if (!closed) controls(); });
     if (checkingSession) {
-      message("Checking your member session…");
+      message(aqText("Checking your member session…"));
       // This lookup must not publish an initial identity event that closes its own editor.
       Promise.resolve().then(() => window.AnkiQuestSite?.status(false, false)).then(access => {
         if (closed) return;

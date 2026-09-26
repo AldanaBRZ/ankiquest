@@ -12,7 +12,7 @@ const renderer = source.slice(0, source.indexOf('async function render()'));
 const sharedStyles = fs.readFileSync(path.join(root, 'static/avatars.css'), 'utf8');
 const sharedScript = fs.readFileSync(path.join(root, 'static/avatars.js'), 'utf8');
 const siteStyles = fs.readFileSync(path.join(root, 'static/site.css'), 'utf8');
-const siteScript = fs.readFileSync(path.join(root, 'static/site.js'), 'utf8');
+const siteScript = require('./site_assets.cjs').siteScript();
 const scaffold = html.match(/<body\b[^>]*>([\s\S]*?)<script>/)[1];
 const evidence = process.env.ANKIQUEST_AVATAR_EVIDENCE;
 if (evidence) fs.mkdirSync(evidence, { recursive: true });
@@ -21,8 +21,8 @@ async function main() {
   const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}) });
   const results = [], failures = [];
   try {
-    for (const width of [320, 390, 1440]) for (const colorScheme of ['light', 'dark']) {
-      const page = await browser.newPage({ viewport: { width, height: 1100 }, colorScheme });
+    for (const width of [320, 390, 1440]) for (const colorScheme of ['light', 'dark']) for (const locale of ['en-US','es-ES']) {
+      const page = await browser.newPage({ locale, viewport: { width, height: 1100 }, colorScheme });
       await page.route('**/*', route => route.abort());
       await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>${siteStyles}</style><style>${styles}</style><style>${sharedStyles}</style></head><body>${scaffold}</body></html>`);
       await page.addScriptTag({ content: sharedScript });
@@ -41,6 +41,7 @@ async function main() {
         }
         app.innerHTML = content;
       });
+      assert.equal(await page.locator('#manage-avatar').innerText(), locale === 'es-ES' ? 'Foto de perfil' : 'Profile picture');
       await page.evaluate(() => document.fonts.ready);
       const measurement = await page.evaluate(() => ({
         pageWidth: innerWidth, scrollWidth: document.documentElement.scrollWidth,
@@ -72,6 +73,6 @@ async function main() {
   } finally { await browser.close(); }
   if (evidence) fs.writeFileSync(path.join(evidence, 'avatar-index-results.json'), JSON.stringify({ results, failures }, null, 2));
   assert.equal(failures.length, 0, failures.join('\n'));
-  console.log('PASS: 36 leaderboard/profile avatar labels remain readable at 320/390/1440px, light/dark.');
+  console.log('PASS: 72 English/Spanish leaderboard/profile avatar labels remain readable at 320/390/1440px, light/dark.');
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

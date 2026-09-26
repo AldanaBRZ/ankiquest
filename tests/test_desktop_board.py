@@ -102,6 +102,10 @@ class NotifyTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_webview_receives_the_selected_anki_language(self):
+        script = web.session_script("https://quest.example", "hill", "token", "es-ES")
+        self.assertIn('window.ankiquestLanguage = "es-ES"', script)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to execute the browser session script")
     def test_browser_session_uses_normalized_default_ports_and_keeps_other_origins_out(self):
         cases = [
@@ -144,6 +148,7 @@ class WebTests(unittest.TestCase):
                 self.assertTrue(web.allowed(base, url))
         self.assertFalse(web.allowed("https://example.com:8443", "https://example.com/week"))
         self.assertFalse(web.allowed("https://example.com", "https://example.com:8443/week"))
+
 
     base = "https://anki.example.com"
 
