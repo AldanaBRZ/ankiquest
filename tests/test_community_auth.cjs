@@ -91,6 +91,27 @@ test('community reminders reuse the saved account, including saves, without pers
   assert.ok(!persisted.includes(saved.token));
 });
 
+test('activity suggests congratulations only for deck completions and thanks for replies', async t => {
+  const now = Math.floor(Date.now() / 1000);
+  const activityItems = [
+    {id:1,sender:'hill',kind:'completion',title:'Deck complete',body:'Hill finished Spanish.',created_at:now,read_at:null},
+    {id:2,sender:'hill',kind:'reply',title:'💬 Hill',body:'Good job!',created_at:now,read_at:null},
+    {id:3,sender:'hill',kind:'message',title:'A note from Hill',body:'Hello!',created_at:now,read_at:null},
+  ];
+  const {page,control} = await fixture(t,saved,{activityItems});
+  await page.goto(`${origin}/community#activity`);
+  const completion = page.locator('.activity-item[data-notice="1"]');
+  const reply = page.locator('.activity-item[data-notice="2"]');
+  const message = page.locator('.activity-item[data-notice="3"]');
+  await completion.waitFor();
+  assert.equal(await completion.getByRole('button',{name:'Good job!'}).count(),1);
+  assert.equal(await reply.getByRole('button',{name:'Good job!'}).count(),0);
+  assert.equal(await message.getByRole('button',{name:'Good job!'}).count(),0);
+  await reply.getByRole('button',{name:'Thanks!'}).click();
+  await page.locator('#activity-action-status').filter({hasText:'reply was sent'}).waitFor();
+  assert.deepEqual(control.replies.at(-1).body,{notification:2,message:'Thanks!'});
+});
+
 test('late native credentials connect, while explicit disconnect survives repeated auth events', async t => {
   const fixtureResult = await fixture(t, null);
   const { page, requests, deliver } = fixtureResult;
