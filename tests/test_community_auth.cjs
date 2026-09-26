@@ -25,7 +25,7 @@ async function fixture(t, session = saved, options = {}) {
   page.setDefaultTimeout(10000);
   page.setDefaultNavigationTimeout(15000);
   const errors = [], requests = [];
-  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null };
+  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, replies: [], receiving:false, nudged:false };
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(session => {
     window.storageWrites = [];
@@ -40,7 +40,7 @@ async function fixture(t, session = saved, options = {}) {
     const request = route.request(), url = new URL(request.url());
     if (url.pathname === '/community') return route.fulfill({ contentType: 'text/html', body: html });
     if (url.pathname === '/site.js') return route.fulfill({contentType: 'text/javascript', body: siteScript});
-    if (['/avatars.js','/avatars.css','/site.css'].includes(url.pathname)) {
+    if (['/friend-nudges.js','/avatars.js','/avatars.css','/site.css'].includes(url.pathname)) {
       const asset=path.join(__dirname,'../static',url.pathname.slice(1));
       if(fs.existsSync(asset))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:fs.readFileSync(asset,'utf8')});
     }
@@ -49,8 +49,22 @@ async function fixture(t, session = saved, options = {}) {
     if (url.pathname === '/auth/session' || url.pathname === '/auth/logout') return route.fulfill({status:404, body:''});
     let data;
     if (url.pathname === '/api/community') data = { meta: {}, players: [{ user: 'cerro', display: 'Cerro' }, { user: 'hill', display: 'Hill' }] };
+    else if (url.pathname.startsWith('/api/friend-nudges/')) {
+      requests.push({url:url.pathname,auth:request.headers().authorization,method:request.method(),body:request.postDataJSON()});
+      if(control.hold)await control.hold;
+      if(request.method()==='POST') {
+        if(url.pathname.endsWith('/receiving'))control.receiving=request.postDataJSON().enabled;
+        else control.nudged=true;
+        return route.fulfill({status:204});
+      }
+      data={receiving:control.receiving,friends:[{user:'hill',display:'Hill',enabled:true,sent_today:control.nudged},{user:'friend',display:'Friend',enabled:false,sent_today:false}]};
+    }
     else if (url.pathname.startsWith('/api/activity/')) {
-      data = {items:[{id:1,sender:'hill',kind:'message',title:'Saved encouragement',body:'Nice studying!',created_at:Math.floor(Date.now()/1000),read_at:null}], unread_count:1,next_before:null};
+      data = {items:options.activityItems || [{id:1,sender:'hill',kind:'message',title:'Saved encouragement',body:'Nice studying!',created_at:Math.floor(Date.now()/1000),read_at:null}], unread_count:1,next_before:options.activityBefore||null};
+    }
+    else if (url.pathname.startsWith('/api/reply/')) {
+      control.replies.push({auth:request.headers().authorization,body:request.postDataJSON()});
+      data = {to:'hill'};
     }
     else if (url.pathname.startsWith('/api/community/')) {
       requests.push({ url: url.pathname, auth: request.headers().authorization, csrf: request.headers()['x-ankiquest-csrf'], method: request.method(), body: request.postDataJSON() });
@@ -84,6 +98,38 @@ test('Spanish community labels follow the selected language without translating 
   await page.getByText('Nice studying!', {exact:true}).waitFor();
 });
 
+test('Spanish friend nudges preserve the selected recipient and daily limit', async t => {
+  const {page,requests}=await fixture(t,saved,{locale:'es-ES'});
+  await page.getByRole('tab',{name:'Amigos',exact:true}).click();
+  await page.getByRole('button',{name:'Dar un toque a amigos',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Da un toque a tus amigos',exact:true});
+  await dialog.locator('[data-nudge-user="hill"]').waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="friend"]').isEnabled(),false);
+  await dialog.locator('[data-nudge-user="hill"]').click();
+  await dialog.getByText('¡Toque enviado!',{exact:true}).waitFor();
+  await dialog.getByText('Toque enviado hoy',{exact:true}).waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="hill"]').isEnabled(),false);
+  assert.deepEqual(requests.filter(r=>r.method==='POST'&&r.url.startsWith('/api/friend-nudges/')).map(r=>r.body),[{recipient:'hill'}]);
+});
+
+test('Spanish achievements and thanks preserve friend messages and send contextual replies', async t => {
+  const now=Math.floor(Date.now()/1000);
+  const {page,control}=await fixture(t,saved,{locale:'es-ES',activityItems:[
+    {id:1,sender:'hill',kind:'completion',title:'Deck complete',body:'Hill finished Friends::{0}.',created_at:now,read_at:null},
+    {id:2,sender:'hill',kind:'reply',title:'💬 Hill',body:'Good job!',created_at:now,read_at:null},
+  ]});
+  await page.getByRole('tab',{name:'Amigos',exact:true}).click();
+  const feed=page.getByRole('region',{name:'Logros de tus amigos',exact:true});
+  await feed.getByText('Hill finished Friends::{0}.',{exact:true}).waitFor();
+  await feed.getByRole('button',{name:'Felicitar',exact:true}).click();
+  await feed.getByText('Felicitación enviada',{exact:true}).waitFor();
+  await page.locator('#tab-activity').click();
+  const reply=page.locator('.activity-item[data-notice="2"]');
+  await reply.getByText('Good job!',{exact:true}).waitFor();
+  await reply.getByRole('button',{name:'¡Gracias!',exact:true}).click();
+  assert.deepEqual(control.replies.map(r=>r.body),[{notification:1,message:'¡Buen trabajo!'},{notification:2,message:'¡Gracias!'}]);
+});
+
 test('community reminders reuse the saved account, including saves, without persisting its token', async t => {
   const { page, requests } = await fixture(t);
   await page.locator('#reminder-form').waitFor();
@@ -95,6 +141,27 @@ test('community reminders reuse the saved account, including saves, without pers
   assert.equal(requests.find(request => request.method === 'POST').body.gentle_daily, true);
   const persisted = await page.evaluate(() => JSON.stringify([localStorage, sessionStorage, window.storageWrites, location.href]));
   assert.ok(!persisted.includes(saved.token));
+});
+
+test('activity suggests congratulations only for deck completions and thanks for replies', async t => {
+  const now = Math.floor(Date.now() / 1000);
+  const activityItems = [
+    {id:1,sender:'hill',kind:'completion',title:'Deck complete',body:'Hill finished Spanish.',created_at:now,read_at:null},
+    {id:2,sender:'hill',kind:'reply',title:'💬 Hill',body:'Good job!',created_at:now,read_at:null},
+    {id:3,sender:'hill',kind:'message',title:'A note from Hill',body:'Hello!',created_at:now,read_at:null},
+  ];
+  const {page,control} = await fixture(t,saved,{activityItems});
+  await page.goto(`${origin}/community#activity`);
+  const completion = page.locator('.activity-item[data-notice="1"]');
+  const reply = page.locator('.activity-item[data-notice="2"]');
+  const message = page.locator('.activity-item[data-notice="3"]');
+  await completion.waitFor();
+  assert.equal(await completion.getByRole('button',{name:'Good job!'}).count(),1);
+  assert.equal(await reply.getByRole('button',{name:'Good job!'}).count(),0);
+  assert.equal(await message.getByRole('button',{name:'Good job!'}).count(),0);
+  await reply.getByRole('button',{name:'Thanks!'}).click();
+  await page.locator('#activity-action-status').filter({hasText:'reply was sent'}).waitFor();
+  assert.deepEqual(control.replies.at(-1).body,{notification:2,message:'Thanks!'});
 });
 
 test('late native credentials connect, while explicit disconnect survives repeated auth events', async t => {
@@ -201,4 +268,65 @@ test('a first null native event clears private Community views already loaded wi
   assert.equal(await page.locator('#reminder-form').count(),0);
   assert.equal(await page.locator('.activity-item').count(),0);
   await page.locator('#view-reminders [data-connect]').waitFor();
+});
+
+test('friend nudges select the recipient and show opt-out and daily limits', async t => {
+  const {page,requests}=await fixture(t);
+  await page.evaluate(()=>showView('challenges'));
+  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Nudge your friends',exact:true});
+  await dialog.locator('[data-nudge-user="hill"]').waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="friend"]').isEnabled(),false);
+  await dialog.locator('[data-nudge-receiving]').check();
+  await dialog.getByText('Preference saved.',{exact:true}).waitFor();
+  await dialog.locator('[data-nudge-user="hill"]').click();
+  await dialog.getByText('Nudge sent!',{exact:true}).waitFor();
+  assert.equal(await dialog.locator('[data-nudge-user="hill"]').isEnabled(),false);
+  const posts=requests.filter(request=>request.method==='POST'&&request.url.startsWith('/api/friend-nudges/'));
+  assert.deepEqual(posts.map(request=>request.body),[{enabled:true},{recipient:'hill'}]);
+  assert.ok(posts.every(request=>request.auth==='Bearer saved-token'));
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+});
+
+test('friend nudge dialog discards pending private data when the account changes', async t => {
+  const {page,control,deliver}=await fixture(t);
+  await page.evaluate(()=>showView('challenges'));
+  let release;control.hold=new Promise(resolve=>release=resolve);
+  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
+  await page.getByText('Loading friends…',{exact:true}).waitFor();
+  await deliver(null);release();control.hold=null;
+  await page.waitForTimeout(100);
+  assert.equal(await page.getByRole('dialog',{name:'Nudge your friends',exact:true}).count(),0);
+  assert.equal(await page.locator('[data-nudge-user]').count(),0);
+});
+
+test('friends achievements show only shared friend completions and congratulate once', async t => {
+  const now=Math.floor(Date.now()/1000);
+  const {page,control}=await fixture(t,saved,{activityItems:[
+    {id:1,sender:'hill',kind:'completion',title:'Deck complete',body:'Hill finished Spanish.',created_at:now,read_at:null},
+    {id:2,sender:'hill',kind:'reply',title:'Encouragement',body:'Good job!',created_at:now,read_at:null},
+    {id:3,sender:'cerro',kind:'completion',title:'Deck complete',body:'Cerro finished Geography.',created_at:now,read_at:null},
+  ]});
+  await page.getByRole('tab',{name:'Friends',exact:true}).click();
+  const feed=page.getByRole('region',{name:"Friends' achievements",exact:true});
+  await feed.getByText('Hill finished Spanish.',{exact:true}).waitFor();
+  assert.equal(await feed.locator('.friend-achievement').count(),1);
+  assert.equal(await feed.getByText('Cerro finished Geography.',{exact:true}).count(),0);
+  await feed.getByRole('button',{name:'Congratulate',exact:true}).click();
+  await feed.getByText('Congratulations sent',{exact:true}).waitFor();
+  assert.deepEqual(control.replies,[{auth:'Bearer saved-token',body:{notification:1,message:'Good job!'}}]);
+  assert.equal(await feed.getByRole('button',{name:'Congratulate',exact:true}).count(),0);
+  await page.getByRole('tab',{name:'Activity',exact:false}).click();
+  assert.equal(await page.locator('.activity-item[data-notice="1"]').getByText('Reply sent',{exact:true}).count(),1);
+});
+
+test('friends achievements show an honest empty state and clear on account removal', async t => {
+  const {page,deliver}=await fixture(t);
+  await page.getByRole('tab',{name:'Friends',exact:true}).click();
+  const feed=page.getByRole('region',{name:"Friends' achievements",exact:true});
+  await feed.getByText('Your next shared celebration is ahead.',{exact:true}).waitFor();
+  assert.equal(await feed.getByRole('button',{name:'Congratulate',exact:true}).count(),0);
+  await deliver(null);
+  assert.equal(await page.locator('.friend-achievement').count(),0);
+  assert.equal(await page.getByRole('region',{name:"Friends' achievements",exact:true}).count(),0);
 });
