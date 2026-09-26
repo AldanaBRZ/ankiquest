@@ -61,7 +61,15 @@
 .board .line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .board .name { font-size: 16px; font-weight: 650; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board .name:hover { text-decoration: underline; }
-.board .streak { font-size: 12px; color: var(--fire); white-space: nowrap; }
+.board .streak { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--fire); white-space: nowrap; flex-shrink: 0; }
+.streak-icon { width: 20px; height: 20px; flex-shrink: 0; vertical-align: middle; }
+[data-streak-state="pending"], [data-streak-state="unknown"] { color: var(--dim); }
+[data-streak-state="protected"] { color: var(--ice); }
+.board .streak[data-streak-state="pending"], .board .streak[data-streak-state="unknown"] { color: var(--dim); }
+.board .streak[data-streak-state="protected"] { color: var(--ice); }
+.streak-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; font-size: 11px; color: var(--dim); }
+.streak-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.streak-legend [data-streak-state="studied"] { color: var(--fire); }
 .board .lvl { font-size: 12px; color: var(--dim); white-space: nowrap; margin-left: auto; font-variant-numeric: tabular-nums; }
 .board .bar { height: 5px; margin-top: 7px; }
 .board .xp { text-align: right; font-variant-numeric: tabular-nums; min-width: 64px; }
@@ -488,6 +496,22 @@ function boardTitle(period) {
   return aqHtml`This week · resets in ${d ? `${d}d ${h % 24}h` : h ? `${h}h` : "<1h"}<span class="sub"> · ${when}</span>`;
 }
 
+function streakIcon(state) {
+  const flame = 'M12 2C13 6 18 8 18 13C18 17 15 20 11 20C7 20 4 17 4 13C4 10 6 7 8 5C8 8 9 9 10 10C12 8 13 5 12 2Z';
+  const waiting = state === "pending" || state === "unknown";
+  const badge = waiting ? '<g class="streak-clock"><circle cx="18" cy="18" r="5" fill="var(--card)" stroke="currentColor" stroke-width="1.6"/><path d="M18 15v3h2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></g>' : state === "protected" ? '<path class="streak-snowflake" d="M11 9v8M7.5 11l7 4M7.5 15l7-4" fill="none" stroke="var(--card)" stroke-width="1.5" stroke-linecap="round"/>' : '';
+  return `<svg class="streak-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${flame}" fill="${waiting ? 'none' : 'currentColor'}" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>${badge}</svg>`;
+}
+function streakBadge(row) {
+  if (!(row.streak > 0)) return "";
+  // A cached result from an ended Anki day cannot describe today's activity.
+  const expired = row.day_ends_at && row.day_ends_at <= Date.now();
+  const known = typeof row.today_reviews === "number";
+  const state = expired || !known ? "unknown" : row.today_reviews > 0 ? "studied" : row.streak_state === "protected" ? "protected" : "pending";
+  const status = state === "studied" ? aqText("Studied today") : state === "protected" ? aqText("Streak protected · Not studied yet") : state === "pending" ? aqText("Not studied yet") : aqText("Refresh to see today's study status");
+  const label = aqText`${num(row.streak)} day streak · ${status}`;
+  return aqHtml`<span class="streak" data-streak-state="${state}" role="img" tabindex="0" aria-label="${esc(label)}" title="${esc(label)}">${streakIcon(state)}${num(row.streak)}</span>`;
+}
 function board(rows, me) {
   if (!rows.length) return aqHtml`<p class="empty">Nobody has uploaded reviews yet.</p>`;
   if (rows.every(row => (row.xp ?? row.week_xp) === 0)) return aqHtml`<p class="empty">No XP in this period yet.</p>`;
@@ -499,14 +523,14 @@ function board(rows, me) {
       <div class="player-cell">${AnkiQuestSite.avatar(r.user, r.display)}<div class="player-progress">
         <div class="line">
           <a class="name" href="#${encodeURIComponent(r.user)}">${esc(r.display)}</a>
-          ${r.streak > 0 ? aqHtml`<span class="streak">🔥${r.streak}</span>` : ""}
+          ${streakBadge(r)}
           <span class="lvl">Lv ${r.level}</span>
         </div>
         <div class="bar"><i style="width:${pct(xpOf(r), lead)}%"></i></div>
       </div>
       </div><div class="xp"><b>${num(xpOf(r))}</b><span>${num(r.today_reviews)} today</span></div>
     </li>`).join("")}
-  </ol>`;
+  </ol><p class="streak-legend">${[["studied",aqText("Studied today")],["pending",aqText("Not studied yet")],["protected",aqText("Streak protected")]].map(([state,label]) => aqHtml`<span data-streak-state="${state}">${streakIcon(state)}${label}</span>`).join("")}</p>`;
 }
 
 const winCount = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
