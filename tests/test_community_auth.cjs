@@ -25,7 +25,7 @@ async function fixture(t, session = saved, options = {}) {
   page.setDefaultTimeout(10000);
   page.setDefaultNavigationTimeout(15000);
   const errors = [], requests = [];
-  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, receiving:false, nudged:false };
+  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, replies:[], receiving:false, nudged:false };
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(session => {
     window.storageWrites = [];
@@ -60,7 +60,11 @@ async function fixture(t, session = saved, options = {}) {
       data={receiving:control.receiving,friends:[{user:'hill',display:'Hill',enabled:true,sent_today:control.nudged},{user:'friend',display:'Friend',enabled:false,sent_today:false}]};
     }
     else if (url.pathname.startsWith('/api/activity/')) {
-      data = {items:[{id:1,sender:'hill',kind:'message',title:'Saved encouragement',body:'Nice studying!',created_at:Math.floor(Date.now()/1000),read_at:null}], unread_count:1,next_before:null};
+      data = {items:options.activityItems || [{id:1,sender:'hill',kind:'message',title:'Saved encouragement',body:'Nice studying!',created_at:Math.floor(Date.now()/1000),read_at:null}], unread_count:1,next_before:null};
+    }
+    else if (url.pathname.startsWith('/api/reply/')) {
+      control.replies.push({auth:request.headers().authorization,body:request.postDataJSON()});
+      data = {to:'hill'};
     }
     else if (url.pathname.startsWith('/api/community/')) {
       requests.push({ url: url.pathname, auth: request.headers().authorization, csrf: request.headers()['x-ankiquest-csrf'], method: request.method(), body: request.postDataJSON() });
@@ -95,6 +99,27 @@ test('community reminders reuse the saved account, including saves, without pers
   assert.equal(requests.find(request => request.method === 'POST').body.gentle_daily, true);
   const persisted = await page.evaluate(() => JSON.stringify([localStorage, sessionStorage, window.storageWrites, location.href]));
   assert.ok(!persisted.includes(saved.token));
+});
+
+test('activity suggests congratulations only for deck completions and thanks for replies', async t => {
+  const now = Math.floor(Date.now() / 1000);
+  const activityItems = [
+    {id:1,sender:'hill',kind:'completion',title:'Deck complete',body:'Hill finished Spanish.',created_at:now,read_at:null},
+    {id:2,sender:'hill',kind:'reply',title:'💬 Hill',body:'Good job!',created_at:now,read_at:null},
+    {id:3,sender:'hill',kind:'message',title:'A note from Hill',body:'Hello!',created_at:now,read_at:null},
+  ];
+  const {page,control} = await fixture(t,saved,{activityItems});
+  await page.goto(`${origin}/community#activity`);
+  const completion = page.locator('.activity-item[data-notice="1"]');
+  const reply = page.locator('.activity-item[data-notice="2"]');
+  const message = page.locator('.activity-item[data-notice="3"]');
+  await completion.waitFor();
+  assert.equal(await completion.getByRole('button',{name:'Good job!'}).count(),1);
+  assert.equal(await reply.getByRole('button',{name:'Good job!'}).count(),0);
+  assert.equal(await message.getByRole('button',{name:'Good job!'}).count(),0);
+  await reply.getByRole('button',{name:'Thanks!'}).click();
+  await page.locator('#activity-action-status').filter({hasText:'reply was sent'}).waitFor();
+  assert.deepEqual(control.replies.at(-1).body,{notification:2,message:'Thanks!'});
 });
 
 test('late native credentials connect, while explicit disconnect survives repeated auth events', async t => {
