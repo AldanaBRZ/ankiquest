@@ -176,6 +176,8 @@ struct Standing {
     period: String,
     periods: Periods,
     streak: u64,
+    streak_state: game::StreakState,
+    day_ends_at: i64,
     today_reviews: u64,
 }
 
@@ -205,6 +207,8 @@ async fn leaderboard(
             period: period.clone(),
             periods: p.periods,
             streak: p.streak,
+            streak_state: p.streak_state,
+            day_ends_at: p.day_ends_at,
             today_reviews: p.today.reviews,
         })
         .collect();
@@ -1792,6 +1796,25 @@ mod tests {
             format!("Bearer {user}-secret").parse().unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn leaderboard_exposes_current_study_state_and_per_player_cutoff() {
+        let (app, _path) = fixture();
+        app.players.write().unwrap().insert(
+            "cerro".into(),
+            Player {
+                reviews: Vec::new(),
+                clock: Clock::default(),
+                freeze_policy: game::FreezePolicy::default(),
+            },
+        );
+        let expected = app.profile("cerro").unwrap();
+        let Json(board) = leaderboard(State(app), Query(BoardQuery { period: None })).await;
+        let value = serde_json::to_value(&board).unwrap();
+        assert_eq!(value[0]["streak_state"], "pending");
+        assert_eq!(value[0]["today_reviews"], 0);
+        assert_eq!(value[0]["day_ends_at"], expected.day_ends_at);
     }
 
     #[tokio::test]

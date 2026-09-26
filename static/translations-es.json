@@ -856,5 +856,11 @@
   "▼ {0} passed you": "▼ {0} te ha adelantado",
   "👑 You took the crown": "👑 Has ganado la corona",
   "👑 {0} took the crown": "👑 {0} ha ganado la corona",
-  "🔥 Your {0} day streak ends in {1}h": "🔥 Tu racha de {0} días termina en {1}h"
+  "🔥 Your {0} day streak ends in {1}h": "🔥 Tu racha de {0} días termina en {1}h",
+  "Studied today": "Estudió hoy",
+  "Not studied yet": "Aún no ha estudiado",
+  "Streak protected": "Racha protegida",
+  "Streak protected · Not studied yet": "Racha protegida · Aún no ha estudiado",
+  "Refresh to see today's study status": "Actualiza para ver si ha estudiado hoy",
+  "{0} day streak · {1}": "Racha de {0} días · {1}"
 }

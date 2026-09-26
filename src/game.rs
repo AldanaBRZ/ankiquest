@@ -738,6 +738,14 @@ pub struct HistoryDay {
     pub frozen: bool,
 }
 
+#[derive(Serialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum StreakState {
+    Studied,
+    Pending,
+    Protected,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Profile {
     pub user: String,
@@ -750,6 +758,7 @@ pub struct Profile {
     pub periods: Periods,
     pub records: Records,
     pub streak: u64,
+    pub streak_state: StreakState,
     pub freezes: u32,
     pub stored_freezes: u32,
     pub freezes_enabled: bool,
@@ -1273,6 +1282,14 @@ pub fn compute_with_freezes(
     } else {
         0
     };
+    let streak_state = if now.reviews > 0 {
+        StreakState::Studied
+    } else if frozen.contains(&(today - 1)) {
+        // Freezes cover ended days. Today's unstudied day is still open.
+        StreakState::Protected
+    } else {
+        StreakState::Pending
+    };
     Profile {
         user: user.into(),
         display: display.into(),
@@ -1284,6 +1301,7 @@ pub fn compute_with_freezes(
         periods,
         records,
         streak,
+        streak_state,
         freezes: effective_freezes,
         stored_freezes: freezes,
         freezes_enabled: freezes_enabled_at(freeze_preferences, now_ms),
@@ -1358,6 +1376,50 @@ mod tests {
 
     fn at(day: i64) -> i64 {
         day * DAY_MS + NOON + 3_600_000
+    }
+
+    #[test]
+    fn streak_status_separates_today_reviews_from_previous_day_protection() {
+        let reviews = perfect_day(&[], 1, &utc());
+        let changes = [protection(0, true)];
+        let studied = protected(&reviews, at(1), &changes);
+        let pending = protected(&reviews, at(2), &changes);
+        let frozen = protected(&reviews, at(3), &changes);
+        for (profile, expected) in [
+            (&studied, "studied"),
+            (&pending, "pending"),
+            (&frozen, "protected"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(profile).unwrap()["streak_state"],
+                expected
+            );
+        }
+        assert_eq!(frozen.today.reviews, 0);
+        assert_eq!(frozen.streak, pending.streak);
+        let mut resumed = reviews;
+        resumed.extend(reviews_on(3, 1, 30_000));
+        let resumed = protected(&resumed, at(3), &changes);
+        assert_eq!(
+            serde_json::to_value(resumed).unwrap()["streak_state"],
+            "studied"
+        );
+    }
+
+    #[test]
+    fn streak_status_changes_at_the_players_anki_cutoff() {
+        let reviews = reviews_on(1, 1, 1000);
+        let before = protected(&reviews, at(1), &[]);
+        let after = protected(&reviews, before.day_ends_at, &[]);
+        assert_eq!(
+            serde_json::to_value(&before).unwrap()["streak_state"],
+            "studied"
+        );
+        assert_eq!(
+            serde_json::to_value(&after).unwrap()["streak_state"],
+            "pending"
+        );
+        assert_eq!(after.streak, before.streak);
     }
 
     fn protection(at: i64, enabled: bool) -> FreezePreference {
