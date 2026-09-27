@@ -44,12 +44,21 @@ pub struct FreezePolicy {
     /// First migration time for an existing database; earlier Anki days retain
     /// their old automatic protection. New databases have no legacy period.
     pub legacy_until: Option<i64>,
+    /// Saved rollout time: changing the default must not rewrite earlier rewards.
+    /// An unrestricted default policy enables protection throughout its history.
+    pub default_enabled_from: Option<i64>,
     pub preferences: Vec<FreezePreference>,
 }
 
-fn freezes_enabled_at(preferences: &[FreezePreference], at: i64) -> bool {
-    let end = preferences.partition_point(|change| change.at <= at);
-    end > 0 && preferences[end - 1].enabled
+impl FreezePolicy {
+    pub fn enabled_at(&self, at: i64) -> bool {
+        let end = self.preferences.partition_point(|change| change.at <= at);
+        if end > 0 {
+            self.preferences[end - 1].enabled
+        } else {
+            self.default_enabled_from.is_none_or(|start| at >= start)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
@@ -1052,7 +1061,6 @@ pub fn compute_with_freezes(
     now_ms: i64,
     freeze_policy: &FreezePolicy,
 ) -> Profile {
-    let freeze_preferences = &freeze_policy.preferences;
     let (days, last_combo, earned) = collect_days_with_quests(reviews, clock, seed_of(user));
     let today = clock.day(now_ms);
     let legacy_until = freeze_policy.legacy_until.map(|at| clock.day(at));
@@ -1082,7 +1090,7 @@ pub fn compute_with_freezes(
         let legacy = legacy_until.is_some_and(|cutoff| day < cutoff);
         if legacy_until == Some(day) {
             // Preserve previously used protection and its streak/XP history,
-            // but begin the opt-in system with an empty bank.
+            // but begin the quest-earned system with an empty bank.
             freezes = 0;
         }
         let stats = days.get(&day);
@@ -1122,8 +1130,7 @@ pub fn compute_with_freezes(
         } else if day != today {
             if streak > 0
                 && freezes > 0
-                && (legacy
-                    || freezes_enabled_at(freeze_preferences, clock.day_start_ms(day + 1) - 1))
+                && (legacy || freeze_policy.enabled_at(clock.day_start_ms(day + 1) - 1))
             {
                 freezes -= 1;
                 frozen.insert(day);
@@ -1147,9 +1154,8 @@ pub fn compute_with_freezes(
                 // including when protection is off or the bank is already full.
                 if !legacy
                     && freezes < MAX_FREEZES
-                    && s.quests_completed_at.is_some_and(|at| {
-                        at <= now_ms && freezes_enabled_at(freeze_preferences, at)
-                    })
+                    && s.quests_completed_at
+                        .is_some_and(|at| at <= now_ms && freeze_policy.enabled_at(at))
                 {
                     freezes += 1;
                     freeze_earned_today = day == today;
@@ -1338,7 +1344,7 @@ pub fn compute_with_freezes(
     let now = days.get(&today).unwrap_or(&empty);
     let at_risk = streak > 0 && !days.contains_key(&today);
     let day_ends_at = clock.day_start_ms(today + 1);
-    let effective_freezes = if freezes_enabled_at(freeze_preferences, now_ms) {
+    let effective_freezes = if freeze_policy.enabled_at(now_ms) {
         freezes
     } else {
         0
@@ -1365,7 +1371,7 @@ pub fn compute_with_freezes(
         streak_state,
         freezes: effective_freezes,
         stored_freezes: freezes,
-        freezes_enabled: freezes_enabled_at(freeze_preferences, now_ms),
+        freezes_enabled: freeze_policy.enabled_at(now_ms),
         freeze_earned_today,
         at_risk,
         day_ends_at,
@@ -1727,15 +1733,85 @@ mod tests {
     }
 
     #[test]
-    fn freezes_default_off_and_start_empty_without_historical_rewards() {
+    fn freezes_default_on_and_earn_from_quests_without_a_settings_change() {
+        let empty = protected(&[], at(1), &[]);
+        assert!(empty.freezes_enabled);
+        assert_eq!(empty.stored_freezes, 0);
+        let reviews = perfect_history(&[1]);
+        let earned = protected(&reviews, at(1), &[]);
+        assert!(earned.freezes_enabled);
+        assert_eq!(earned.freezes, 1);
+        assert!(earned.freeze_earned_today);
+        let paused = protected(&reviews, at(1), &[protection(at(1), false)]);
+        assert!(!paused.freezes_enabled);
+        assert_eq!(paused.stored_freezes, 1);
+        assert_eq!(paused.freezes, 0);
+        let covered = protected(&reviews, at(3), &[]);
+        assert_eq!(covered.streak, 1);
+        assert_eq!(covered.heatmap.iter().filter(|cell| cell.frozen).count(), 1);
+    }
+
+    #[test]
+    fn freeze_default_rollout_does_not_backfill_and_keeps_explicit_opt_outs() {
+        let mut reviews = perfect_history(&[1, 2]);
+        let policy = FreezePolicy {
+            default_enabled_from: Some(utc().day_start_ms(3)),
+            ..FreezePolicy::default()
+        };
+        let run = |reviews: &[Review], now, policy: &FreezePolicy| {
+            compute_with_freezes("a", "a", reviews, &utc(), &Week::default(), now, policy)
+        };
+        let boundary = policy.default_enabled_from.unwrap();
+        let old = run(&reviews, boundary - 1, &policy);
+        let enabled = run(&reviews, boundary, &policy);
+        assert!(!old.freezes_enabled);
+        assert!(enabled.freezes_enabled);
+        assert_eq!(enabled.stored_freezes, 0);
+        assert_eq!(enabled.xp_total, old.xp_total);
+        assert_eq!(enabled.streak, old.streak);
+        let earlier = run(&reviews, at(2), &policy);
+        let old_rule = run(
+            &reviews,
+            at(2),
+            &FreezePolicy {
+                preferences: vec![protection(0, false)],
+                ..FreezePolicy::default()
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(earlier).unwrap(),
+            serde_json::to_value(old_rule).unwrap()
+        );
+        reviews.extend(perfect_day(&reviews, 3, &utc()));
+        let earned = run(&reviews, at(4), &policy);
+        assert_eq!(earned.stored_freezes, 1);
+        let off = FreezePolicy {
+            preferences: vec![protection(at(1), false)],
+            ..policy.clone()
+        };
+        assert!(!run(&reviews, at(4), &off).freezes_enabled);
+        assert_eq!(run(&reviews, at(4), &off).stored_freezes, 0);
+        let opted_in = FreezePolicy {
+            preferences: vec![protection(0, true)],
+            ..policy
+        };
+        assert_eq!(run(&reviews, at(4), &opted_in).stored_freezes, 3);
+    }
+
+    #[test]
+    fn explicitly_disabled_freezes_start_empty_without_historical_rewards() {
         let reviews = perfect_history(&[1, 2, 3, 4, 5, 6, 7]);
-        let p = protected(&reviews, at(9), &[]);
+        let p = protected(&reviews, at(9), &[protection(0, false)]);
         assert!(!p.freezes_enabled);
         assert_eq!(p.stored_freezes, 0);
         assert_eq!(p.freezes, 0);
         assert_eq!(p.streak, 0);
         assert!(p.heatmap.iter().all(|c| !c.frozen));
-        let opted_in = protected(&reviews, at(9), &[protection(at(9), true)]);
+        let opted_in = protected(
+            &reviews,
+            at(9),
+            &[protection(0, false), protection(at(9), true)],
+        );
         assert!(opted_in.freezes_enabled);
         assert_eq!(opted_in.freezes, 0);
         assert!(!opted_in.freeze_earned_today);
@@ -1757,6 +1833,7 @@ mod tests {
         let policy = FreezePolicy {
             legacy_until: Some(at(10)),
             preferences: vec![],
+            default_enabled_from: Some(at(10)),
         };
         let p = compute_with_freezes(
             "a",
@@ -1779,7 +1856,7 @@ mod tests {
         );
         assert_eq!(p.freezes, 0);
         assert_eq!(p.stored_freezes, 0);
-        assert!(!p.freezes_enabled);
+        assert!(p.freezes_enabled);
         let before_cutover = compute_with_freezes(
             "a",
             "a",
@@ -1790,6 +1867,7 @@ mod tests {
             &FreezePolicy {
                 legacy_until: Some(at(10)),
                 preferences: vec![],
+                default_enabled_from: Some(at(10)),
             },
         );
         assert_eq!(p.xp_total, before_cutover.xp_total);
@@ -1813,6 +1891,7 @@ mod tests {
         let policy = FreezePolicy {
             legacy_until: Some(utc().day_start_ms(15)),
             preferences: vec![protection(utc().day_start_ms(15), true)],
+            ..FreezePolicy::default()
         };
         let run = |reviews: &[Review], day| {
             compute_with_freezes(
@@ -1895,12 +1974,22 @@ mod tests {
                 .any(|quest| !quest.done)
         );
         assert_eq!(
-            protected(&reviews, at(2), &[protection(completion, true)]).stored_freezes,
+            protected(
+                &reviews,
+                at(2),
+                &[protection(0, false), protection(completion, true)]
+            )
+            .stored_freezes,
             1,
             "opting in at the visible completion earns today's freeze"
         );
         assert_eq!(
-            protected(&reviews, at(2), &[protection(completion + 1, true)]).stored_freezes,
+            protected(
+                &reviews,
+                at(2),
+                &[protection(0, false), protection(completion + 1, true)]
+            )
+            .stored_freezes,
             0,
             "opting in after completion cannot claim a past reward"
         );
@@ -1911,11 +2000,21 @@ mod tests {
         let mut reviews = perfect_history(&[1]);
         let completion = first_completion(&reviews, 1);
         assert_eq!(
-            protected(&reviews, at(1), &[protection(completion, true)]).freezes,
+            protected(
+                &reviews,
+                at(1),
+                &[protection(0, false), protection(completion, true)]
+            )
+            .freezes,
             1
         );
         assert_eq!(
-            protected(&reviews, at(1), &[protection(completion + 1, true)]).freezes,
+            protected(
+                &reviews,
+                at(1),
+                &[protection(0, false), protection(completion + 1, true)]
+            )
+            .freezes,
             0
         );
         reviews.extend(reviews_on(1, 3, 999));
@@ -2079,7 +2178,11 @@ mod tests {
         assert_eq!(before.freezes, 0);
         assert!(!before.freeze_earned_today);
         assert_eq!(protected(&reviews, completion, &changes).freezes, 1);
-        let future = protected(&reviews, at(1), &[protection(at(2), true)]);
+        let future = protected(
+            &reviews,
+            at(1),
+            &[protection(0, false), protection(at(2), true)],
+        );
         assert!(!future.freezes_enabled);
         assert_eq!(future.stored_freezes, 0);
         assert_eq!(

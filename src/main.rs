@@ -251,10 +251,10 @@ struct FreezeUpdate {
 }
 
 fn freeze_settings(app: &App, store: &Store, user: &str) -> Result<FreezeSettings, Error> {
-    let history = store.freeze_preferences(user)?;
+    let policy = store.freeze_policy(user)?;
     let profile = app.profile(user);
     Ok(FreezeSettings {
-        enabled: history.last().is_some_and(|change| change.enabled),
+        enabled: policy.enabled_at(now_ms()),
         freezes: profile.map_or(0, |profile| profile.stored_freezes),
         capacity: game::MAX_FREEZES,
     })
@@ -2670,7 +2670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streak_freezes_start_empty_can_be_enabled_before_upload_and_reload() {
+    async fn streak_freezes_default_on_and_first_opt_out_survives_restart() {
         let (app, path) = fixture();
         let settings = get_freezes(
             State(app.clone()),
@@ -2680,7 +2680,39 @@ mod tests {
         .await
         .unwrap()
         .0;
-        assert!(!settings.enabled);
+        assert!(settings.enabled);
+        assert_eq!((settings.freezes, settings.capacity), (0, 3));
+        let disabled = set_freezes(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(FreezeUpdate { enabled: false }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!disabled.enabled);
+        assert!(app.players.read().unwrap().is_empty());
+        drop(app);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.freeze_preferences("cerro").unwrap().len(), 1);
+        assert!(!store.freeze_preferences("cerro").unwrap()[0].enabled);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn streak_freezes_start_empty_can_be_toggled_before_upload_and_reload() {
+        let (app, path) = fixture();
+        let settings = get_freezes(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(settings.enabled);
         assert_eq!((settings.freezes, settings.capacity), (0, 3));
         for enabled in [true, true, false, true] {
             let settings = set_freezes(
@@ -2703,13 +2735,13 @@ mod tests {
             .await
             .unwrap()
             .0;
-        assert!(!other.enabled);
+        assert!(other.enabled);
         drop(app);
         let store = Store::open(&path).unwrap();
         let history = store.freeze_preferences("cerro").unwrap();
         assert_eq!(
             history.len(),
-            3,
+            2,
             "repeated saves cannot change the activation time"
         );
         assert!(history.last().unwrap().enabled);
@@ -2718,7 +2750,7 @@ mod tests {
     }
 
     #[test]
-    fn streak_freeze_updates_cannot_set_a_balance_or_omit_opt_in() {
+    fn streak_freeze_updates_cannot_set_a_balance_or_omit_enabled() {
         for value in [
             serde_json::json!({}),
             serde_json::json!({"enabled": null}),

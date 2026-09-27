@@ -19,7 +19,17 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
          );
          create table if not exists freeze_legacy_players (
              user text primary key
+         );
+         create table if not exists freeze_defaults (
+             id integer primary key check (id = 1),
+             enabled_from integer not null
          );",
+    )?;
+    // No preference now means enabled. Keep a fixed boundary so upgrading an
+    // opt-in server does not retroactively earn/spend freezes or rewrite XP.
+    tx.execute(
+        "insert or ignore into freeze_defaults (id, enabled_from) values (1, ?1)",
+        [crate::now_ms()],
     )?;
     // Existing review histories keep protection already applied by the old rule.
     // New databases never use that rule. This boundary is fixed across restarts.
@@ -47,6 +57,11 @@ impl Store {
                 [user],
                 |r| r.get(0),
             )?,
+            default_enabled_from: Some(self.conn.query_row(
+                "select enabled_from from freeze_defaults where id = 1",
+                [],
+                |r| r.get(0),
+            )?),
             preferences: self.freeze_preferences(user)?,
         })
     }
@@ -76,7 +91,12 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if previous.is_some_and(|(_, value)| value) != enabled {
+        let default_enabled_from: i64 = tx.query_row(
+            "select enabled_from from freeze_defaults where id = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if previous.map_or(at >= default_enabled_from, |(_, value)| value) != enabled {
             tx.execute(
                 "insert into freeze_preferences (user, at, enabled) values (?1, ?2, ?3)",
                 params![user, at.max(previous.map_or(at, |(at, _)| at)), enabled],
@@ -160,7 +180,59 @@ mod tests {
     }
 
     #[test]
-    fn preferences_default_off_are_private_and_survive_restart() {
+    fn opt_out_rollout_keeps_its_boundary_and_saved_choices_across_restarts() {
+        let (store, path) = temporary_store();
+        store.conn.execute_batch(
+            "drop table freeze_defaults;
+             insert into freeze_preferences (user, at, enabled) values ('cerro', 10, 0), ('hill', 10, 1);"
+        ).unwrap();
+        drop(store);
+        let store = crate::store::Store::open(&path).unwrap();
+        let default = store.freeze_policy("new-player").unwrap();
+        let boundary = default.default_enabled_from.unwrap();
+        assert!(!default.enabled_at(boundary - 1));
+        assert!(default.enabled_at(boundary));
+        assert!(!store.freeze_policy("cerro").unwrap().enabled_at(boundary));
+        assert!(store.freeze_policy("hill").unwrap().enabled_at(10));
+        assert_eq!(store.freeze_preferences("cerro").unwrap().len(), 1);
+        drop(store);
+        let store = crate::store::Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .freeze_policy("new-player")
+                .unwrap()
+                .default_enabled_from,
+            Some(boundary)
+        );
+        assert!(
+            !store
+                .freeze_policy("cerro")
+                .unwrap()
+                .enabled_at(crate::now_ms())
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn first_opt_out_is_saved_even_without_uploaded_reviews() {
+        let (mut store, path) = temporary_store();
+        let at = crate::now_ms();
+        store.set_freezes_enabled("cerro", false, at).unwrap();
+        store.set_freezes_enabled("cerro", false, at + 1).unwrap();
+        let before = store.freeze_preferences("cerro").unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(!before[0].enabled);
+        drop(store);
+        let store = crate::store::Store::open(&path).unwrap();
+        assert_eq!(store.freeze_preferences("cerro").unwrap(), before);
+        assert!(store.freeze_preferences("hill").unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn preference_changes_before_rollout_are_private_and_survive_restart() {
         let (mut store, path) = temporary_store();
         assert!(store.freeze_preferences("cerro").unwrap().is_empty());
         store.set_freezes_enabled("cerro", false, 10).unwrap();
