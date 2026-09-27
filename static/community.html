@@ -61,7 +61,7 @@ const amount = value => Math.max(0, Number(value) || 0);
 const months = Array.from({length:12}, (_, i) => new Intl.DateTimeFormat(AnkiQuestI18n.language,{month:"long",timeZone:"UTC"}).format(new Date(Date.UTC(2024,i,1))));
 const now = new Date();
 const initialPeriod = new URLSearchParams(location.search).get("period");
-const state = { data:null, view:"challenges", challengeId:null, year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:["day","week","month"].includes(initialPeriod)?initialPeriod:"day", winnerScope:"shared", winnerMetric:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, nativeSession:false, nativeDisconnected:false, reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, activity:null, activityError:"", activityLoading:false, activityEpoch:0, activityDays:90, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"", challengeSaving:false, challengeRequest:null, challengeStatus:"", challengeError:false };
+const state = { data:null, view:"challenges", challengeId:null, year:now.getFullYear(), month:now.getMonth()+1, player:"", calendarMode:["day","week","month"].includes(initialPeriod)?initialPeriod:"day", winnerScope:"shared", winnerMetric:"day", recordScope:"all", matchupA:"", matchupB:"", request:0, session:null, nativeSession:false, nativeDisconnected:false, reminders:null, reminderDraft:null, reminderSaving:false, reminderEpoch:0, reminderStatus:"", reminderError:false, challenges:null, activity:null, activityError:"", activityLoading:false, activityEpoch:0, activityDays:90, activityBox:"inbox", sent:null, sentError:"", sentLoading:false, sentEpoch:0, privateEpoch:0, authEpoch:0, privateLoading:false, privateError:"", challengeSaving:false, challengeRequest:null, challengeStatus:"", challengeError:false };
 let nativeAccountCleared = false;
 const reminderDefinitions = [
   ["gentle_daily",aqText("Gentle daily reminder"),aqText("A friendly nudge when you haven’t studied yet.")],
@@ -298,7 +298,24 @@ function renderActivity(banner) {
   const unread = Number(payload?.unread_count) || 0;
   $("activity-count").hidden = !unread;
   $("activity-count").textContent = unread > 99 ? "99+" : String(unread);
-  $("view-activity").innerHTML = banner + aqHtml`<div class="card-head friend-heading"><div><h2>Your activity</h2><p>Invitations, encouragement, and study updates.</p></div><button type="button" data-activity-refresh ${state.activityLoading ? "disabled" : ""}>Refresh</button></div>${state.activityError ? aqHtml`<p class="notice error" role="alert">${esc(state.activityError)}</p>` : ""}<p id="activity-action-status" class="status" role="status"></p>${payload?.legacy ? aqHtml(['<p class="settings-hint">This server shows the last 7 days. Update the server for saved read status and longer history.</p>']) : aqHtml(['<label class="activity-window">Show <select id="activity-window"><option value="30" ']) + (state.activityDays === 30 ? "selected" : "") + aqHtml(['>Last 30 days</option><option value="90" ']) + (state.activityDays === 90 ? "selected" : "") + aqHtml(['>Last 90 days</option></select></label>'])}<div class="stack activity-list">${items.length ? items.map(renderActivityItem).join("") : state.activityLoading ? aqHtml(['<p role="status">Loading…</p>']) : empty(aqText("You're all caught up."), aqText("Invitations and encouragement will stay here after you dismiss a phone notification."))}</div>${payload?.next_before ? aqHtml`<button type="button" class="load-more" data-activity-more ${state.activityLoading ? "disabled" : ""}>${state.activityLoading ? aqText("Loading…") : aqText("Load earlier activity")}</button>` : ""}`;
+  $("view-activity").innerHTML = banner + aqHtml`<div class="card-head friend-heading"><div><h2>Your activity</h2><p>Invitations, encouragement, and study updates.</p></div><button type="button" data-activity-refresh ${state.activityLoading ? "disabled" : ""}>Refresh</button></div>${state.activityError ? aqHtml`<p class="notice error" role="alert">${esc(state.activityError)}</p>` : ""}<p id="activity-action-status" class="status" role="status"></p>${renderMailbox(payload, unread)}${state.activityBox === "sent" ? renderSent() : renderInbox(payload, items)}`;
+}
+function renderInbox(payload, items) {
+  return aqHtml`${payload?.legacy ? aqHtml(['<p class="settings-hint">This server shows the last 7 days. Update the server for saved read status and longer history.</p>']) : aqHtml(['<label class="activity-window">Show <select id="activity-window"><option value="30" ']) + (state.activityDays === 30 ? "selected" : "") + aqHtml(['>Last 30 days</option><option value="90" ']) + (state.activityDays === 90 ? "selected" : "") + aqHtml(['>Last 90 days</option></select></label>'])}<div class="stack activity-list">${items.length ? items.map(renderActivityItem).join("") : state.activityLoading ? aqHtml(['<p role="status">Loading…</p>']) : empty(aqText("You're all caught up."), aqText("Invitations and encouragement will stay here after you dismiss a phone notification."))}</div>${payload?.next_before ? aqHtml`<button type="button" class="load-more" data-activity-more ${state.activityLoading ? "disabled" : ""}>${state.activityLoading ? aqText("Loading…") : aqText("Load earlier activity")}</button>` : ""}`;
+}
+function renderMailbox(payload, unread) {
+  const box = state.activityBox;
+  return aqHtml`<div class="actions activity-box"><div class="segmented" role="group" aria-label="Activity mailbox"><button type="button" data-activity-box="inbox" aria-pressed="${box === "inbox"}">Inbox</button><button type="button" data-activity-box="sent" aria-pressed="${box === "sent"}">Sent</button></div>${box === "inbox" && unread && !payload?.legacy ? aqHtml`<button type="button" data-activity-read-all>Mark all as read</button>` : ""}</div>`;
+}
+function renderSent() {
+  if (state.sentLoading && !state.sent) return aqHtml(['<p role="status" class="loading-copy">Loading…</p>']);
+  const items = state.sent?.items || [];
+  return aqHtml`${state.sentError ? aqHtml`<p class="notice error" role="alert">${esc(state.sentError)}</p>` : ""}<div class="stack activity-list">${items.length ? items.map(renderSentItem).join("") : state.sentError ? "" : empty(aqText("Nothing sent yet."), aqText("Replies and nudges you send appear here, with when they were read."))}</div>${state.sent?.next_before ? aqHtml`<button type="button" class="load-more" data-sent-more ${state.sentLoading ? "disabled" : ""}>${state.sentLoading ? aqText("Loading…") : aqText("Load earlier messages")}</button>` : ""}`;
+}
+function renderSentItem(item) {
+  const when = date => date.toLocaleString(AnkiQuestI18n.language, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+  const sent = new Date(Number(item.created_at) * 1000), seen = item.read_at ? new Date(Number(item.read_at) * 1000) : null;
+  return aqHtml`<article class="card activity-item sent-item" data-sent="${Number(item.id)}"><div class="card-head"><div><h3>To ${esc(name(item.recipient))}</h3><p><time datetime="${sent.toISOString()}">${esc(when(sent))}</time></p></div>${seen ? aqHtml`<span class="chip green">Seen ${esc(when(seen))}</span>` : aqHtml(['<span class="chip">Not seen yet</span>'])}</div><p class="activity-body">${esc(item.body)}</p></article>`;
 }
 function renderActivityItem(item) {
   const id = Number(item.id), challenge = Number(item.challenge_id), target = Number.isSafeInteger(challenge) && challenge > 0 ? challenge : /^\/community#challenge-([1-9]\d*)$/.exec(item.route || "")?.[1];
@@ -344,7 +361,7 @@ function clearPrivate() {
   AnkiQuestAvatars.close();
   state.authEpoch++;state.privateEpoch++;state.reminderEpoch++;state.activityEpoch++;
   state.nativeSession=false;state.session=null;state.reminders=null;state.reminderDraft=null;state.reminderSaving=false;state.reminderStatus="";state.reminderError=false;
-  state.challenges=null;state.activity=null;state.activityError="";state.activityLoading=false;state.privateLoading=false;state.privateError="";
+  state.challenges=null;state.activity=null;state.activityError="";state.activityLoading=false;state.activityBox="inbox";state.sent=null;state.sentError="";state.sentLoading=false;state.sentEpoch++;state.privateLoading=false;state.privateError="";
   state.challengeStatus="";state.challengeError=false;state.challengeSaving=false;state.connectionError="";
   $("activity-count").hidden=true;$("connect-button").textContent=aqText("Connect account");
   if($("auth-dialog").open)$("auth-dialog").close();
@@ -396,6 +413,29 @@ async function loadActivity(more=false) {
     state.activity={...payload,items:before?[...(state.activity?.items||[]),...items.filter(item=>!state.activity.items.some(old=>old.id===item.id))]:items};
   } catch(error) { if(state.session===session&&epoch===state.activityEpoch)state.activityError=error instanceof TypeError?aqText("Could not refresh activity. Check your connection; nothing has been marked read."):error.message; }
   finally { if(state.session===session&&epoch===state.activityEpoch){state.activityLoading=false;renderActivity(accountBanner());} }
+}
+async function loadSent(more=false) {
+  const session=state.session;if(!session||state.sentLoading)return;
+  const epoch=++state.sentEpoch,before=more?state.sent?.next_before:null;
+  state.sentLoading=true;state.sentError="";renderActivity(accountBanner());
+  try {
+    const page=await ownerRequest(`/api/activity/${encodeURIComponent(session.user)}/sent?limit=100${before?"&before="+encodeURIComponent(before):""}`,undefined,session);
+    if(state.session!==session||epoch!==state.sentEpoch)return;
+    const items=Array.isArray(page.items)?page.items:[];
+    state.sent={...page,items:before?[...(state.sent?.items||[]),...items]:items};
+  } catch(error) { if(state.session===session&&epoch===state.sentEpoch)state.sentError=error.status===404?aqText("This server does not keep sent messages yet."):error instanceof TypeError?aqText("Could not load sent messages. Check your connection."):error.message; }
+  finally { if(state.session===session&&epoch===state.sentEpoch){state.sentLoading=false;renderActivity(accountBanner());} }
+}
+async function markAllRead(button) {
+  const session=state.session,through=Math.max(0,...(state.activity?.items||[]).map(item=>Number(item.id)).filter(Number.isSafeInteger));
+  if(!session||!through||state.activity?.legacy)return;
+  button.disabled=true;
+  try {
+    await ownerRequest(`/api/activity/${encodeURIComponent(session.user)}/read`,{through},session);
+    if(state.session!==session)return;
+    const readAt=Date.now()/1000;for(const item of state.activity.items)if(!item.read_at)item.read_at=readAt;
+    await loadActivity();
+  } catch(error) { if(state.session!==session)return;button.disabled=false;const status=$("activity-action-status");if(status){status.className="status error";status.textContent=aqText("Could not mark everything read.")+" "+error.message;} }
 }
 async function markRead(id,rerender=true) {
   const session=state.session;if(!session||state.activity?.legacy)return;
@@ -476,8 +516,11 @@ document.addEventListener("click",event=>{
   if(button.dataset.monthStep) { const next=new Date(Date.UTC(state.year,state.month-1+Number(button.dataset.monthStep),1));state.year=next.getUTCFullYear();state.month=next.getUTCMonth()+1;loadData(); }
   if(button.dataset.challengeAction)actOnChallenge(button);
   if(button.hasAttribute("data-create-challenge"))openChallengeCreator();
-  if(button.hasAttribute("data-activity-refresh"))loadActivity();
+  if(button.hasAttribute("data-activity-refresh")){loadActivity();if(state.activityBox==="sent")loadSent();}
   if(button.hasAttribute("data-activity-more"))loadActivity(true);
+  if(button.dataset.activityBox){state.activityBox=button.dataset.activityBox==="sent"?"sent":"inbox";if(state.activityBox==="sent"&&!state.sent)loadSent();else renderActivity(accountBanner());}
+  if(button.hasAttribute("data-activity-read-all"))markAllRead(button);
+  if(button.hasAttribute("data-sent-more"))loadSent(true);
   if(button.dataset.markRead||button.dataset.activityChallenge)handleActivity(button);
   if(button.dataset.quickReply)sendActivityReply(button.closest("form"),button.dataset.message);
   if(button.hasAttribute("data-congratulate"))sendActivityReply(button.closest(".friend-achievement"),aqText("Good job!"));

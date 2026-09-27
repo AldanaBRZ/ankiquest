@@ -866,6 +866,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_all_and_sent_are_owner_scoped() {
+        let (app, path) = fixture(true);
+        let (first, reply) = {
+            let mut store = app.store.lock().unwrap();
+            let mut send = |to, from, kind| {
+                store
+                    .send(
+                        &crate::decks::Outgoing {
+                            to,
+                            from,
+                            title: "Hello",
+                            body: "Inbox",
+                            kind,
+                        },
+                        0,
+                        now_ms(),
+                    )
+                    .unwrap()
+            };
+            let first = send("alice", "", "message");
+            let reply = send("alice", "bob", "reply");
+            send("alice", "", "message");
+            (first, reply)
+        };
+        let alice = [
+            ("authorization", "Bearer alice-token"),
+            ("content-type", "application/json"),
+        ];
+        let bob = [
+            ("authorization", "Bearer bob-token"),
+            ("content-type", "application/json"),
+        ];
+        let json = |response: axum::response::Response| async move {
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), 65536).await.unwrap(),
+            )
+            .unwrap()
+        };
+        for body in [
+            serde_json::json!({"through": 0}),
+            serde_json::json!({"through": first, "ids": [first]}),
+        ] {
+            assert_eq!(
+                request(
+                    &app,
+                    "POST",
+                    "/api/activity/alice/read",
+                    &alice,
+                    &body.to_string()
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let through = serde_json::json!({"through": reply}).to_string();
+        assert_eq!(
+            request(&app, "POST", "/api/activity/alice/read", &bob, &through)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let sent = json(request(&app, "GET", "/api/activity/bob/sent", &bob, "").await).await;
+        assert_eq!(sent["items"][0]["id"], reply);
+        assert_eq!(sent["items"][0]["recipient"], "alice");
+        assert!(sent["items"][0]["read_at"].is_null());
+        assert_eq!(
+            request(&app, "POST", "/api/activity/alice/read", &alice, &through)
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        let activity = json(request(&app, "GET", "/api/activity/alice", &alice, "").await).await;
+        assert_eq!(activity["unread_count"], 1);
+        let sent = json(request(&app, "GET", "/api/activity/bob/sent", &bob, "").await).await;
+        assert!(sent["items"][0]["read_at"].is_i64());
+        assert_eq!(
+            request(&app, "GET", "/api/activity/bob/sent", &alice, "")
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for query in ["limit=0", "limit=201", "before=0"] {
+            assert_eq!(
+                request(
+                    &app,
+                    "GET",
+                    &format!("/api/activity/bob/sent?{query}"),
+                    &bob,
+                    ""
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
     async fn private_router_closes_every_data_route_but_keeps_login_assets_public() {
         let (app, path) = fixture(true);
         for endpoint in [
