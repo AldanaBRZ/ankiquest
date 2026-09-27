@@ -254,13 +254,19 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
          create index if not exists notifications_recipient on notifications (recipient, id);
          create table if not exists player_settings (
              user text primary key,
-             nudges integer not null default 0
+             nudges integer not null default 0,
+             friend_nudges integer not null default 0
          ) without rowid;
          create table if not exists incoming_settings (
              user text primary key,
              enabled integer not null default 1
          ) without rowid;
          create table if not exists incoming_muted_senders (
+             recipient text not null,
+             sender text not null,
+             primary key (recipient, sender)
+         ) without rowid;
+         create table if not exists friend_nudge_muted_senders (
              recipient text not null,
              sender text not null,
              primary key (recipient, sender)
@@ -298,6 +304,19 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
             [],
         )?;
     }
+    let friend_nudges = conn
+        .prepare("select 1 from pragma_table_info('player_settings') where name = 'friend_nudges'")?
+        .exists([])?;
+    if !friend_nudges {
+        // Add the column and copy the prior choice together: a restart must not
+        // mistake a half-migrated database for a new user's opt-out.
+        conn.execute_batch(
+            "begin immediate;
+             alter table player_settings add column friend_nudges integer not null default 0;
+             update player_settings set friend_nudges = nudges;
+             commit;",
+        )?;
+    }
     conn.execute(
         "create index if not exists notifications_pending on notifications (pushed, retry_at, id)",
         [],
@@ -311,8 +330,12 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
     conn.execute(
         "update notifications set push_cancelled = 1
          where pushed = 0 and push_cancelled = 0 and kind = 'nudge'
-         and not exists (select 1 from player_settings
-                         where user = notifications.recipient and nudges = 1)",
+         and ((sender = '' and not exists (select 1 from player_settings
+                         where user = notifications.recipient and nudges = 1))
+           or (sender != '' and (not exists (select 1 from player_settings
+                         where user = notifications.recipient and friend_nudges = 1)
+               or exists (select 1 from friend_nudge_muted_senders
+                         where recipient = notifications.recipient and sender = notifications.sender))))",
         [],
     )?;
     Ok(())
@@ -813,6 +836,76 @@ impl Store {
             .unwrap_or(false))
     }
 
+    pub fn friend_nudges_receiving(&self, user: &str) -> Result<bool, Error> {
+        Ok(self
+            .conn
+            .query_row(
+                "select friend_nudges from player_settings where user = ?1",
+                [user],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn friend_nudge_muted(&self, recipient: &str, sender: &str) -> Result<bool, Error> {
+        Ok(self.conn.query_row(
+            "select exists(select 1 from friend_nudge_muted_senders where recipient = ?1 and sender = ?2)",
+            params![recipient, sender],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn friend_nudges_enabled(&self, recipient: &str, sender: &str) -> Result<bool, Error> {
+        Ok(self.friend_nudges_receiving(recipient)?
+            && !self.friend_nudge_muted(recipient, sender)?)
+    }
+
+    pub fn set_friend_nudges(&mut self, user: &str, enabled: bool) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "insert into player_settings (user, friend_nudges) values (?1, ?2)
+             on conflict (user) do update set friend_nudges = excluded.friend_nudges",
+            params![user, enabled],
+        )?;
+        if !enabled {
+            tx.execute(
+                "update notifications set push_cancelled = 1
+                 where recipient = ?1 and kind = 'nudge' and sender != '' and pushed = 0",
+                [user],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_friend_nudge_muted(
+        &mut self,
+        recipient: &str,
+        sender: &str,
+        muted: bool,
+    ) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        if muted {
+            tx.execute(
+                "insert or ignore into friend_nudge_muted_senders (recipient, sender) values (?1, ?2)",
+                params![recipient, sender],
+            )?;
+            tx.execute(
+                "update notifications set push_cancelled = 1
+                 where recipient = ?1 and sender = ?2 and kind = 'nudge' and pushed = 0",
+                params![recipient, sender],
+            )?;
+        } else {
+            tx.execute(
+                "delete from friend_nudge_muted_senders where recipient = ?1 and sender = ?2",
+                params![recipient, sender],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn celebrations_enabled(&self, user: &str) -> Result<bool, Error> {
         Ok(self
             .conn
@@ -844,7 +937,7 @@ impl Store {
         if !enabled {
             tx.execute(
                 "update notifications set push_cancelled = 1
-                 where recipient = ?1 and kind = 'nudge' and pushed = 0",
+                 where recipient = ?1 and kind = 'nudge' and sender = '' and pushed = 0",
                 [user],
             )?;
         }
@@ -1061,8 +1154,12 @@ impl Store {
                          union all select recipient,sender from sender_unsubscriptions)
                                  where recipient = notifications.recipient
                                  and sender = notifications.sender)))
-             and (kind != 'nudge' or exists (select 1 from player_settings
-                                            where user = notifications.recipient and nudges = 1))",
+             and (kind != 'nudge' or (sender = '' and exists (select 1 from player_settings
+                                            where user = notifications.recipient and nudges = 1))
+                 or (sender != '' and exists (select 1 from player_settings
+                                            where user = notifications.recipient and friend_nudges = 1)
+                     and not exists (select 1 from friend_nudge_muted_senders
+                                     where recipient = notifications.recipient and sender = notifications.sender)))",
             params![id, now_ms + PUSH_LEASE_MS, now_ms, now_ms - INBOX_AGE_MS],
         )? > 0)
     }
@@ -1993,6 +2090,56 @@ pub(crate) mod tests {
         assert_eq!(ready, ids[2..]);
         assert_eq!(store.notifications("hill", NOW).unwrap().len(), 4);
         assert_eq!(store.notifications("friend", NOW).unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn friend_and_automatic_nudge_opt_outs_cancel_only_their_own_pending_pushes() {
+        let (mut store, path) = temporary_store();
+        store.set_nudges("hill", true).unwrap();
+        store.set_friend_nudges("hill", true).unwrap();
+        let notice = |from| Outgoing {
+            to: "hill",
+            from,
+            title: "Time for Anki?",
+            body: "Study today",
+            kind: "nudge",
+        };
+        let automatic = store.send(&notice(""), DAY, NOW).unwrap();
+        let friend = store.send(&notice("cerro"), DAY, NOW).unwrap();
+        store.set_friend_nudges("hill", false).unwrap();
+        assert!(store.begin_push(automatic, NOW).unwrap());
+        assert!(!store.begin_push(friend, NOW).unwrap());
+
+        store.set_friend_nudges("hill", true).unwrap();
+        let another_friend = store.send(&notice("cerro"), DAY, NOW).unwrap();
+        let another_automatic = store.send(&notice(""), DAY, NOW).unwrap();
+        store.set_nudges("hill", false).unwrap();
+        assert!(store.begin_push(another_friend, NOW).unwrap());
+        assert!(!store.begin_push(another_automatic, NOW).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn existing_nudge_choices_migrate_to_friend_choices_once() {
+        let (store, path) = temporary_store();
+        store.conn.execute_batch(
+            "drop table player_settings;
+             create table player_settings (user text primary key, nudges integer not null default 0) without rowid;
+             insert into player_settings (user, nudges) values ('hill', 1), ('cerro', 0);",
+        ).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.nudges_enabled("hill").unwrap());
+        assert!(store.friend_nudges_receiving("hill").unwrap());
+        assert!(!store.friend_nudges_receiving("cerro").unwrap());
+        store.set_friend_nudges("hill", false).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.nudges_enabled("hill").unwrap());
+        assert!(!store.friend_nudges_receiving("hill").unwrap());
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

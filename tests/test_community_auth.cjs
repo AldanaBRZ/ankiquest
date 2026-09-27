@@ -25,7 +25,7 @@ async function fixture(t, session = saved, options = {}) {
   page.setDefaultTimeout(10000);
   page.setDefaultNavigationTimeout(15000);
   const errors = [], requests = [];
-  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, replies: [], receiving:false, nudged:false };
+  const control = { reject: false, hold: null, cookieUser:options.cookieUser || null, replies: [], receiving:false, automatic:false, muted:{}, nudged:false };
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(session => {
     window.storageWrites = [];
@@ -54,10 +54,12 @@ async function fixture(t, session = saved, options = {}) {
       if(control.hold)await control.hold;
       if(request.method()==='POST') {
         if(url.pathname.endsWith('/receiving'))control.receiving=request.postDataJSON().enabled;
+        else if(url.pathname.endsWith('/automatic'))control.automatic=request.postDataJSON().enabled;
+        else if(url.pathname.includes('/senders/'))control.muted[decodeURIComponent(url.pathname.split('/').pop())]=!request.postDataJSON().enabled;
         else control.nudged=true;
         return route.fulfill({status:204});
       }
-      data={receiving:control.receiving,friends:[{user:'hill',display:'Hill',enabled:true,sent_today:control.nudged},{user:'friend',display:'Friend',enabled:false,sent_today:false}]};
+      data={receiving:control.receiving,automatic_receiving:control.automatic,friends:[{user:'hill',display:'Hill',enabled:true,sent_today:control.nudged,muted_by_me:!!control.muted.hill},{user:'friend',display:'Friend',enabled:false,sent_today:false,muted_by_me:!!control.muted.friend}]};
     }
     else if (url.pathname.startsWith('/api/activity/')) {
       data = {items:options.activityItems || [{id:1,sender:'hill',kind:'message',title:'Saved encouragement',body:'Nice studying!',created_at:Math.floor(Date.now()/1000),read_at:null}], unread_count:1,next_before:options.activityBefore||null};
@@ -104,6 +106,8 @@ test('Spanish friend nudges preserve the selected recipient and daily limit', as
   await page.getByRole('button',{name:'Dar un toque a amigos',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Da un toque a tus amigos',exact:true});
   await dialog.locator('[data-nudge-user="hill"]').waitFor();
+  await dialog.getByText('Permitir que mis amigos me den toques',{exact:true}).waitFor();
+  await dialog.getByText('Permitir que AnkiQuest me envíe toques de progreso',{exact:true}).waitFor();
   assert.equal(await dialog.locator('[data-nudge-user="friend"]').isEnabled(),false);
   await dialog.locator('[data-nudge-user="hill"]').click();
   await dialog.getByText('¡Toque enviado!',{exact:true}).waitFor();
@@ -285,6 +289,31 @@ test('friend nudges select the recipient and show opt-out and daily limits', asy
   const posts=requests.filter(request=>request.method==='POST'&&request.url.startsWith('/api/friend-nudges/'));
   assert.deepEqual(posts.map(request=>request.body),[{enabled:true},{recipient:'hill'}]);
   assert.ok(posts.every(request=>request.auth==='Bearer saved-token'));
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+});
+
+test('friend, automatic and per-friend nudge choices save independently', async t => {
+  const {page,requests}=await fixture(t);
+  await page.evaluate(()=>showView('challenges'));
+  await page.getByRole('button',{name:'Nudge friends',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Nudge your friends',exact:true});
+  await dialog.locator('[data-nudge-user="hill"]').waitFor();
+  await dialog.locator('[data-nudge-receiving]').check();
+  await dialog.getByText('Preference saved.',{exact:true}).waitFor();
+  await dialog.locator('[data-nudge-automatic]').check();
+  await dialog.getByText('Preference saved.',{exact:true}).waitFor();
+  await dialog.locator('[data-nudge-sender="hill"]').uncheck();
+  await dialog.getByText('Preference saved.',{exact:true}).waitFor();
+  assert.equal(await dialog.locator('[data-nudge-receiving]').isChecked(),true);
+  assert.equal(await dialog.locator('[data-nudge-automatic]').isChecked(),true);
+  assert.equal(await dialog.locator('[data-nudge-sender="hill"]').isChecked(),false);
+  assert.equal(await dialog.locator('[data-nudge-sender="friend"]').isChecked(),true);
+  assert.deepEqual(requests.filter(r=>r.method==='POST'&&r.url.startsWith('/api/friend-nudges/')).map(r=>[r.url,r.body]),[
+    ['/api/friend-nudges/cerro/receiving',{enabled:true}],
+    ['/api/friend-nudges/cerro/automatic',{enabled:true}],
+    ['/api/friend-nudges/cerro/senders/hill',{enabled:false}],
+  ]);
+  await page.setViewportSize({width:320,height:700});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
 });
 

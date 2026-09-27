@@ -16,11 +16,13 @@ struct Friend {
     display: String,
     enabled: bool,
     sent_today: bool,
+    muted_by_me: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct Settings {
     receiving: bool,
+    automatic_receiving: bool,
     friends: Vec<Friend>,
 }
 
@@ -43,7 +45,7 @@ fn send(
     recipient: &str,
     now: i64,
 ) -> Result<StatusCode, Error> {
-    if !store.nudges_enabled(recipient)? {
+    if !store.friend_nudges_enabled(recipient, sender)? {
         return Ok(StatusCode::FORBIDDEN);
     }
     let day = store.clock(sender)?.day(now);
@@ -87,13 +89,19 @@ async fn settings(
         friends.push(Friend {
             user: recipient.clone(),
             display: app.display(recipient),
-            enabled: store.nudges_enabled(recipient).map_err(store_error)?,
+            enabled: store
+                .friend_nudges_enabled(recipient, &user)
+                .map_err(store_error)?,
             sent_today: sent(&store, &user, recipient, day).map_err(store_error)?,
+            muted_by_me: store
+                .friend_nudge_muted(&user, recipient)
+                .map_err(store_error)?,
         });
     }
     friends.sort_by(|a, b| a.display.cmp(&b.display).then(a.user.cmp(&b.user)));
     Ok(Json(Settings {
-        receiving: store.nudges_enabled(&user).map_err(store_error)?,
+        receiving: store.friend_nudges_receiving(&user).map_err(store_error)?,
+        automatic_receiving: store.nudges_enabled(&user).map_err(store_error)?,
         friends,
     }))
 }
@@ -148,7 +156,44 @@ async fn receiving(
     app.store
         .lock()
         .unwrap()
+        .set_friend_nudges(&user, request.enabled)
+        .map_err(store_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn automatic_receiving(
+    State(app): State<Arc<App>>,
+    Path(user): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<Receiving>,
+) -> Result<StatusCode, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    app.store
+        .lock()
+        .unwrap()
         .set_nudges(&user, request.enabled)
+        .map_err(store_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sender_receiving(
+    State(app): State<Arc<App>>,
+    Path((user, sender)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<Receiving>,
+) -> Result<StatusCode, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if sender == user || !app.config.users.contains_key(&sender) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    app.store
+        .lock()
+        .unwrap()
+        .set_friend_nudge_muted(&user, &sender, !request.enabled)
         .map_err(store_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -158,6 +203,14 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/friend-nudges.js", get(script))
         .route("/api/friend-nudges/{user}", get(settings).post(nudge))
         .route("/api/friend-nudges/{user}/receiving", post(receiving))
+        .route(
+            "/api/friend-nudges/{user}/automatic",
+            post(automatic_receiving),
+        )
+        .route(
+            "/api/friend-nudges/{user}/senders/{sender}",
+            post(sender_receiving),
+        )
 }
 
 async fn script() -> impl IntoResponse {
@@ -214,7 +267,11 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
-        app.store.lock().unwrap().set_nudges("hill", true).unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .set_friend_nudges("hill", true)
+            .unwrap();
         for expected in [StatusCode::NO_CONTENT, StatusCode::CONFLICT] {
             let response = routes()
                 .with_state(app.clone())
@@ -229,6 +286,85 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn changing_friend_nudges_does_not_disable_automatic_progress_nudges() {
+        let (mut store, path) = crate::decks::tests::temporary_store();
+        store.set_nudges("hill", true).unwrap();
+        let config = serde_json::from_value(serde_json::json!({"users": {
+            "cerro":{"token":"cerro-secret"},"hill":{"token":"hill-secret"}
+        }}))
+        .unwrap();
+        let app = Arc::new(App {
+            access: crate::access::Access::default(),
+            config,
+            week: crate::game::Week::default(),
+            store: Mutex::new(store),
+            players: RwLock::new(Default::default()),
+        });
+        let response = routes()
+            .with_state(app.clone())
+            .oneshot(
+                HttpRequest::post("/api/friend-nudges/hill/receiving")
+                    .header("Authorization", "Bearer hill-secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            app.store.lock().unwrap().nudges_enabled("hill").unwrap(),
+            "automatic progress reminders remain on when friend nudges are disabled"
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_the_recipient_can_change_a_specific_friend_nudge_choice() {
+        let (store, path) = crate::decks::tests::temporary_store();
+        let config = serde_json::from_value(serde_json::json!({"users": {
+            "cerro":{"token":"cerro-secret"},"hill":{"token":"hill-secret"}
+        }}))
+        .unwrap();
+        let app = Arc::new(App {
+            access: crate::access::Access::default(),
+            config,
+            week: crate::game::Week::default(),
+            store: Mutex::new(store),
+            players: RwLock::new(Default::default()),
+        });
+        for (owner, sender, token, expected) in [
+            ("hill", "cerro", "cerro-secret", StatusCode::UNAUTHORIZED),
+            ("hill", "hill", "hill-secret", StatusCode::BAD_REQUEST),
+            ("hill", "missing", "hill-secret", StatusCode::BAD_REQUEST),
+            ("hill", "cerro", "hill-secret", StatusCode::NO_CONTENT),
+        ] {
+            let response = routes()
+                .with_state(app.clone())
+                .oneshot(
+                    HttpRequest::post(format!("/api/friend-nudges/{owner}/senders/{sender}"))
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(r#"{"enabled":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert!(
+            app.store
+                .lock()
+                .unwrap()
+                .friend_nudge_muted("hill", "cerro")
+                .unwrap()
+        );
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -250,8 +386,8 @@ mod tests {
             )
             .unwrap()
         );
-        store.set_nudges("hill", true).unwrap();
-        store.set_nudges("friend", true).unwrap();
+        store.set_friend_nudges("hill", true).unwrap();
+        store.set_friend_nudges("friend", true).unwrap();
         assert_eq!(
             send(&mut store, "cerro", "Cerro", "hill", now).unwrap(),
             StatusCode::OK
@@ -281,6 +417,46 @@ mod tests {
         assert_eq!(
             send(&mut store, "cerro", "Cerro", "hill", now + 86_400_000).unwrap(),
             StatusCode::OK
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn muting_one_friend_preserves_other_friends_and_automatic_nudges() {
+        let (mut store, path) = crate::decks::tests::temporary_store();
+        let now = 1_800_000_000_000;
+        store.set_nudges("hill", true).unwrap();
+        store.set_friend_nudges("hill", true).unwrap();
+        assert_eq!(
+            send(&mut store, "cerro", "Cerro", "hill", now).unwrap(),
+            StatusCode::OK
+        );
+        let pending: i64 = store.conn.query_row(
+            "select id from notifications where recipient = 'hill' and sender = 'cerro' and kind = 'nudge'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        store.set_friend_nudge_muted("hill", "cerro", true).unwrap();
+        assert!(!store.begin_push(pending, now).unwrap());
+        assert_eq!(
+            send(&mut store, "cerro", "Cerro", "hill", now + 86_400_000).unwrap(),
+            StatusCode::FORBIDDEN,
+        );
+        assert_eq!(
+            send(&mut store, "friend", "Friend", "hill", now).unwrap(),
+            StatusCode::OK
+        );
+        assert!(store.nudges_enabled("hill").unwrap());
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.friend_nudge_muted("hill", "cerro").unwrap());
+        store
+            .set_friend_nudge_muted("hill", "cerro", false)
+            .unwrap();
+        assert_eq!(
+            send(&mut store, "cerro", "Cerro", "hill", now + 86_400_000).unwrap(),
+            StatusCode::OK,
         );
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
