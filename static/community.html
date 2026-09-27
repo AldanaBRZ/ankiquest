@@ -242,7 +242,16 @@ function reminderFormValues(form) {
 function dateTime(value) { if(value===null||value===undefined) return "—"; const parsed=new Date(value);return Number.isNaN(parsed.getTime())?String(value):parsed.toLocaleDateString(AnkiQuestI18n.language,{month:"short",day:"numeric",year:"numeric"}); }
 function progressBar(progress,target) { const percent=target?Math.min(100,amount(progress)/amount(target)*100):0;return aqHtml`<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${amount(target)}" aria-valuenow="${Math.min(amount(target),amount(progress))}" aria-label="Challenge progress"><i style="width:${percent}%"></i></div>`; }
 function challengeEnded(challenge) {
-  return ["ended", "cancelled"].includes(challenge.status) || Date.now() >= Number(challenge.end_at);
+  return ["ended", "cancelled", "declined"].includes(challenge.status) || Date.now() >= Number(challenge.end_at);
+}
+function renderWeeklySuggestion(suggestion) {
+  if (!suggestion) return "";
+  const content = suggestion.challenge_id
+    ? aqHtml`<p>Invitation sent. Your friend can choose whether to join.</p><a class="button-link" href="#challenge-${encodeURIComponent(suggestion.challenge_id)}">View weekly goal</a>`
+    : suggestion.dismissed
+      ? aqHtml`<p>Skipped this week. You can still start a custom friend goal.</p>`
+      : aqHtml`<div class="list-row">${avatar(suggestion.friend.user,suggestion.friend.display)}<strong>${esc(suggestion.friend.display)}</strong></div><p>Study on 3 days each over seven days.</p><p class="settings-hint">Your seven days start after both of you agree.</p><p class="settings-hint">Reply by ${esc(dateTime(suggestion.expires_at))}</p><div class="actions"><button class="primary" type="button" data-weekly-action="invite" ${state.challengeSaving ? "disabled" : ""}>Invite friend</button><button type="button" data-weekly-action="dismiss" ${state.challengeSaving ? "disabled" : ""}>Not this week</button></div>`;
+  return aqHtml`<article class="card weekly-suggestion" data-weekly-start="${esc(suggestion.week_start)}"><h2>Your weekly suggestion</h2>${content}<p class="settings-hint">Next suggestion: ${esc(dateTime(suggestion.expires_at))}</p></article>`;
 }
 function renderChallenges(banner) {
   const payload = state.challenges;
@@ -259,6 +268,7 @@ function renderChallenges(banner) {
   const ended = challenges.filter(challengeEnded).slice().reverse();
   const group = (title, items, description) => aqHtml`<section class="challenge-group" aria-label="${esc(title)}"><div class="card-head"><div><h2>${title}</h2><p>${description}</p></div></div><div class="stack">${items.map(item => renderChallenge(item)).join("")}</div></section>`;
   $("view-challenges").innerHTML = banner + aqHtml`<div class="card-head friend-heading"><div><h2>Your friend goals</h2><p>Your own decks, a little encouragement.</p></div><button class="primary" type="button" data-create-challenge>Start a friend goal</button><button type="button" data-nudge-friends>Nudge friends</button><button type="button" data-private-retry class="link-button">Refresh</button></div>${feedback}` +
+    renderWeeklySuggestion(payload.weekly_suggestion) +
     (invited.length ? group(aqText("Invitations"), invited, aqText("Choose what fits your week. Joining is always optional.")) : "") +
     (active.length ? group(aqText("In progress"), active, aqText("Only studying after you join counts toward your goal.")) : "") +
     (!invited.length && !active.length ? aqHtml`<article class="card">${empty(aqText("A little progress with a friend."), aqText("Invite someone to study alongside you. Your own decks and pace stay yours."))}</article>` : "") +
@@ -271,16 +281,19 @@ function renderFriendAchievements() {
 }
 function renderChallenge(challenge, detail = false) {
   const me = challenge.members.find(member => member.user === state.session.user), ended = challengeEnded(challenge);
-  const unit = challenge.kind === "reviews" ? aqText("reviews") : aqText("study days"), accepted = challenge.members.filter(member => member.status === "accepted");
+  const waiting = challenge.weekly && !challenge.started;
+  const unit = challenge.kind === "reviews" ? aqText("reviews") : aqText("study days");
   const own = me?.progress || 0, progress = challenge.cooperative ? challenge.progress : own;
   const invited = me?.status === "invited" && !ended;
   const actions = [];
   if (invited) actions.push(["accept", aqText("Accept invitation"), "primary"], ["decline", aqText("Decline"), ""]);
   if (detail && me?.status === "accepted" && !ended && challenge.creator !== state.session.user) actions.push(["leave", aqText("Leave goal"), ""]);
   if (detail && challenge.creator === state.session.user && !ended) actions.push(["cancel", aqText("End goal for everyone"), ""]);
-  const status = invited ? aqText("You're invited") : challenge.status === "complete" ? aqText("Goal reached") : ended ? challenge.status === "cancelled" ? aqText("Ended early") : aqText("Ended") : aqText("In progress");
-  const explanation = challenge.cooperative ? `Your accepted members contribute toward one total of ${number(challenge.target)} ${unit}. Contributions can be different sizes.` : `Each person has their own target of ${number(challenge.target)} ${unit}.`;
-  return aqHtml`<article class="card challenge" data-goal="${esc(challenge.id)}"><div class="toolbar"><h3>${esc(challenge.title)}</h3>${chip(status, invited ? "blue" : challenge.status === "complete" ? "green" : "")}</div><p class="challenge-meta">${challenge.cooperative ? aqText("One shared total") : aqText("Individual targets")} · Ends ${esc(dateTime(challenge.end_at))}</p><p class="settings-hint">${esc(explanation)}</p>${invited ? aqHtml`<p>${esc(name(challenge.creator))} invited you. Only studying after you accept counts.</p>` : ""}${challenge.cooperative || me?.status === "accepted" ? aqHtml`${progressBar(progress, challenge.target)}<p class="settings-hint">${number(progress)} / ${number(challenge.target)} ${unit}${challenge.cooperative ? aqText(" together") : aqText(" for you")}</p>` : ""}<div class="members">${challenge.members.map(member => aqHtml`<div class="member">${avatar(member.user, member.display)}<span>${esc(member.display)}${member.user === state.session.user ? aqText(" · you") : ""}</span><small>${member.status === "accepted" ? `${number(member.progress)} ${unit}` : esc(member.status)}</small></div>`).join("")}</div>${detail ? aqHtml`<p class="settings-hint">${esc(dateTime(challenge.start_at))} – ${esc(dateTime(challenge.end_at))}. ${challenge.kind === "study_days" ? aqText("A studied Anki day counts once per person; streak freezes do not count.") : aqText("Reviews after accepting count toward your goal. Your deck's review schedule stays unchanged.")}</p>` : ""}<div class="actions">${actions.map(([action, label, style]) => aqHtml`<button type="button" class="${style}" data-challenge-action="${action}" data-challenge-id="${esc(challenge.id)}">${label}</button>`).join("")}${!detail ? aqHtml`<a class="button-link" href="#challenge-${encodeURIComponent(challenge.id)}">Details</a>` : ""}</div></article>`;
+  const status = invited ? aqText("You're invited") : challenge.status === "complete" ? aqText("Goal reached") : ended ? challenge.status === "declined" ? aqText("Invitation declined") : challenge.status === "cancelled" ? aqText("Ended early") : aqText("Ended") : waiting ? aqText("Waiting for your friend") : aqText("In progress");
+  const explanation = waiting ? aqText("Your seven days start after both of you agree.") : challenge.weekly ? aqText("Study on 3 days each over seven days.") : challenge.cooperative ? `Your accepted members contribute toward one total of ${number(challenge.target)} ${unit}. Contributions can be different sizes.` : `Each person has their own target of ${number(challenge.target)} ${unit}.`;
+  const title = challenge.weekly ? aqText(challenge.title) : challenge.title;
+  const timing = waiting ? ended ? aqText("Not started") : aqText`Reply by ${dateTime(challenge.end_at)}` : aqText`Ends ${dateTime(challenge.end_at)}`;
+  return aqHtml`<article class="card challenge" data-goal="${esc(challenge.id)}"><div class="toolbar"><h3>${esc(title)}</h3>${chip(status, invited ? "blue" : challenge.status === "complete" ? "green" : "")}</div><p class="challenge-meta">${challenge.cooperative ? aqText("One shared total") : aqText("Individual targets")} · ${esc(timing)}</p><p class="settings-hint">${esc(explanation)}</p>${invited ? aqHtml`<p>${esc(name(challenge.creator))} invited you. Only studying after you accept counts.</p>` : ""}${!waiting && (challenge.cooperative || me?.status === "accepted") ? aqHtml`${progressBar(progress, challenge.target)}<p class="settings-hint">${number(progress)} / ${number(challenge.target)} ${unit}${challenge.cooperative ? aqText(" together") : aqText(" for you")}</p>` : ""}<div class="members">${challenge.members.map(member => aqHtml`<div class="member">${avatar(member.user, member.display)}<span>${esc(member.display)}${member.user === state.session.user ? aqText(" · you") : ""}</span><small>${waiting ? member.status === "accepted" ? aqText("Ready when you are") : esc(aqText(member.status)) : member.status === "accepted" ? `${number(member.progress)} ${unit}` : esc(member.status)}</small></div>`).join("")}</div>${detail ? aqHtml`<p class="settings-hint">${waiting ? aqText("Studying before you both agree does not count toward this goal.") : `${esc(dateTime(challenge.start_at))} – ${esc(dateTime(challenge.end_at))}.`} ${challenge.kind === "study_days" ? aqText("A studied Anki day counts once per person; streak freezes do not count.") : aqText("Reviews after accepting count toward your goal. Your deck's review schedule stays unchanged.")}</p>` : ""}<div class="actions">${actions.map(([action, label, style]) => aqHtml`<button type="button" class="${style}" data-challenge-action="${action}" data-challenge-id="${esc(challenge.id)}">${label}</button>`).join("")}${!detail ? aqHtml`<a class="button-link" href="#challenge-${encodeURIComponent(challenge.id)}">Details</a>` : ""}</div></article>`;
 }
 function openChallengeCreator() {
   if (!state.session || !state.challenges || $("challenge-dialog").open) return;
@@ -515,6 +528,7 @@ document.addEventListener("click",event=>{
   if(["shared","lifetime"].includes(button.dataset.trophyWinScope)) { state.winnerScope=button.dataset.trophyWinScope;renderTrophies();document.querySelector(`[data-trophy-win-scope="${state.winnerScope}"]`)?.focus(); }
   if(button.dataset.monthStep) { const next=new Date(Date.UTC(state.year,state.month-1+Number(button.dataset.monthStep),1));state.year=next.getUTCFullYear();state.month=next.getUTCMonth()+1;loadData(); }
   if(button.dataset.challengeAction)actOnChallenge(button);
+  if(button.dataset.weeklyAction)actOnWeeklySuggestion(button);
   if(button.hasAttribute("data-create-challenge"))openChallengeCreator();
   if(button.hasAttribute("data-activity-refresh")){loadActivity();if(state.activityBox==="sent")loadSent();}
   if(button.hasAttribute("data-activity-more"))loadActivity(true);
@@ -582,6 +596,23 @@ async function actOnChallenge(button) {
   try{const payload=await ownerRequest(`/api/community/challenges/${encodeURIComponent(session.user)}/${encodeURIComponent(id)}`,{action},session);if(state.session!==session)return;state.challenges=payload;state.challengeError=false;state.challengeStatus=({accept:aqText("You joined. Studying from now on counts toward your goal."),decline:aqText("Invitation declined. Your study progress is unchanged."),leave:aqText("You left the goal."),cancel:aqText("Goal ended. Its recorded progress is kept.")})[action];renderPrivate();loadActivity();}
   catch(error){if(state.session===session){state.challengeError=true;state.challengeStatus=error instanceof TypeError?aqText("Could not reach the server. Your choice has not been confirmed. Refresh and try again."):error.message;renderPrivate();}}
   finally{controls.forEach(control=>control.disabled=false);}
+}
+async function actOnWeeklySuggestion(button) {
+  const session=state.session,suggestion=state.challenges?.weekly_suggestion;
+  if(!session||!suggestion||state.challengeSaving||button.disabled)return;
+  const action=button.dataset.weeklyAction;
+  state.challengeSaving=true;state.challengeError=false;state.challengeStatus=aqText("Updating goal…");renderPrivate();
+  try {
+    const payload=await ownerRequest(`/api/community/challenges/${encodeURIComponent(session.user)}/weekly`,{week_start:suggestion.week_start,action},session);
+    if(state.session!==session)return;
+    state.challenges=payload;state.challengeStatus=action==="invite"?aqText("Invitation sent. Your friend can choose whether to join."):aqText("Skipped this week. You can still start a custom friend goal.");
+    loadActivity();
+  } catch(error) {
+    if(state.session!==session)return;
+    state.challengeError=true;state.challengeStatus=error instanceof TypeError?aqText("Could not reach the server. Your choice has not been confirmed. Refresh and try again."):error.message;
+  } finally {
+    if(state.session===session){state.challengeSaving=false;renderPrivate();}
+  }
 }
 window.addEventListener("hashchange",()=>showView(location.hash.slice(1)));
 window.addEventListener("pagehide",clearPrivate);

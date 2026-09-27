@@ -69,9 +69,19 @@ Only finalized, complete periods starting on or after the shared date count. Wee
 
 ## Creating and leaving challenges
 
+### Weekly suggestion
+
+**Friends** offers one private suggestion each shared competition week: a rotating configured friend and an individual target of **three study days each**. The same suggestion stays available across refreshes and server restarts. Opening the page sends no invitation. Choose **Invite friend**, or **Not this week** to skip it. Skipping persists until the next Monday at the shared competition cutoff; custom goals remain available.
+
+The friend must accept before either player's progress or the seven-day timer starts. Studying before that acceptance is excluded for both people. The invitation expires at the next shared week boundary, but an accepted goal gets its own full seven-day duration. Declining or cancelling an invitation does not start a goal. Expired, declined, cancelled, and accepted invitations cannot produce later queued invitation pushes. Retries do not create another invitation or restart a timer.
+
+Suggestions use configured members with an upload token; they do not inspect private deck lists or choose a new recipient silently if the suggested member is removed. An installation with no other eligible member has no weekly suggestion. Titles, controls, and notices support English and Spanish.
+
+### Custom goals
+
 Choose a name, measure, target, duration, and 1–30 friends. Names allow 1–80 characters; duration is 1–31 days; targets are 1–100,000. A study-day target must fit the duration and participant count. Creators can have at most ten uncancelled challenges whose deadlines have not passed.
 
-Challenges start immediately. The creator is accepted automatically; invited players' activity counts only after acceptance. Review progress excludes future timestamps and activity at or after the deadline. Study days use each participant's Anki clock, and a shared goal counts each participant's study day separately.
+Custom challenges start immediately. The creator is accepted automatically; invited players' activity counts only after acceptance. Review progress excludes future timestamps and activity at or after the deadline. Study days use each participant's Anki clock, and a shared goal counts each participant's study day separately.
 
 Only accepted or invited members can retrieve the challenge list. Invitees can accept or decline; accepted invitees can leave; the creator can cancel. Declining or leaving removes the challenge from that player's list and removes their contribution from the shared total. A reached goal can still be cancelled before its deadline, freeing an open-challenge slot. Cancelled and expired challenges preserve their details for remaining members.
 
@@ -87,8 +97,9 @@ Private member routes require `Authorization: Bearer <token>` for the `{user}` i
 | `GET /api/winners` | Community `{meta, shared, lifetime, waiting_players}`. Both scopes include player identities, first recorded study dates, and `day_wins`, `week_wins`, `month_wins`; `shared` also includes the comparison start date, player count, and eligible competition counts. Uses the same archive and import safeguards as `/api/community`. |
 | `GET /api/community/reminders/{user}` | Current reminder settings. |
 | `POST /api/community/reminders/{user}` | Full replacement: booleans `gentle_daily`, `urgent_streak`, `freeze_used`, `freeze_refill`, `milestone`, `weekly_closing`, `weekly_recap`; numeric `reminder_hour`, `quiet_start`, `quiet_end`, `daily_limit`. Returns saved settings. |
-| `GET /api/community/challenges/{user}` | `{challenges, recipients}`; recipients are eligible configured accounts. |
+| `GET /api/community/challenges/{user}` | `{challenges, recipients, weekly_suggestion}`; recipients are eligible configured accounts. `weekly_suggestion` is null when unavailable; otherwise it includes `week_start`, `expires_at`, `friend`, `target`, `duration_days`, `dismissed`, and nullable `challenge_id`. Challenges include `weekly` and `started` flags. |
 | `POST /api/community/challenges/{user}` | `{title, kind, cooperative, target, duration_days, recipients}`. `kind` is `study_days` or `reviews`; `recipients` contains player IDs. Returns the updated list. |
 | `POST /api/community/challenges/{user}/{id}` | `{action: "accept" \| "decline" \| "leave" \| "cancel"}`. Returns the updated list. |
+| `POST /api/community/challenges/{user}/weekly` | `{week_start, action: "invite" \| "dismiss"}`. Requires the current suggestion's millisecond `week_start`; clients cannot supply a recipient or different target. Returns the updated list. |
 
 Competition dates are ISO dates; period `end` is exclusive. Daily and weekly keys are `YYYY-MM-DD`, and monthly keys are `YYYY-MM`. Challenge `start_at` and `end_at` are Unix **milliseconds**. An empty installation returns no invented winners and can have `meta.start_date: null`.

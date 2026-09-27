@@ -169,6 +169,27 @@ async function main() {
   const saved=await page.evaluate(()=>({local:JSON.stringify(localStorage),session:JSON.stringify(sessionStorage),cookies:document.cookie}));for(const v of Object.values(saved))assert(!v.includes(token)&&!v.includes(password)&&!v.includes('ankiquest_session'));
   await page.getByRole('button',{name:'Lock site'}).click();await page.waitForURL('**/login?*');assert.equal((await page.request.get(base+'/api/activity/alice')).status(),401);
   checks.push('offline retry preserves activity; no secrets in JS storage; logout revokes owner access');
+  // Exercise the generated suggestion through the compiled server, not a routed mock.
+  await signIn(page,token);
+  const weeklyDraft=(await api('/api/community/challenges/alice')).weekly_suggestion;
+  assert(weeklyDraft && !weeklyDraft.challenge_id);
+  await page.locator('[data-weekly-action=invite]').click();
+  await page.getByText('Waiting for your friend',{exact:true}).waitFor();
+  const waitingList=await api('/api/community/challenges/alice');
+  const weeklyId=waitingList.weekly_suggestion.challenge_id;
+  const waiting=waitingList.challenges.find(goal=>goal.id===weeklyId);
+  assert(waiting.weekly && !waiting.started);assert.equal(waiting.progress,0);
+  assert.equal(await page.locator(`[data-goal="${weeklyId}"] [role=progressbar]`).count(),0);
+  await api('/api/community/challenges/alice/weekly',{week_start:weeklyDraft.week_start,action:'invite'});
+  assert.equal((await api('/api/community/challenges/alice')).challenges.length,waitingList.challenges.length);
+  const buddyToken=weeklyDraft.friend.user==='bob'?bobToken:'test-cleo-token';
+  const accepted=await api(`/api/community/challenges/${weeklyDraft.friend.user}/${weeklyId}`,{action:'accept'},buddyToken);
+  const active=accepted.challenges.find(goal=>goal.id===weeklyId);
+  assert(active.started);assert.equal(active.end_at-active.start_at,7*86400000);
+  const retry=await api(`/api/community/challenges/${weeklyDraft.friend.user}/${weeklyId}`,{action:'accept'},buddyToken);
+  assert.equal(retry.challenges.find(goal=>goal.id===weeklyId).start_at,active.start_at);
+  await page.reload();await page.locator(`[data-goal="${weeklyId}"] [role=progressbar]`).waitFor();
+  checks.push('compiled-server weekly suggestion: explicit invitation, both consent before progress, full seven days and no duplicate/restarted retry');
   assert.deepEqual(errors,[]);
   const result={checks,errors,sourceAssets,output:out};fs.writeFileSync(path.join(out,'results.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }

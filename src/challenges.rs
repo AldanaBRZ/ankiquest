@@ -78,6 +78,8 @@ pub struct Challenge {
     pub members: Vec<Member>,
     pub progress: u64,
     pub status: String,
+    pub weekly: bool,
+    pub started: bool,
 }
 
 pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
@@ -244,6 +246,7 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
     if cancelled || now >= end {
         return Err(Error::Invalid("This challenge has ended."));
     }
+    let waiting = crate::weekly_challenges::started(&tx, id)? == Some(false);
     match action {
         "cancel" if creator == user => {
             tx.execute(
@@ -256,6 +259,17 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
                 "update community_members set status='accepted',joined_at=?3 where challenge=?1 and user=?2 and status='invited'",
                 params![id,user,now],
             )?;
+            if waiting {
+                tx.execute(
+                    "update community_challenges set start_at=?2,end_at=?3 where id=?1",
+                    params![id, now, now + crate::weekly_challenges::DURATION_MS],
+                )?;
+                tx.execute("update community_members set joined_at=?2 where challenge=?1 and status='accepted'", params![id,now])?;
+                tx.execute(
+                    "update community_weekly_goals set started=1 where challenge=?1",
+                    [id],
+                )?;
+            }
             notice(&tx, &creator, user, id, &title, "challenge_accepted", now)?;
         }
         "decline" if status == "invited" => {
@@ -263,6 +277,12 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
                 "update community_members set status='declined',left_at=?3 where challenge=?1 and user=?2",
                 params![id,user,now],
             )?;
+            if waiting {
+                tx.execute(
+                    "update community_challenges set cancelled=1,end_at=min(end_at,?2) where id=?1",
+                    params![id, now],
+                )?;
+            }
         }
         "leave" if status == "accepted" && creator != user => {
             tx.execute(
@@ -282,12 +302,13 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
         where recipient=?1 and challenge_id=?2 and kind='challenge_invite'",
         params![user, id, now],
     )?;
+    crate::weekly_challenges::cancel_stale_invites(&tx, now)?;
     tx.commit()?;
     Ok(())
 }
 
 /// Commit event identity and delivery in the same transaction as membership changes.
-fn notice(
+pub(crate) fn notice(
     conn: &Connection,
     to: &str,
     from: &str,
@@ -304,16 +325,33 @@ fn notice(
     {
         return Ok(());
     }
-    let (heading, body) = match kind {
-        "challenge_invite" => (
-            "Challenge invitation",
-            format!("{from} invited you to {title}."),
-        ),
-        "challenge_accepted" => ("Invitation accepted", format!("{from} joined {title}.")),
-        _ => (
-            "Challenge complete",
-            format!("You reached the goal in {title}."),
-        ),
+    let (heading, body) = if crate::weekly_challenges::started(conn, id)?.is_some() {
+        match kind {
+            "challenge_invite" => (
+                "Weekly challenge invitation",
+                format!("{from} invited you to a weekly goal: study on 3 days each."),
+            ),
+            "challenge_accepted" => (
+                "Weekly challenge started",
+                format!("{from} accepted your weekly goal. Your seven days start now."),
+            ),
+            _ => (
+                "Weekly challenge complete",
+                "You both finished your weekly goal. Well done!".into(),
+            ),
+        }
+    } else {
+        match kind {
+            "challenge_invite" => (
+                "Challenge invitation",
+                format!("{from} invited you to {title}."),
+            ),
+            "challenge_accepted" => ("Invitation accepted", format!("{from} joined {title}.")),
+            _ => (
+                "Challenge complete",
+                format!("You reached the goal in {title}."),
+            ),
+        }
     };
     conn.execute(
         "insert into notifications(recipient,sender,title,body,day,created_at,kind,challenge_id)
@@ -335,6 +373,7 @@ fn notice(
 /// Progress is derived from reviews, so completion events are reconciled after
 /// review uploads/polls and before personal challenge or Activity reads.
 pub fn refresh(store: &mut Store, players: &[Participant], now: i64) -> Result<(), crate::Error> {
+    crate::weekly_challenges::cancel_stale_invites(&store.conn, now)?;
     let creators = store
         .conn
         .prepare(
@@ -414,6 +453,9 @@ pub fn list(
         .collect::<Result<Vec<_>, _>>()?;
     let mut challenges = Vec::new();
     for (id, title, kind, cooperative, creator, start_at, end_at, target, cancelled) in rows {
+        let weekly_started = crate::weekly_challenges::started(&store.conn, id)?;
+        let weekly = weekly_started.is_some();
+        let started = weekly_started.unwrap_or(true);
         let kind = if kind == "study_days" {
             Kind::StudyDays
         } else {
@@ -437,7 +479,8 @@ pub fn list(
                 let player = players.iter().find(|p| p.user == member);
                 let mut count = 0;
                 let mut days = BTreeSet::new();
-                if status == "accepted"
+                if started
+                    && status == "accepted"
                     && let (Some(player), Some(joined)) = (player, joined)
                 {
                     for review in &player.reviews {
@@ -463,26 +506,33 @@ pub fn list(
             })
             .collect();
         let progress = members.iter().map(|m| m.progress).sum();
-        let complete = if cooperative {
-            progress >= target
-        } else {
-            !members.iter().any(|m| m.status == "invited")
-                && members
-                    .iter()
-                    .filter(|m| m.status == "accepted")
-                    .all(|m| m.progress >= target)
-        };
-        let status = if cancelled {
-            "cancelled"
-        } else if complete {
-            "complete"
-        } else if now >= end_at {
-            "ended"
-        } else if now < start_at {
-            "upcoming"
-        } else {
-            "active"
-        };
+        let complete = started
+            && (!weekly || members.iter().all(|m| m.status == "accepted"))
+            && if cooperative {
+                progress >= target
+            } else {
+                !members.iter().any(|m| m.status == "invited")
+                    && members
+                        .iter()
+                        .filter(|m| m.status == "accepted")
+                        .all(|m| m.progress >= target)
+            };
+        let status =
+            if cancelled && weekly && !started && members.iter().any(|m| m.status == "declined") {
+                "declined"
+            } else if cancelled {
+                "cancelled"
+            } else if complete {
+                "complete"
+            } else if now >= end_at {
+                "ended"
+            } else if !started {
+                "waiting"
+            } else if now < start_at {
+                "upcoming"
+            } else {
+                "active"
+            };
         challenges.push(Challenge {
             id,
             title,
@@ -495,6 +545,8 @@ pub fn list(
             members,
             progress,
             status: status.into(),
+            weekly,
+            started,
         });
     }
     Ok(challenges)

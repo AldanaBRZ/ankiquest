@@ -11,6 +11,7 @@ mod i18n;
 mod reminders;
 mod store;
 mod subscriptions;
+mod weekly_challenges;
 
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -1090,6 +1091,16 @@ async fn set_reminders(
 struct ChallengeList {
     challenges: Vec<challenges::Challenge>,
     recipients: Vec<decks::Recipient>,
+    weekly_suggestion: Option<weekly_challenges::Suggestion>,
+}
+
+fn challenge_roster(app: &App) -> std::collections::BTreeMap<String, String> {
+    app.config
+        .users
+        .iter()
+        .filter(|(_, config)| config.token.as_deref().is_some_and(|t| !t.is_empty()))
+        .map(|(name, _)| (name.clone(), app.display(name)))
+        .collect()
 }
 
 type ChallengeFailure = (StatusCode, Json<serde_json::Value>);
@@ -1136,6 +1147,13 @@ fn challenge_list(
     Ok(ChallengeList {
         challenges: challenges::list(store, user, players, now_ms())?,
         recipients,
+        weekly_suggestion: weekly_challenges::suggestion(
+            store,
+            user,
+            &challenge_roster(app),
+            &app.week,
+            now_ms(),
+        )?,
     })
 }
 
@@ -1212,6 +1230,34 @@ async fn act_on_challenge(
             Json(serde_json::json!({"error":"Unable to refresh challenges."})),
         )
     })?;
+    challenge_list(&app, &store, &user, &participants)
+        .map(Json)
+        .map_err(challenge_error)
+}
+
+async fn act_on_weekly_challenge(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Json(action): Json<weekly_challenges::Action>,
+) -> Result<Json<ChallengeList>, ChallengeFailure> {
+    if !authorized(&app, &user, &headers) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"Check your player and token."})),
+        ));
+    }
+    let mut store = app.store.lock().unwrap();
+    let participants = app.participants();
+    weekly_challenges::act(
+        &mut store,
+        &user,
+        &action,
+        &challenge_roster(&app),
+        &app.week,
+        now_ms(),
+    )
+    .map_err(challenge_error)?;
     challenge_list(&app, &store, &user, &participants)
         .map(Json)
         .map_err(challenge_error)
@@ -1787,6 +1833,10 @@ fn router(app: Arc<App>) -> Router {
             "/api/community/challenges/{user}/{id}",
             post(act_on_challenge),
         )
+        .route(
+            "/api/community/challenges/{user}/weekly",
+            post(act_on_weekly_challenge),
+        )
         .route("/api/week", get(week_info))
         .route("/api/profile/{user}", get(profile))
         .route("/api/preview/{user}", post(preview))
@@ -2116,6 +2166,85 @@ mod tests {
                 .0
                 .urgent_streak
         );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn weekly_suggestions_require_the_owner_and_cannot_choose_arbitrary_recipients() {
+        let (app, path) = fixture();
+        for auth in [headers("hill"), HeaderMap::new()] {
+            assert_eq!(
+                get_challenges(State(app.clone()), UrlPath("cerro".into()), auth.clone())
+                    .await
+                    .err()
+                    .unwrap()
+                    .0,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                act_on_weekly_challenge(
+                    State(app.clone()),
+                    UrlPath("cerro".into()),
+                    auth,
+                    Json(weekly_challenges::Action {
+                        week_start: 0,
+                        action: "invite".into()
+                    })
+                )
+                .await
+                .err()
+                .unwrap()
+                .0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let draft = get_challenges(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+        )
+        .await
+        .unwrap()
+        .0
+        .weekly_suggestion
+        .unwrap();
+        let action = || weekly_challenges::Action {
+            week_start: draft.week_start,
+            action: "invite".into(),
+        };
+        let goal = act_on_weekly_challenge(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(action()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(goal.challenges.len(), 1);
+        assert_eq!(goal.challenges[0].status, "waiting");
+        assert!(
+            goal.challenges[0]
+                .members
+                .iter()
+                .any(|m| m.user == draft.friend.user && m.status == "invited")
+        );
+        assert_eq!(
+            act_on_weekly_challenge(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("cerro"),
+                Json(action())
+            )
+            .await
+            .unwrap()
+            .0
+            .challenges
+            .len(),
+            1
+        );
+        assert!(serde_json::from_value::<weekly_challenges::Action>(serde_json::json!({"week_start":draft.week_start,"action":"invite","recipient":"someone-else"})).is_err());
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }
