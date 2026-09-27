@@ -89,6 +89,20 @@ pub struct Notification {
     pub action_required: bool,
 }
 
+/// A reply or friend nudge this player wrote; `read_at` is when the recipient read it.
+#[derive(Debug, Serialize)]
+pub struct Sent {
+    pub recipient: String,
+    #[serde(flatten)]
+    pub notice: Notification,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SentPage {
+    pub items: Vec<Sent>,
+    pub next_before: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Activity {
     pub items: Vec<Notification>,
@@ -274,6 +288,10 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
     }
     conn.execute(
         "create index if not exists notifications_pending on notifications (pushed, retry_at, id)",
+        [],
+    )?;
+    conn.execute(
+        "create index if not exists notifications_sender on notifications (sender, id)",
         [],
     )?;
     // Older servers left nudges queued after opt-out. Retain their inbox history
@@ -710,6 +728,61 @@ impl Store {
         Ok(())
     }
 
+    /// Marks everything up to `through` read, so items that arrived after the
+    /// reader's last refresh stay unread.
+    pub fn read_all_activity(
+        &mut self,
+        user: &str,
+        through: i64,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "update notifications set read_at=?3 where recipient=?1 and id<=?2
+            and push_only=0 and read_at is null and created_at>=?4",
+            params![user, through, now_ms, now_ms - ACTIVITY_AGE_MS],
+        )?;
+        Ok(())
+    }
+
+    pub fn sent(
+        &self,
+        user: &str,
+        now_ms: i64,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<SentPage, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "select {NOTICE_COLUMNS},n.recipient from notifications n
+            where n.sender=?1 and n.kind in ('reply','nudge') and n.push_only=0
+            and n.created_at>=?3 and (?4 is null or n.id<?4)
+            order by n.id desc limit ?5"
+        ))?;
+        let mut items = stmt
+            .query_map(
+                params![
+                    user,
+                    now_ms,
+                    now_ms - ACTIVITY_AGE_MS,
+                    before,
+                    i64::from(limit) + 1
+                ],
+                |row| {
+                    Ok(Sent {
+                        notice: notification(row)?,
+                        recipient: row.get(11)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_before = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|item| item.notice.id)
+        } else {
+            None
+        };
+        Ok(SentPage { items, next_before })
+    }
+
     pub fn nudges_enabled(&self, user: &str) -> Result<bool, Error> {
         Ok(self
             .conn
@@ -973,6 +1046,103 @@ impl Store {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn read_all_stops_at_what_the_reader_saw() {
+        let (mut store, _path) = temporary_store();
+        let mut send = |to: &str| {
+            store
+                .send(
+                    &Outgoing {
+                        to,
+                        from: "sender",
+                        title: "Message",
+                        body: "Hello",
+                        kind: "message",
+                    },
+                    DAY,
+                    NOW,
+                )
+                .unwrap()
+        };
+        send("hill");
+        let seen = send("hill");
+        send("friend");
+        let later = send("hill");
+        store.read_all_activity("hill", seen, NOW).unwrap();
+        let activity = store.activity("hill", NOW, 90, None, 100).unwrap();
+        assert_eq!(activity.unread_count, 1);
+        assert!(
+            activity
+                .items
+                .iter()
+                .find(|n| n.id == later)
+                .unwrap()
+                .read_at
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .activity("friend", NOW, 90, None, 100)
+                .unwrap()
+                .unread_count,
+            1
+        );
+        store.read_all_activity("hill", i64::MAX, NOW).unwrap();
+        assert_eq!(
+            store
+                .activity("hill", NOW, 90, None, 100)
+                .unwrap()
+                .unread_count,
+            0
+        );
+    }
+
+    #[test]
+    fn sent_lists_only_handwritten_messages_with_when_they_were_read() {
+        let (mut store, _path) = temporary_store();
+        let mut send = |to: &str, from: &str, kind: &str, age_days: i64| {
+            store
+                .send(
+                    &Outgoing {
+                        to,
+                        from,
+                        title: "Title",
+                        body: "Body",
+                        kind,
+                    },
+                    DAY,
+                    NOW - age_days * 86_400_000,
+                )
+                .unwrap()
+        };
+        let nudge = send("friend", "hill", "nudge", 1);
+        let reply = send("friend", "hill", "reply", 0);
+        send("friend", "hill", "completion", 0);
+        send("friend", "", "nudge", 0);
+        send("hill", "friend", "reply", 0);
+        send("friend", "hill", "reply", 91);
+        store.read_activity("friend", &[reply], NOW).unwrap();
+        let page = store.sent("hill", NOW, None, 1).unwrap();
+        assert_eq!(page.items[0].notice.id, reply);
+        assert_eq!(page.items[0].recipient, "friend");
+        assert_eq!(page.items[0].notice.read_at, Some(NOW / 1000));
+        let next = store.sent("hill", NOW, page.next_before, 1).unwrap();
+        assert_eq!(
+            next.items.iter().map(|s| s.notice.id).collect::<Vec<_>>(),
+            [nudge]
+        );
+        assert!(next.items[0].notice.read_at.is_none());
+        assert_eq!(next.next_before, None);
+        assert!(
+            store
+                .sent("friend", NOW, None, 100)
+                .unwrap()
+                .items
+                .iter()
+                .all(|s| s.recipient == "hill")
+        );
+    }
 
     #[test]
     fn activity_retention_pagination_reads_and_delivery_are_independent() {

@@ -356,6 +356,7 @@ input:not([type=checkbox]):not([type=radio]), select { min-height:48px; }
 .activity-item.unread { border-left:4px solid var(--accent); }
 .activity-body { white-space:pre-wrap;overflow-wrap:anywhere; }
 .activity-item .actions { display:flex;gap:8px;flex-wrap:wrap;margin-top:12px; }
+.activity-box { display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:12px 0; }
 .activity-reply { border-top:1px solid var(--line);margin-top:18px;padding-top:18px; }
 .activity-reply input { width:100%; }
 .load-more { margin-top:20px;width:100%; }

@@ -750,7 +750,9 @@ async fn activity(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActivityRead {
+    #[serde(default)]
     ids: Vec<i64>,
+    through: Option<i64>,
 }
 
 async fn read_activity(
@@ -762,15 +764,52 @@ async fn read_activity(
     if !authorized(&app, &user, &headers) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if request.ids.len() > 200 || request.ids.iter().any(|id| *id <= 0) {
+    if request.ids.len() > 200
+        || request.ids.iter().any(|id| *id <= 0)
+        || request
+            .through
+            .is_some_and(|id| id <= 0 || !request.ids.is_empty())
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
-    app.store
-        .lock()
-        .unwrap()
-        .read_activity(&user, &request.ids, now_ms())
-        .map_err(store_error)?;
+    let mut store = app.store.lock().unwrap();
+    match request.through {
+        Some(through) => store.read_all_activity(&user, through, now_ms()),
+        None => store.read_activity(&user, &request.ids, now_ms()),
+    }
+    .map_err(store_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SentQuery {
+    before: Option<i64>,
+    limit: Option<u32>,
+}
+
+async fn sent_activity(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<SentQuery>,
+) -> Result<Json<decks::SentPage>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit) || query.before.is_some_and(|id| id <= 0) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let store = app.store.lock().unwrap();
+    let language = i18n::owned(&headers, &store, &user).map_err(store_error)?;
+    let mut page = store
+        .sent(&user, now_ms(), query.before, limit)
+        .map_err(store_error)?;
+    for item in &mut page.items {
+        i18n::notification(&mut item.notice, &language, &app.display(&user));
+    }
+    Ok(Json(page))
 }
 
 #[derive(Debug, Serialize)]
@@ -1755,6 +1794,7 @@ fn router(app: Arc<App>) -> Router {
             get(get_incoming_preferences).post(set_deck_subscriptions),
         )
         .route("/api/activity/{user}/read", post(read_activity))
+        .route("/api/activity/{user}/sent", get(sent_activity))
         .route("/api/reply/{user}", post(reply))
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
