@@ -629,6 +629,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn weekly_actions_route_to_the_owner_and_require_cookie_csrf() {
+        let (app, path) = fixture(false);
+        let response = request(
+            &app,
+            "GET",
+            "/api/community/challenges/alice",
+            &[("authorization", "Bearer alice-token")],
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let body=serde_json::json!({"week_start":data["weekly_suggestion"]["week_start"],"action":"invite"}).to_string();
+        for token in ["Bearer bob-token", "Bearer shared-master"] {
+            assert_eq!(
+                request(
+                    &app,
+                    "POST",
+                    "/api/community/challenges/alice/weekly",
+                    &[
+                        ("authorization", token),
+                        ("content-type", "application/json")
+                    ],
+                    &body
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let cookie = session_header(
+            &request(
+                &app,
+                "POST",
+                "/auth/session",
+                &[("authorization", "Bearer alice-token")],
+                "",
+            )
+            .await,
+        );
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/community/challenges/alice/weekly",
+                &[("cookie", &cookie), ("content-type", "application/json")],
+                &body
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = request(
+            &app,
+            "POST",
+            "/api/community/challenges/alice/weekly",
+            &[
+                ("cookie", &cookie),
+                ("x-ankiquest-csrf", "1"),
+                ("content-type", "application/json"),
+            ],
+            &body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(data["challenges"][0]["status"], "waiting");
+        let response = request(
+            &app,
+            "POST",
+            "/api/community/challenges/alice/weekly",
+            &[
+                ("authorization", "Bearer alice-token"),
+                ("content-type", "application/json"),
+            ],
+            &body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        cleanup(app, path);
+    }
+
+    #[tokio::test]
     async fn native_member_bootstrap_rotates_owner_and_never_falls_back_from_a_bad_bearer() {
         // Member-cookie CSRF is enforced in public mode too.
         let (app, path) = fixture(false);

@@ -82,6 +82,7 @@ impl Store {
         crate::competition::initialize(&conn)?;
         crate::reminders::initialize(&conn)?;
         crate::challenges::initialize(&conn)?;
+        crate::weekly_challenges::initialize(&conn)?;
         conn.execute_batch("create table if not exists community_refresh (id integer primary key, refreshed_at integer not null);")?;
         Ok(Self {
             conn,
