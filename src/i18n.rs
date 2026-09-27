@@ -319,7 +319,9 @@ pub fn notification(notice: &mut crate::decks::Notification, language: &str, sen
             notice.body = text(&notice.body, language);
         }
     } else {
-        notice.body = if notice.kind == "event" && notice.title.ends_with(" new unlocks") {
+        notice.body = if matches!(notice.kind.as_str(), "event" | "celebration")
+            && notice.title.ends_with(" new unlocks")
+        {
             notice
                 .body
                 .split(", ")
@@ -336,6 +338,31 @@ pub fn notification(notice: &mut crate::decks::Notification, language: &str, sen
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn celebrations_speak_spanish() {
+        let mut notice = crate::decks::Notification {
+            id: 1,
+            title: "New best 24 hours!".into(),
+            body: "1200 XP in 24 hours, beating your old best of 900 XP.".into(),
+            day: 0,
+            created_at: 0,
+            sender: String::new(),
+            replied: false,
+            kind: "celebration".into(),
+            read_at: None,
+            challenge_id: None,
+            route: None,
+            action_required: false,
+        };
+        notification(&mut notice, "es", "");
+        assert_eq!(notice.title, "¡Nuevo récord en 24 horas!");
+        assert_eq!(
+            notice.body,
+            "1200 XP en 24 horas: has superado tu récord anterior de 900 XP."
+        );
+        assert_eq!(text("50-day streak!", "es"), "¡Racha de 50 días!");
+    }
+
     #[test]
     fn language_tags_templates_and_fallback() {
         assert_eq!(normalize("es_MX"), "es");

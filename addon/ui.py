@@ -178,6 +178,9 @@ def deck_dialog(parent, settings):
     nudges = QCheckBox(tr("Nudge me when a place, my best day or the next level is within reach"))
     nudges.setChecked(bool(settings.get("nudges")))
     layout.addWidget(nudges)
+    celebrations = QCheckBox(tr("Celebrate achievements, streak milestones and personal bests"))
+    celebrations.setChecked(settings.get("celebrations") is not False)
+    layout.addWidget(celebrations)
 
     every = QPushButton(tr("All / none"))
 
@@ -196,7 +199,7 @@ def deck_dialog(parent, settings):
     shared = [deck["id"] for deck, item in zip(decks, items) if item.checkState(0) == checked]
     unshared = [deck["id"] for deck, item in zip(decks, items) if item.checkState(0) != checked]
     picked = [user for user, box in recipients.items() if box.isChecked()]
-    return shared, unshared, picked, nudges.isChecked()
+    return shared, unshared, picked, nudges.isChecked(), celebrations.isChecked()
 
 
 def _titled(title, widget):

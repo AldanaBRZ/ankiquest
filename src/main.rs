@@ -508,6 +508,7 @@ fn deck_settings(app: &App, store: &Store, user: &str) -> Result<decks::Settings
             })
             .collect(),
         nudges: store.nudges_enabled(user)?,
+        celebrations: store.celebrations_enabled(user)?,
     })
 }
 
@@ -553,6 +554,11 @@ async fn set_decks(
         .map_err(store_error)?;
     if let Some(nudges) = update.nudges {
         store.set_nudges(&user, nudges).map_err(store_error)?;
+    }
+    if let Some(celebrations) = update.celebrations {
+        store
+            .set_celebrations(&user, celebrations)
+            .map_err(store_error)?;
     }
     deck_settings(&app, &store, &user)
         .map(Json)
@@ -819,6 +825,8 @@ struct RecordHolder {
     value: u64,
     detail: u64,
     at: i64,
+    /// For rolling windows, the last review inside it; otherwise the same as `at`.
+    until: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -832,18 +840,19 @@ fn podium(
     window: &str,
     unit: &'static str,
     profiles: &[Profile],
-    of: impl Fn(&Profile) -> (u64, u64, i64),
+    of: impl Fn(&Profile) -> (u64, u64, i64, i64),
 ) -> RecordBoard {
     let mut holders: Vec<RecordHolder> = profiles
         .iter()
         .map(|player| (player, of(player)))
-        .filter(|(_, (value, _, _))| *value > 0)
-        .map(|(player, (value, detail, at))| RecordHolder {
+        .filter(|(_, (value, _, _, _))| *value > 0)
+        .map(|(player, (value, detail, at, until))| RecordHolder {
             user: player.user.clone(),
             display: player.display.clone(),
             value,
             detail,
             at,
+            until,
         })
         .collect();
     holders.sort_by_key(|holder| std::cmp::Reverse((holder.value, holder.detail)));
@@ -855,7 +864,7 @@ fn podium(
     }
 }
 
-/// The best hour, day, week, month and year anyone here has ever had, plus the
+/// The best rolling hour, 24 hours, 7, 30 and 365 days anyone here has ever had, plus the
 /// longest streak and the most days studied. Each names whoever came closest,
 /// so a near miss is visible rather than hidden.
 async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordBoard>> {
@@ -865,7 +874,7 @@ async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordBoard>> {
         .map(|window| {
             podium(window, "xp", &profiles, |player| {
                 let record = player.records.get(window);
-                (record.xp, record.reviews, record.at)
+                (record.xp, record.reviews, record.at, record.until)
             })
         })
         .collect();
@@ -874,10 +883,16 @@ async fn records(State(app): State<Arc<App>>) -> Json<Vec<RecordBoard>> {
             player.lifetime.best_streak,
             0,
             player.lifetime.best_streak_at,
+            player.lifetime.best_streak_at,
         )
     }));
     board.push(podium("days", "days", &profiles, |player| {
-        (player.lifetime.days_active, 0, player.lifetime.first_day_at)
+        (
+            player.lifetime.days_active,
+            0,
+            player.lifetime.first_day_at,
+            player.lifetime.first_day_at,
+        )
     }));
     Json(board)
 }
@@ -3020,6 +3035,7 @@ mod tests {
                 Json(decks::SettingsUpdate {
                     decks: vec![],
                     nudges: Some(false),
+                    celebrations: None,
                 }),
             )
             .await
@@ -3034,6 +3050,7 @@ mod tests {
                     Json(decks::SettingsUpdate {
                         decks: vec![],
                         nudges: Some(true),
+                        celebrations: None,
                     }),
                 )
                 .await
@@ -3342,6 +3359,7 @@ mod tests {
                 recipients: recipients.iter().map(|r| (*r).into()).collect(),
             }],
             nudges: None,
+            celebrations: None,
         }
     }
 
@@ -3923,6 +3941,7 @@ mod tests {
             Json(decks::SettingsUpdate {
                 decks: vec![],
                 nudges: Some(true),
+                celebrations: None,
             }),
         )
         .await
@@ -4438,6 +4457,7 @@ mod tests {
                     recipients: vec![],
                 }],
                 nudges: None,
+                celebrations: None,
             },
             decks::SettingsUpdate {
                 decks: vec![
@@ -4453,6 +4473,7 @@ mod tests {
                     },
                 ],
                 nudges: None,
+                celebrations: None,
             },
         ] {
             assert_eq!(

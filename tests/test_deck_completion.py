@@ -178,6 +178,14 @@ class DeckSnapshotTests(unittest.TestCase):
 
 
 class UploadTests(unittest.TestCase):
+    def test_celebrations_are_saved_only_when_chosen(self):
+        api = client.Client("https://example.test", "cerro", "token")
+        api._request = Mock()
+        api.save_deck_settings([], [], [], True)
+        self.assertNotIn("celebrations", api._request.call_args.args[1])
+        api.save_deck_settings([], [], [], True, False)
+        self.assertIs(api._request.call_args.args[1]["celebrations"], False)
+
     def test_optional_decks_keep_existing_upload_shape(self):
         api = client.Client("https://example.test", "cerro", "token")
         api._request = Mock()
@@ -279,18 +287,18 @@ class RefreshTests(unittest.TestCase):
         self.api.shared_decks = Mock(return_value=["1", "3"])
         self.api.deck_settings = Mock(return_value={"decks": [], "recipients": []})
         self.api.save_deck_settings = Mock()
-        self.addon.ui.deck_dialog.return_value = (["1", "3"], ["2"], ["hill"], True)
+        self.addon.ui.deck_dialog.return_value = (["1", "3"], ["2"], ["hill"], True, False)
         self.addon.open_deck_notifications()
         self.assertEqual(self.addon.deck_snapshots.call_args.kwargs, {})
         self.assertTrue(self.api.upload.call_args.kwargs["catalog"])
         self.assertTrue(self.api.upload.call_args.args[2], "a catalog upload never announces")
-        self.api.save_deck_settings.assert_called_once_with(["1", "3"], ["2"], ["hill"], True)
+        self.api.save_deck_settings.assert_called_once_with(["1", "3"], ["2"], ["hill"], True, False)
         self.assertEqual(self.mw.pm.profile["ankiquestSharedDecks"], ["1", "3"])
 
     def test_sharing_without_anyone_to_tell_is_refused(self):
         self.api.deck_settings = Mock(return_value={"decks": [], "recipients": []})
         self.api.save_deck_settings = Mock()
-        self.addon.ui.deck_dialog.return_value = (["1"], [], [], False)
+        self.addon.ui.deck_dialog.return_value = (["1"], [], [], False, True)
         self.addon.open_deck_notifications()
         self.api.save_deck_settings.assert_not_called()
 
