@@ -567,7 +567,7 @@ pub fn nudges(profile: &Profile, ahead: Option<(&str, u64)>) -> Vec<Nudge> {
             key: format!("nudge:record:{}", profile.day),
             title: cheer(1).into(),
             body: format!(
-                "{short_of_best} XP from your best day ever ({best} XP), about {} more {}.",
+                "{short_of_best} XP from your best 24 hours ({best} XP), about {} more {}.",
                 reviews_for(short_of_best),
                 plural(reviews_for(short_of_best), "review", "reviews")
             ),
@@ -589,15 +589,16 @@ fn plural(count: u64, one: &'static str, many: &'static str) -> &'static str {
     if count == 1 { one } else { many }
 }
 
-/// The best a player has ever managed within one window, and when it started.
+/// The best a player has ever managed within one window: from its first to its last review.
 #[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Record {
     pub xp: u64,
     pub reviews: u64,
     pub at: i64,
+    pub until: i64,
 }
 
-/// Personal bests over the windows the leaderboard uses, the hour rolling.
+/// Personal bests over rolling windows: 1 hour, 24 hours, 7, 30 and 365 days.
 #[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Records {
     pub hour: Record,
@@ -609,6 +610,21 @@ pub struct Records {
 
 impl Records {
     pub const NAMES: [&'static str; 5] = ["hour", "day", "week", "month", "year"];
+    pub const WINDOWS_MS: [i64; 5] = [
+        3_600_000,
+        86_400_000,
+        7 * 86_400_000,
+        30 * 86_400_000,
+        365 * 86_400_000,
+    ];
+    pub const TITLES: [&'static str; 5] = [
+        "New best hour!",
+        "New best 24 hours!",
+        "New best 7 days!",
+        "New best 30 days!",
+        "New best 365 days!",
+    ];
+    pub const SPANS: [&'static str; 5] = ["one hour", "24 hours", "7 days", "30 days", "365 days"];
 
     pub fn get(&self, window: &str) -> Record {
         match window {
@@ -621,49 +637,62 @@ impl Records {
     }
 }
 
-/// The best rolling hour in a player's whole history, by the XP its reviews earned.
-fn best_hour(earned: &[(i64, f64)]) -> Record {
+/// The best rolling window of `window_ms` over time-ordered `(at, xp, reviews)` entries.
+fn best_window(entries: &[(i64, f64, u64)], window_ms: i64) -> Record {
     let mut best = Record::default();
     let mut xp = 0.0;
+    let mut reviews = 0;
     let mut start = 0;
-    for (end, (at, gained)) in earned.iter().enumerate() {
+    for (at, gained, count) in entries {
         xp += gained;
-        while earned[start].0 <= at - 3_600_000 {
-            xp -= earned[start].1;
+        reviews += count;
+        while entries[start].0 <= at - window_ms {
+            xp -= entries[start].1;
+            reviews -= entries[start].2;
             start += 1;
         }
         let rounded = xp.round() as u64;
         if rounded > best.xp {
             best = Record {
                 xp: rounded,
-                reviews: (end - start + 1) as u64,
-                at: earned[start].0,
+                reviews,
+                at: entries[start].0,
+                until: *at,
             };
         }
     }
     best
 }
 
-/// The best sum over whole days that share a key, such as a week or a month.
-fn best_span(
+/// Reviews as they were earned, plus each day's bonus XP (quests, achievements,
+/// streak) at that day's last review, so rolling windows add up to the days they cover.
+fn timeline(
+    earned: &[(i64, f64)],
     day_xp: &BTreeMap<i64, u64>,
-    days: &BTreeMap<i64, DayStats>,
     clock: &Clock,
-    key: &dyn Fn(i64) -> i64,
-) -> Record {
-    let mut spans: BTreeMap<i64, Record> = BTreeMap::new();
-    for (day, xp) in day_xp {
-        let span = spans
-            .entry(key(clock.day_start_ms(*day)))
-            .or_insert(Record {
-                xp: 0,
-                reviews: 0,
-                at: clock.day_start_ms(*day),
-            });
-        span.xp += xp;
-        span.reviews += days.get(day).map_or(0, |d| d.reviews);
+) -> Vec<(i64, f64, u64)> {
+    let mut entries = Vec::with_capacity(earned.len() + day_xp.len());
+    let mut index = 0;
+    while index < earned.len() {
+        let day = clock.day(earned[index].0);
+        let mut reviewed = 0.0;
+        while index < earned.len() && clock.day(earned[index].0) == day {
+            entries.push((earned[index].0, earned[index].1, 1));
+            reviewed += earned[index].1;
+            index += 1;
+        }
+        let bonus = day_xp.get(&day).map_or(0.0, |xp| *xp as f64) - reviewed.round();
+        if bonus > 0.0 {
+            entries.push((earned[index - 1].0, bonus, 0));
+        }
     }
-    spans.into_values().max_by_key(|r| r.xp).unwrap_or_default()
+    entries
+}
+
+/// Streak lengths worth a message of their own, beyond any streak achievement.
+fn streak_milestone(streak: u64) -> bool {
+    matches!(streak, 7 | 30 | 50 | 100 | 200 | 365 | 500)
+        || (streak > 365 && streak.is_multiple_of(365))
 }
 
 /// XP earned in each leaderboard period. The hour counts review XP only, without
@@ -1252,27 +1281,59 @@ pub fn compute_with_freezes(
         all: xp_total,
     };
 
-    let records = Records {
-        hour: best_hour(&earned),
-        day: day_xp
-            .iter()
-            .map(|(day, xp)| Record {
-                xp: *xp,
-                reviews: days.get(day).map_or(0, |d| d.reviews),
-                at: clock.day_start_ms(*day),
-            })
-            .max_by_key(|r| r.xp)
-            .unwrap_or_default(),
-        week: best_span(&day_xp, &days, clock, &|start| {
-            let (year, number) = week.of(start);
-            year as i64 * 100 + number as i64
-        }),
-        month: best_span(&day_xp, &days, clock, &|start| {
-            let (year, month) = week.month_of(start);
-            year as i64 * 100 + month as i64
-        }),
-        year: best_span(&day_xp, &days, clock, &|start| week.year_of(start) as i64),
+    // The hour counts reviews only: a day's bonus would land in it as one lump.
+    let reviewed: Vec<(i64, f64, u64)> = earned.iter().map(|(at, xp)| (*at, *xp, 1)).collect();
+    let everything = timeline(&earned, &day_xp, clock);
+    let best = |window: usize, entries: &[(i64, f64, u64)]| {
+        best_window(entries, Records::WINDOWS_MS[window])
     };
+    let records = Records {
+        hour: best(0, &reviewed),
+        day: best(1, &everything),
+        week: best(2, &everything),
+        month: best(3, &everything),
+        year: best(4, &everything),
+    };
+    let today_start = clock.day_start_ms(today);
+    let studied_today = days.contains_key(&today);
+    for window in 0..Records::NAMES.len() {
+        let entries = if window == 0 { &reviewed } else { &everything };
+        let history_long_enough = entries
+            .first()
+            .is_some_and(|(at, _, _)| *at <= now_ms - Records::WINDOWS_MS[window]);
+        if !studied_today || !history_long_enough {
+            continue;
+        }
+        let before = best(
+            window,
+            &entries[..entries.partition_point(|(at, _, _)| *at < today_start)],
+        );
+        let now = records.get(Records::NAMES[window]);
+        if before.xp > 0 && now.xp > before.xp && now.until >= today_start {
+            events.push(Event {
+                key: format!("record:{}:{today}", Records::NAMES[window]),
+                title: Records::TITLES[window].into(),
+                body: format!(
+                    "{} XP in {}, beating your old best of {} XP.",
+                    now.xp,
+                    Records::SPANS[window],
+                    before.xp
+                ),
+            });
+        }
+    }
+    if studied_today
+        && streak_milestone(streak)
+        && !ACHIEVEMENTS
+            .iter()
+            .any(|d| matches!(d.metric, Metric::Streak) && d.threshold == streak)
+    {
+        events.push(Event {
+            key: format!("streak:{}:{streak}", today - streak as i64 + 1),
+            title: format!("{streak}-day streak!"),
+            body: format!("You have studied {streak} days in a row."),
+        });
+    }
 
     let now = days.get(&today).unwrap_or(&empty);
     let at_risk = streak > 0 && !days.contains_key(&today);
@@ -2111,15 +2172,109 @@ mod tests {
         reviews.extend(reviews_on(400, 5, 400));
         let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(400));
 
-        assert_eq!(p.records.day.reviews, 30, "the busiest day is the record");
-        assert_eq!(p.records.day.at, 40 * DAY_MS + 4 * 3_600_000);
+        assert_eq!(
+            p.records.day.reviews, 30,
+            "the busiest 24 hours is the record"
+        );
+        assert!((40 * DAY_MS + NOON..41 * DAY_MS).contains(&p.records.day.at));
+        assert!(p.records.day.until > p.records.day.at);
         assert!(p.records.day.xp >= p.periods.day);
-        assert_eq!(p.records.week.reviews, 35, "day 40 and 41 share a week");
+        assert_eq!(
+            p.records.week.reviews, 35,
+            "day 40 and 41 are within 7 days"
+        );
         assert!(p.records.week.xp > p.records.day.xp);
         assert_eq!(p.records.month.reviews, 35);
-        assert_eq!(p.records.year.reviews, 40, "days 1, 40 and 41 share a year");
+        assert_eq!(
+            p.records.year.reviews, 40,
+            "any 365 days hold three of the four days"
+        );
         assert_eq!(p.records.hour.reviews, 30, "one sitting, one hour");
         assert!(p.records.hour.xp > 0 && p.records.hour.xp <= p.records.day.xp);
+    }
+
+    #[test]
+    fn a_rolling_day_spans_the_anki_rollover() {
+        let at_hour = |day: i64, hour: i64, count: i64, cid: i64| -> Vec<Review> {
+            (0..count)
+                .map(|i| Review {
+                    id: day * DAY_MS + hour * 3_600_000 + i * 10_000,
+                    cid: cid + i,
+                    last_ivl: 0,
+                    time_ms: 5_000,
+                    kind: 1,
+                })
+                .collect()
+        };
+        let mut reviews = at_hour(5, 2, 10, 100);
+        reviews.extend(at_hour(5, 6, 10, 200));
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(6));
+        assert_ne!(utc().day(reviews[0].id), utc().day(reviews[19].id));
+        assert_eq!(p.records.day.reviews, 20, "two Anki days, one 24 hours");
+    }
+
+    #[test]
+    fn beating_a_personal_best_is_celebrated_with_the_old_best() {
+        let mut reviews = reviews_on(1, 5, 100);
+        reviews.extend(reviews_on(3, 20, 200));
+        let p = compute("a", "a", &reviews, &utc(), &Week::default(), at(3));
+        let records: Vec<&Event> = p
+            .events
+            .iter()
+            .filter(|e| e.key.starts_with("record:"))
+            .collect();
+        assert_eq!(
+            records.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+            ["record:hour:3", "record:day:3"],
+            "7 days of history are needed before a best week counts"
+        );
+        assert_eq!(records[1].title, "New best 24 hours!");
+        assert!(
+            records[1].body.contains("beating your old best of"),
+            "{}",
+            records[1].body
+        );
+
+        let mut slower = reviews_on(1, 20, 100);
+        slower.extend(reviews_on(3, 5, 200));
+        let p = compute("a", "a", &slower, &utc(), &Week::default(), at(3));
+        assert!(!p.events.iter().any(|e| e.key.starts_with("record:")));
+
+        let first_day = compute(
+            "a",
+            "a",
+            &reviews_on(3, 20, 200),
+            &utc(),
+            &Week::default(),
+            at(3),
+        );
+        assert!(
+            !first_day
+                .events
+                .iter()
+                .any(|e| e.key.starts_with("record:")),
+            "a first day beats nothing"
+        );
+    }
+
+    #[test]
+    fn streak_milestones_without_an_achievement_get_their_own_message() {
+        let fifty: Vec<i64> = (1..=50).collect();
+        let p = compute("a", "a", &history(&fifty), &utc(), &Week::default(), at(50));
+        assert_eq!(p.streak, 50);
+        assert!(
+            p.events
+                .iter()
+                .any(|e| e.key == "streak:1:50" && e.title == "50-day streak!")
+        );
+
+        let week: Vec<i64> = (1..=7).collect();
+        let p = compute("a", "a", &history(&week), &utc(), &Week::default(), at(7));
+        assert!(
+            !p.events.iter().any(|e| e.key.starts_with("streak:")),
+            "the Full Week achievement already says it"
+        );
+        assert!(p.events.iter().any(|e| e.key == "achievement:streak-7"));
     }
 
     #[test]

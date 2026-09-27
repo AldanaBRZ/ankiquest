@@ -38,6 +38,8 @@ pub struct SettingsUpdate {
     /// Left out by clients that predate nudges, which then keep their setting.
     #[serde(default)]
     pub nudges: Option<bool>,
+    #[serde(default)]
+    pub celebrations: Option<bool>,
 }
 
 /// Preferences owned by the recipient, independent of what senders choose to share.
@@ -67,6 +69,7 @@ pub struct Settings {
     pub decks: Vec<Deck>,
     pub recipients: Vec<Recipient>,
     pub nudges: bool,
+    pub celebrations: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,6 +289,15 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
             )?;
         }
     }
+    let celebrations = conn
+        .prepare("select 1 from pragma_table_info('player_settings') where name = 'celebrations'")?
+        .exists([])?;
+    if !celebrations {
+        conn.execute(
+            "alter table player_settings add column celebrations integer not null default 1",
+            [],
+        )?;
+    }
     conn.execute(
         "create index if not exists notifications_pending on notifications (pushed, retry_at, id)",
         [],
@@ -304,6 +316,12 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
         [],
     )?;
     Ok(())
+}
+
+fn is_celebration(key: &str) -> bool {
+    ["achievement:", "level:", "streak:", "record:"]
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 fn insert_notification(
@@ -795,6 +813,27 @@ impl Store {
             .unwrap_or(false))
     }
 
+    pub fn celebrations_enabled(&self, user: &str) -> Result<bool, Error> {
+        Ok(self
+            .conn
+            .query_row(
+                "select celebrations from player_settings where user = ?1",
+                [user],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(true))
+    }
+
+    pub fn set_celebrations(&mut self, user: &str, enabled: bool) -> Result<(), Error> {
+        self.conn.execute(
+            "insert into player_settings (user, celebrations) values (?1, ?2)
+             on conflict (user) do update set celebrations = excluded.celebrations",
+            params![user, enabled],
+        )?;
+        Ok(())
+    }
+
     pub fn set_nudges(&mut self, user: &str, enabled: bool) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -840,8 +879,10 @@ impl Store {
         Ok(())
     }
 
-    /// Preserve the existing grouped ntfy announcements without duplicating phone
-    /// inbox alerts. Accounts without ntfy retain the existing silent baseline.
+    /// Celebrations (achievements, levels, streak milestones, personal bests) become
+    /// inbox items every client shows, unless the player turned them off. Other events
+    /// keep the grouped ntfy-only announcements. A player's first run, with nothing
+    /// seen yet, only records history instead of celebrating all of it at once.
     pub fn queue_events(
         &mut self,
         user: &str,
@@ -850,7 +891,13 @@ impl Store {
         now_ms: i64,
         push_enabled: bool,
     ) -> Result<(), Error> {
+        let celebrate = self.celebrations_enabled(user)?;
         let tx = self.conn.transaction()?;
+        let baseline = !tx.query_row(
+            "select exists (select 1 from seen where user = ?1)",
+            [user],
+            |r| r.get::<_, bool>(0),
+        )?;
         let mut fresh = Vec::new();
         for event in events {
             if tx.execute(
@@ -861,24 +908,27 @@ impl Store {
                 fresh.push(event);
             }
         }
-        if push_enabled {
-            if fresh.len() > MAX_SEPARATE_PUSHES {
-                let titles: Vec<_> = fresh.iter().map(|event| event.title.as_str()).collect();
+        let (celebrations, others): (Vec<_>, Vec<_>) = fresh
+            .into_iter()
+            .partition(|event| is_celebration(&event.key));
+        let announce = |events: Vec<&Event>, kind: &str, push_only: bool| -> Result<(), Error> {
+            if events.len() > MAX_SEPARATE_PUSHES {
+                let titles: Vec<_> = events.iter().map(|event| event.title.as_str()).collect();
                 insert_notification(
                     &tx,
                     &Outgoing {
                         to: user,
                         from: "",
-                        title: &format!("{} new unlocks", fresh.len()),
+                        title: &format!("{} new unlocks", events.len()),
                         body: &titles.join(", "),
-                        kind: "event",
+                        kind,
                     },
                     day,
                     now_ms,
-                    true,
+                    push_only,
                 )?;
             } else {
-                for event in fresh {
+                for event in events {
                     insert_notification(
                         &tx,
                         &Outgoing {
@@ -886,14 +936,21 @@ impl Store {
                             from: "",
                             title: &event.title,
                             body: &event.body,
-                            kind: "event",
+                            kind,
                         },
                         day,
                         now_ms,
-                        true,
+                        push_only,
                     )?;
                 }
             }
+            Ok(())
+        };
+        if !baseline && celebrate && !celebrations.is_empty() {
+            announce(celebrations, "celebration", false)?;
+        }
+        if push_enabled && !others.is_empty() {
+            announce(others, "event", true)?;
         }
         tx.commit()?;
         Ok(())
@@ -2026,11 +2083,69 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn celebrations_reach_the_inbox_after_the_first_run_unless_turned_off() {
+        let (mut store, _path) = temporary_store();
+        let event = |key: &str| Event {
+            key: key.into(),
+            title: format!("Title {key}"),
+            body: "Body".into(),
+        };
+        store
+            .queue_events("hill", &[event("achievement:old")], DAY, NOW, false)
+            .unwrap();
+        assert!(
+            store.notifications("hill", NOW).unwrap().is_empty(),
+            "history is recorded, not celebrated, on a player's first run"
+        );
+        store
+            .queue_events(
+                "hill",
+                &[
+                    event("achievement:old"),
+                    event("record:day:1"),
+                    event("quest:1:0"),
+                ],
+                DAY,
+                NOW,
+                false,
+            )
+            .unwrap();
+        let inbox = store.notifications("hill", NOW).unwrap();
+        assert_eq!(inbox.len(), 1, "quests stay push-only events: {inbox:?}");
+        assert_eq!(
+            (inbox[0].kind.as_str(), inbox[0].title.as_str()),
+            ("celebration", "Title record:day:1")
+        );
+
+        let many: Vec<Event> = (0..5).map(|i| event(&format!("level:{i}"))).collect();
+        store.queue_events("hill", &many, DAY, NOW, false).unwrap();
+        let inbox = store.notifications("hill", NOW).unwrap();
+        assert_eq!(inbox.len(), 2);
+        assert_eq!(inbox[1].title, "5 new unlocks");
+
+        store.set_celebrations("hill", false).unwrap();
+        assert!(!store.celebrations_enabled("hill").unwrap());
+        store
+            .queue_events("hill", &[event("streak:1:50")], DAY, NOW, false)
+            .unwrap();
+        assert_eq!(store.notifications("hill", NOW).unwrap().len(), 2);
+        store.set_celebrations("hill", true).unwrap();
+        store
+            .queue_events("hill", &[event("streak:1:50")], DAY, NOW, false)
+            .unwrap();
+        assert_eq!(
+            store.notifications("hill", NOW).unwrap().len(),
+            2,
+            "turning them back on does not replay what was skipped"
+        );
+    }
+
+    #[test]
     fn seen_keys_and_notifications_commit_together_and_push_only_stays_private() {
         let (mut store, path) = temporary_store();
         let event = Event {
-            key: "level:2".into(),
-            title: "Level 2".into(),
+            key: "quest:1:0".into(),
+            title: "Quest complete".into(),
             body: "Well done".into(),
         };
         let message = Outgoing {
@@ -2079,7 +2194,7 @@ pub(crate) mod tests {
             .unwrap();
         assert!(store.notifications("friend", NOW).unwrap().is_empty());
         assert!(
-            !store.mark_seen("friend", "level:2").unwrap(),
+            !store.mark_seen("friend", "quest:1:0").unwrap(),
             "accounts without ntfy keep their silent event baseline"
         );
         drop(store);

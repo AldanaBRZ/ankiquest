@@ -415,7 +415,7 @@ function connectSettingsAuth({ user, form, input, controller, load, clear, show,
 let notificationDialogSession = 0;
 const PERIODS = { hour: aqText("This hour"), day: aqText("Today"), week: aqText("This week"), month: aqText("This month"), year: aqText("This year"), all: aqText("All time") };
 
-const WINDOWS = { hour: aqText("Best hour"), day: aqText("Best day"), week: aqText("Best week"), month: aqText("Best month"), year: aqText("Best year") };
+const WINDOWS = { hour: aqText("Best hour"), day: aqText("Best 24 hours"), week: aqText("Best 7 days"), month: aqText("Best 30 days"), year: aqText("Best 365 days") };
 const RECORDS = { ...WINDOWS, streak: aqText("Longest streak"), days: aqText("Days studied") };
 const SINCE = { streak: "ended", days: "since" };
 
@@ -451,6 +451,13 @@ function leaderboardKpis(rows, period) {
     AnkiQuestSite.kpi(aqText("Longest active streak"), num(bestStreak) + " days", aqText("One study day at a time"), "green") + aqHtml(['</div>']);
 }
 
+function span(window, at, until) {
+  const hours = window === "hour" || window === "day";
+  const format = new Intl.DateTimeFormat(AnkiQuestI18n.language, hours ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" } : { year: "numeric", month: "short", day: "numeric" });
+  const end = Number(until) > Number(at) ? until : at;
+  return typeof format.formatRange === "function" ? format.formatRange(new Date(at), new Date(end)) : format.format(new Date(at));
+}
+
 function records(rows, me) {
   const held = Object.fromEntries(rows.map(row => [row.window, row]));
   if (!rows.some(row => (row.holders ?? []).length)) return aqHtml`<p class="empty">Nobody has earned any XP yet.</p>`;
@@ -459,7 +466,7 @@ function records(rows, me) {
     const [best, ...rest] = row?.holders ?? [];
     if (!best) return "";
     const unit = row.unit === "days" ? aqText("days") : "XP";
-    const when = new Date(best.at).toLocaleDateString(AnkiQuestI18n.language, { year: "numeric", month: "short", day: "numeric" });
+    const when = SINCE[window] ? new Date(best.at).toLocaleDateString(AnkiQuestI18n.language, { year: "numeric", month: "short", day: "numeric" }) : span(window, best.at, best.until);
     const entry = (holder, place, lead) => aqHtml`
       <div class="entry ${lead ? "lead" : "chase"}${holder.user === me ? " mine" : ""}">
         <span class="place">${place}</span>
@@ -787,6 +794,10 @@ function openDeckSharing(user, display) {
         <label><input type="checkbox" id="nudge-enabled" ${data.nudges ? "checked" : ""}>Nudge me when a place, a personal best or a level is within reach</label>
         <p class="sub">At most one of each a day, while you are awake and have already studied.</p>
       </fieldset>
+      <fieldset id="celebration-settings">
+        <legend>Celebrations</legend>
+        <label><input type="checkbox" id="celebrations-enabled" ${data.celebrations !== false ? "checked" : ""}>Celebrate achievements, streak milestones and personal bests</label>
+      </fieldset>
       ${data.decks.length ? aqHtml`<p class="sub">Only selected people receive your name and the deck name. Changes apply to future completions.</p>` : ""}
       <button type="submit">Save preferences</button>
     </form>`;
@@ -825,6 +836,7 @@ function openDeckSharing(user, display) {
       });
     });
     form.querySelector("#nudge-enabled").addEventListener("change", () => say(aqText("Unsaved changes.")));
+    form.querySelector("#celebrations-enabled").addEventListener("change", () => say(aqText("Unsaved changes.")));
     form.addEventListener("submit", async event => {
       event.preventDefault();
       const decks = [...form.querySelectorAll("fieldset[data-deck]")].map((field, i) => ({
@@ -842,7 +854,7 @@ function openDeckSharing(user, display) {
       controls.forEach(control => { control.disabled = true; });
       say(aqText("Saving…"));
       try {
-        await request({ decks, nudges: form.querySelector("#nudge-enabled").checked });
+        await request({ decks, nudges: form.querySelector("#nudge-enabled").checked, celebrations: form.querySelector("#celebrations-enabled").checked });
         if (!closed && form.isConnected) say(aqText("Preferences saved."));
       } catch (error) {
         if (!closed && form.isConnected && error.name !== "AbortError") say(error.message, true);

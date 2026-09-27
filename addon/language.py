@@ -10,6 +10,7 @@ SPANISH = {
     "The people you pick hear once a day when you finish a shared deck.": "Se avisa una vez al día a las personas elegidas cuando completas un mazo compartido.",
     "Nobody else plays yet.": "Todavía no hay otros jugadores.", "All / none": "Todos / ninguno",
     "Nudge me when a place, my best day or the next level is within reach": "Dame un toque cuando pueda alcanzar un puesto, mi mejor día o el siguiente nivel",
+    "Celebrate achievements, streak milestones and personal bests": "Celebrar logros, rachas y récords personales",
     "#%d this week": "Puesto %d esta semana", "Lv %d  %s/%s XP": "Nv. %d  %s/%s XP",
     "🔥 %d day streak": "🔥 Racha de %d días", "streak at risk today": "racha en riesgo hoy", "📬 %d new": "📬 %d nuevos",
     "Set the server in ankiquest settings first.": "Configura primero el servidor en los ajustes de ankiquest.",
