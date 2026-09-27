@@ -13,10 +13,12 @@ def deck_snapshots(col, now_ms, offset_west_min, rollover_hour, only=None):
     The scheduler supplies daily-limit-aware counts, including subdecks. Its
     learning count only looks ahead a short time, so also include steps due
     later today. Cards in filtered decks belong to their original decks.
+    Today's window is the one Anki's own counts use; `day` is the server's
+    numbering, which Anki's days-since-creation `today` does not share.
     """
     day = study_day(now_ms, offset_west_min, rollover_hour)
-    start = day * DAY_MS + offset_west_min * 60_000 + rollover_hour * 3_600_000
-    end = start + DAY_MS
+    end = col.sched.day_cutoff * 1000
+    start = end - DAY_MS
     names = col.decks.all_names_and_ids(include_filtered=False)
     tree = col.sched.deck_due_tree()
     if tree is None:

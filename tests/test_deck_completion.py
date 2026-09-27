@@ -58,6 +58,7 @@ class DeckSnapshotTests(unittest.TestCase):
                 node(1, children=[node(2)]), node(3), node(9),
             ])),
             today=100,
+            day_cutoff=self.end // 1000,
         )
         self.col = SimpleNamespace(
             decks=self.decks, sched=self.scheduler,
@@ -149,6 +150,17 @@ class DeckSnapshotTests(unittest.TestCase):
         self.review(10, kind=4)
         self.review(99)  # deleted card
         self.assertEqual(self.snapshots()["1"]["reviewed_today"], 2)
+
+    def test_the_study_day_window_is_ankis_own(self):
+        cutoff = self.end - 3_600_000
+        self.scheduler.day_cutoff = cutoff // 1000
+        self.card(10, 1)
+        self.card(11, 1, queue=1, due=cutoff // 1000 + 60)
+        self.review(10, cutoff + 60_000)
+        snapshot = self.snapshots()["1"]
+        self.assertEqual(snapshot["reviewed_today"], 0)
+        self.assertEqual(snapshot["remaining"], 0)
+        self.assertEqual(snapshot["day"], self.day)
 
     def test_missing_counts_never_imply_completion(self):
         self.scheduler.deck_due_tree.return_value.children = []
