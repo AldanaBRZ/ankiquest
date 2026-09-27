@@ -136,7 +136,7 @@ impl Access {
         now: i64,
     ) -> Result<String, Error> {
         let mut random = [0u8; 32];
-        getrandom::getrandom(&mut random).map_err(|_| "session randomness unavailable")?;
+        getrandom::fill(&mut random).map_err(|_| "session randomness unavailable")?;
         let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let mut sessions = self.sessions.lock().unwrap();
         sessions.expires.retain(|_, session| session.expires > now);
