@@ -99,6 +99,19 @@ test('weekly labels are Spanish and a friend name containing placeholders is pre
   await page.getByRole('heading',{name:'Una semana de estudio constante'}).waitFor();
   assert.match(await page.locator('.challenge-meta').innerText(),/Responde antes del/);
 });
+test('the custom goal waiting choice and state are Spanish',async t=>{
+  const {page,setGoals}=await fixture(t,{language:'es-ES'});
+  await page.locator('[data-create-challenge]').click();
+  await page.getByText('Empezar cuando todos acepten',{exact:true}).waitFor();
+  setGoals([{id:3,title:'Together',weekly:false,start_when_ready:true,started:false,
+    kind:'reviews',cooperative:true,creator:'cerro',start_at:Date.now(),end_at:9223372036854775807,
+    target:3,status:'waiting',progress:0,members:[
+      {user:'cerro',display:'Cerro',status:'accepted',progress:0},
+      {user:'hill',display:'Hill',status:'invited',progress:0}]}]);
+  await page.reload();
+  await page.getByText('Esperando a todos',{exact:true}).waitFor();
+  assert.match(await page.locator('.challenge-meta').innerText(),/Empieza cuando todos acepten/);
+});
 test('double clicks do not duplicate requests and failed choices can be retried',async t=>{
   const {page,requests,control}=await fixture(t);
   let release;control.hold=new Promise(r=>release=r);control.fail=true;

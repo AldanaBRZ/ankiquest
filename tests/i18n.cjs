@@ -28,6 +28,28 @@ test('the new crop editor file hint has a Spanish translation',()=>{
   const {context}=fixture();
   assert.equal(context.AnkiQuestI18n.html`<p>JPEG or PNG, up to 20 MB.</p>`, '<p>JPEG o PNG, hasta 20 MB.</p>');
 });
+test('waiting custom challenges and a singular streak freeze read naturally in Spanish',()=>{
+  const {context}=fixture();const {t}=context.AnkiQuestI18n;
+  assert.equal(t('Waiting for everyone'),'Esperando a todos');
+  assert.equal(t('Start when everyone accepts'),'Empezar cuando todos acepten');
+  assert.equal(t`A freeze covered ${'Monday'}. You have ${1} freeze left.`,
+    'Un protector cubrió el Monday. Te queda 1 protector.');
+});
+test('authored labels and substitution slots have Spanish catalog entries',()=>{
+  const missing=[];
+  for(const name of ['community.html','site.js','friend-nudges.js','avatars.js','index.html']){
+    const source=fs.readFileSync(path.join(__dirname,'../static',name),'utf8');
+    for(const match of source.matchAll(/\baqText\(\s*(['"])(.*?)\1\s*\)/gs)){
+      if(!Object.hasOwn(catalog,match[2].trim()))missing.push(`${name}: ${match[2]}`);
+    }
+    for(const match of source.matchAll(/\bdata-i18n="([^"]*)"/g)){
+      if(!Object.hasOwn(catalog,match[1]))missing.push(`${name}: ${match[1]}`);
+    }
+  }
+  assert.deepEqual(missing,[]);
+  const slots=value=>[...value.matchAll(/\{\d+\}/g)].map(match=>match[0]).sort();
+  for(const [source,target] of Object.entries(catalog))assert.deepEqual(slots(target),slots(source),source);
+});
 test('language headers go only to same-origin API requests and preserve authentication',async()=>{
   const {context,requests}=fixture();
   await context.fetch('/api/profile/cerro',{headers:{Authorization:'Bearer private'}});
