@@ -1,9 +1,12 @@
 """The dialogs behind the Tools menu: settings and deck sharing."""
 
+from pathlib import Path
+
 from aqt.qt import (
     QCheckBox,
     QDialog,
     QHBoxLayout,
+    QIcon,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -12,6 +15,7 @@ from aqt.qt import (
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
+    QPixmap,
     QWidget,
 )
 
@@ -62,11 +66,25 @@ def _buttons(dialog, accept_text, extra=()):
     return row
 
 
+def _brand(dialog, layout):
+    """Local art works even before a server is configured or while offline."""
+    asset = str(Path(__file__).with_name("aki_face.png"))
+    dialog.setWindowIcon(QIcon(asset))
+    image = QLabel()
+    image.setPixmap(QPixmap(asset).scaled(
+        48, 48,
+        _enum(Qt, "AspectRatioMode", "KeepAspectRatio"),
+        _enum(Qt, "TransformationMode", "SmoothTransformation"),
+    ))
+    layout.addWidget(_row(image, QLabel(tr("Aki, your study companion."))))
+
+
 def settings_dialog(parent, config, on_test, on_upload_all):
     """Everything the phone keeps in its ankiquest preference screen."""
     dialog = QDialog(parent)
     dialog.setWindowTitle("ankiquest")
     layout = QVBoxLayout(dialog)
+    _brand(dialog, layout)
 
     url = QLineEdit(config.get("url", ""))
     url.setPlaceholderText("https://anki.example.com")
@@ -116,6 +134,7 @@ def deck_dialog(parent, settings):
     dialog.setWindowTitle(tr("Deck completion notifications"))
     dialog.resize(680, 520)
     layout = QVBoxLayout(dialog)
+    _brand(dialog, layout)
     layout.addWidget(
         QLabel(tr("The people you pick hear once a day when you finish a shared deck."))
     )

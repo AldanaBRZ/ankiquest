@@ -25,7 +25,7 @@ def link(page, text):
     )
 
 
-def html(profile, place=None, unread=0, translate=lambda value: value):
+def html(profile, place=None, unread=0, translate=lambda value: value, mascot=None):
     """A block for `deck_browser_will_render_content`, so it lands under the stats."""
     parts = []
     if place:
@@ -46,9 +46,14 @@ def html(profile, place=None, unread=0, translate=lambda value: value):
     links = link("board", translate("Leaderboard")) + link("challenges", translate("Friends"))
     if unread:
         links += link("inbox", translate("\U0001f4ec %d new") % unread)
+    mascot_html = (
+        '<img src="%s" width=40 height=40 alt="" style="object-fit:contain">'
+        % escape(mascot)
+        if mascot else ""
+    )
     return (
         "<div id=ankiquest style='max-width:600px;margin:2em auto 0;font-size:13px;"
         "display:flex;flex-wrap:wrap;justify-content:space-between;gap:.3em'>"
-        "<div><b>ankiquest</b> <span style='opacity:.7'>%s</span></div><div>%s</div></div>"
-        % (escape("  ·  ".join(parts)), links)
+        "<div style='display:flex;align-items:center;gap:.5em'>%s<div><b>ankiquest</b> <span style='opacity:.7'>%s</span></div></div><div>%s</div></div>"
+        % (mascot_html, escape("  ·  ".join(parts)), links)
     )

@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title data-i18n="Leaderboard · AnkiQuest">Leaderboard · AnkiQuest</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="/icon.svg">
+<link rel="icon" href="/aki/face.png" type="image/png">
+<link rel="apple-touch-icon" href="/aki/face.png">
 <meta name="theme-color" content="#101418">
 <link rel="stylesheet" href="/site.css">
 <script src="/site.js"></script>
@@ -667,6 +668,7 @@ function view(p, rows, canEditAvatar = false) {
 ${pageHero(p.display, aqText("A study journey, one session at a time. Quests, milestones, and the progress that adds up."), aqHtml(['<a href="']) + AnkiQuestSite.href("/" + currentPeriod()) + aqHtml(['">']) + aqText("← Back to leaderboard") + aqHtml(['</a>']))}
 <div class="embedded-profile-title"><strong>${esc(p.display)}</strong><a href="${AnkiQuestSite.href("/" + currentPeriod())}">← Leaderboard</a></div>
 <div class="profile-layout">
+${AnkiQuestAki.profile(p)}
 <section class="card profile-hero wide" aria-label="Level progress">
   <div class="level"><div><small>Level</small>${p.level}</div></div>
   <div>
