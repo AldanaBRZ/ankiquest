@@ -46,6 +46,9 @@ pub struct Create {
     pub target: u64,
     pub duration_days: u32,
     pub recipients: Vec<String>,
+    /// Keep the full goal duration until every invited member agrees.
+    #[serde(default)]
+    pub start_when_ready: bool,
     /// New clients keep the same key when retrying one deliberate creation.
     #[serde(default)]
     pub request_id: Option<String>,
@@ -80,6 +83,7 @@ pub struct Challenge {
     pub status: String,
     pub weekly: bool,
     pub started: bool,
+    pub start_when_ready: bool,
 }
 
 pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
@@ -99,7 +103,12 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
          create table if not exists community_requests (
            creator text not null, request_id text not null, challenge integer not null,
            payload text not null, primary key(creator,request_id)
-         ) without rowid;",
+         ) without rowid;
+         create table if not exists community_deferred_goals (
+           challenge integer primary key, duration_days integer not null,
+           started integer not null default 0,
+           foreign key (challenge) references community_challenges(id)
+         );",
     )
 }
 
@@ -154,10 +163,14 @@ pub fn create(
             "The study-day target exceeds the available participant days.",
         ));
     }
-    let payload =
-        serde_json::json!({"title":title,"kind":request.kind,"cooperative":request.cooperative,
-        "target":request.target,"duration_days":request.duration_days,"recipients":recipients})
-        .to_string();
+    let mut payload = serde_json::json!({"title":title,"kind":request.kind,
+        "cooperative":request.cooperative,"target":request.target,
+        "duration_days":request.duration_days,"recipients":recipients});
+    // Preserve old request IDs when an older client retries after an upgrade.
+    if request.start_when_ready {
+        payload["start_when_ready"] = true.into();
+    }
+    let payload = payload.to_string();
     if let Some(key) = &request.request_id {
         let previous: Option<(i64,String)> = store.conn.query_row(
             "select challenge,payload from community_requests where creator=?1 and request_id=?2",
@@ -195,10 +208,20 @@ pub fn create(
             request.cooperative,
             request.target as i64,
             now,
-            now + i64::from(request.duration_days) * DAY_MS
+            if request.start_when_ready {
+                i64::MAX
+            } else {
+                now + i64::from(request.duration_days) * DAY_MS
+            }
         ],
     )?;
     let id = tx.last_insert_rowid();
+    if request.start_when_ready {
+        tx.execute(
+            "insert into community_deferred_goals(challenge,duration_days) values(?1,?2)",
+            params![id, request.duration_days],
+        )?;
+    }
     tx.execute(
         "insert into community_members (challenge,user,status,joined_at) values (?1,?2,'accepted',?3)",
         params![id, user, now],
@@ -246,7 +269,10 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
     if cancelled || now >= end {
         return Err(Error::Invalid("This challenge has ended."));
     }
-    let waiting = crate::weekly_challenges::started(&tx, id)? == Some(false);
+    let waiting_weekly = crate::weekly_challenges::started(&tx, id)? == Some(false);
+    let deferred = deferred_goal(&tx, id)?;
+    let waiting_custom = deferred.is_some_and(|(started, _)| !started);
+    let waiting = waiting_weekly || waiting_custom;
     match action {
         "cancel" if creator == user => {
             tx.execute(
@@ -259,16 +285,34 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
                 "update community_members set status='accepted',joined_at=?3 where challenge=?1 and user=?2 and status='invited'",
                 params![id,user,now],
             )?;
-            if waiting {
+            let all_accepted: bool = tx.query_row(
+                "select not exists(select 1 from community_members where challenge=?1 and status='invited')",
+                [id],
+                |r| r.get(0),
+            )?;
+            if waiting && all_accepted {
                 tx.execute(
                     "update community_challenges set start_at=?2,end_at=?3 where id=?1",
-                    params![id, now, now + crate::weekly_challenges::DURATION_MS],
+                    params![
+                        id,
+                        now,
+                        now + deferred
+                            .map_or(crate::weekly_challenges::DURATION_MS, |(_, days)| days
+                                * DAY_MS)
+                    ],
                 )?;
                 tx.execute("update community_members set joined_at=?2 where challenge=?1 and status='accepted'", params![id,now])?;
-                tx.execute(
-                    "update community_weekly_goals set started=1 where challenge=?1",
-                    [id],
-                )?;
+                if waiting_weekly {
+                    tx.execute(
+                        "update community_weekly_goals set started=1 where challenge=?1",
+                        [id],
+                    )?;
+                } else {
+                    tx.execute(
+                        "update community_deferred_goals set started=1 where challenge=?1",
+                        [id],
+                    )?;
+                }
             }
             notice(&tx, &creator, user, id, &title, "challenge_accepted", now)?;
         }
@@ -303,6 +347,7 @@ pub fn act(store: &mut Store, user: &str, id: i64, action: &str, now: i64) -> Re
         params![user, id, now],
     )?;
     crate::weekly_challenges::cancel_stale_invites(&tx, now)?;
+    cancel_stale_deferred_invites(&tx, now)?;
     tx.commit()?;
     Ok(())
 }
@@ -370,10 +415,31 @@ pub(crate) fn notice(
     Ok(())
 }
 
+fn deferred_goal(conn: &Connection, id: i64) -> rusqlite::Result<Option<(bool, i64)>> {
+    conn.query_row(
+        "select started,duration_days from community_deferred_goals where challenge=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
+fn cancel_stale_deferred_invites(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "update notifications set push_cancelled=1 where kind='challenge_invite'
+         and challenge_id in (select d.challenge from community_deferred_goals d
+         join community_challenges c on c.id=d.challenge
+         where d.started=1 or c.cancelled=1 or c.end_at<=?1)",
+        [now],
+    )?;
+    Ok(())
+}
+
 /// Progress is derived from reviews, so completion events are reconciled after
 /// review uploads/polls and before personal challenge or Activity reads.
 pub fn refresh(store: &mut Store, players: &[Participant], now: i64) -> Result<(), crate::Error> {
     crate::weekly_challenges::cancel_stale_invites(&store.conn, now)?;
+    cancel_stale_deferred_invites(&store.conn, now)?;
     let creators = store
         .conn
         .prepare(
@@ -455,7 +521,10 @@ pub fn list(
     for (id, title, kind, cooperative, creator, start_at, end_at, target, cancelled) in rows {
         let weekly_started = crate::weekly_challenges::started(&store.conn, id)?;
         let weekly = weekly_started.is_some();
-        let started = weekly_started.unwrap_or(true);
+        let deferred = deferred_goal(&store.conn, id)?;
+        let started = weekly_started
+            .or(deferred.map(|(started, _)| started))
+            .unwrap_or(true);
         let kind = if kind == "study_days" {
             Kind::StudyDays
         } else {
@@ -517,22 +586,25 @@ pub fn list(
                         .filter(|m| m.status == "accepted")
                         .all(|m| m.progress >= target)
             };
-        let status =
-            if cancelled && weekly && !started && members.iter().any(|m| m.status == "declined") {
-                "declined"
-            } else if cancelled {
-                "cancelled"
-            } else if complete {
-                "complete"
-            } else if now >= end_at {
-                "ended"
-            } else if !started {
-                "waiting"
-            } else if now < start_at {
-                "upcoming"
-            } else {
-                "active"
-            };
+        let status = if cancelled
+            && (weekly || deferred.is_some())
+            && !started
+            && members.iter().any(|m| m.status == "declined")
+        {
+            "declined"
+        } else if cancelled {
+            "cancelled"
+        } else if complete {
+            "complete"
+        } else if now >= end_at {
+            "ended"
+        } else if !started {
+            "waiting"
+        } else if now < start_at {
+            "upcoming"
+        } else {
+            "active"
+        };
         challenges.push(Challenge {
             id,
             title,
@@ -547,6 +619,7 @@ pub fn list(
             status: status.into(),
             weekly,
             started,
+            start_when_ready: deferred.is_some(),
         });
     }
     Ok(challenges)
@@ -780,7 +853,69 @@ mod tests {
             target: 3,
             duration_days: 7,
             recipients: vec!["friend".into()],
+            start_when_ready: false,
         }
+    }
+
+    #[test]
+    fn custom_goal_can_wait_for_every_invitee_before_its_full_timer_starts() {
+        let (mut store, _) = crate::decks::tests::temporary_store();
+        initialize(&store.conn).unwrap();
+        let request: Create = serde_json::from_value(serde_json::json!({
+            "title": "Study together", "kind": "reviews", "cooperative": true,
+            "target": 3, "duration_days": 7, "recipients": ["friend", "other"],
+            "start_when_ready": true
+        }))
+        .unwrap();
+        let eligible = BTreeSet::from(["friend".into(), "other".into()]);
+        let start = 100;
+        let id = create(&mut store, "owner", &request, &eligible, start).unwrap();
+        let players = [
+            player("owner", &[101, 201, 302]),
+            player("friend", &[250, 303]),
+        ];
+        let waiting = list(&store, "owner", &players, start + 8 * DAY_MS).unwrap();
+        assert_eq!(waiting[0].status, "waiting");
+        assert_eq!(waiting[0].progress, 0);
+        act(&mut store, "friend", id, "accept", start + 8 * DAY_MS).unwrap();
+        assert_eq!(
+            list(&store, "owner", &players, start + 8 * DAY_MS).unwrap()[0].status,
+            "waiting"
+        );
+        let accepted_at = start + 10 * DAY_MS;
+        act(&mut store, "other", id, "accept", accepted_at).unwrap();
+        let running = list(&store, "owner", &players, accepted_at).unwrap();
+        assert_eq!(running[0].status, "active");
+        assert_eq!(running[0].start_at, accepted_at);
+        assert_eq!(running[0].end_at, accepted_at + 7 * DAY_MS);
+        assert_eq!(
+            running[0].progress, 0,
+            "reviews before everyone agrees do not count"
+        );
+    }
+
+    #[test]
+    fn declining_a_waiting_custom_goal_ends_it_without_starting_the_timer() {
+        let (mut store, _) = crate::decks::tests::temporary_store();
+        initialize(&store.conn).unwrap();
+        let mut request = request();
+        request.start_when_ready = true;
+        let eligible = BTreeSet::from(["friend".into()]);
+        let id = create(&mut store, "owner", &request, &eligible, 100).unwrap();
+        act(&mut store, "friend", id, "decline", 100 + 9 * DAY_MS).unwrap();
+        let goal = &list(&store, "owner", &[], 100 + 9 * DAY_MS).unwrap()[0];
+        assert_eq!(goal.status, "declined");
+        assert!(!goal.started);
+        assert!(matches!(
+            act(&mut store, "friend", id, "accept", 100 + 9 * DAY_MS + 1),
+            Err(Error::Invalid(_))
+        ));
+        let cancelled: bool = store.conn.query_row(
+            "select push_cancelled from notifications where challenge_id=?1 and kind='challenge_invite'",
+            [id],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(cancelled);
     }
 
     #[test]

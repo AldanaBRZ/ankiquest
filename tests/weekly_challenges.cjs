@@ -60,6 +60,27 @@ test('a suggestion sends nothing until invited; waiting has no progress timer; c
   await page.locator('#challenge-dialog[open]').waitFor();
   assert.equal(await page.locator('#challenge-form [name="recipients"]').count(),1);
 });
+test('custom goals offer a start-after-acceptance choice and hide progress while waiting',async t=>{
+  const {page,requests,setGoals}=await fixture(t);
+  await page.locator('[data-create-challenge]').click();
+  const form=page.locator('#challenge-form');
+  assert.equal(await form.locator('[name="start_when_ready"]').isChecked(),false);
+  await form.locator('[name="recipients"]').check();
+  await form.locator('[name="start_when_ready"]').check();
+  await form.getByRole('button',{name:'Send invitation'}).click();
+  await page.waitForFunction(()=>!document.querySelector('#challenge-dialog[open]'));
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].body.start_when_ready,true);
+  setGoals([{id:3,title:'Together',weekly:false,start_when_ready:true,started:false,
+    kind:'reviews',cooperative:true,creator:'cerro',start_at:Date.now(),end_at:9223372036854775807,
+    target:3,status:'waiting',progress:0,members:[
+      {user:'cerro',display:'Cerro',status:'accepted',progress:0},
+      {user:'hill',display:'Hill',status:'invited',progress:0}]}]);
+  await page.reload();
+  await page.getByText('Waiting for everyone',{exact:true}).waitFor();
+  assert.match(await page.locator('.challenge-meta').innerText(),/Starts when everyone accepts/);
+  assert.equal(await page.locator('.challenge [role="progressbar"]').count(),0);
+});
 test('skipping persists and keeps custom goals available without inviting anyone',async t=>{
   const {page,requests}=await fixture(t);
   await page.locator('[data-weekly-action="dismiss"]').click();

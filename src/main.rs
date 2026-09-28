@@ -2260,6 +2260,7 @@ mod tests {
             target: 5,
             duration_days: 7,
             recipients: vec!["hill".into()],
+            start_when_ready: false,
         };
         assert_eq!(
             create_challenge(
