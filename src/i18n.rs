@@ -412,6 +412,7 @@ mod tests {
             challenge_id: None,
             route: None,
             action_required: false,
+            reply_to: None,
         };
         notification(&mut notice, "es", "");
         assert_eq!(notice.title, "¡Nuevo récord en 24 horas!");
@@ -464,6 +465,7 @@ mod tests {
                 challenge_id: None,
                 route: None,
                 action_required: false,
+                reply_to: None,
             };
             notification(&mut notice, language, "Aldana");
             assert_eq!(notice.title, title);

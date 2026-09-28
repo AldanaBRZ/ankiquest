@@ -90,6 +90,15 @@ pub struct Notification {
     pub challenge_id: Option<i64>,
     pub route: Option<String>,
     pub action_required: bool,
+    /// The exact alert this response answered, retained even if the older row expires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ReplyContext>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplyContext {
+    pub title: String,
+    pub body: String,
 }
 
 /// A reply or friend nudge this player wrote; `read_at` is when the recipient read it.
@@ -118,6 +127,8 @@ pub struct Activity {
 
 fn notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Notification> {
     let challenge_id: Option<i64> = row.get(9)?;
+    let reply_title: Option<String> = row.get(11)?;
+    let reply_body: Option<String> = row.get(12)?;
     Ok(Notification {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -131,6 +142,9 @@ fn notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<Notification> {
         challenge_id,
         route: challenge_id.map(|id| format!("/community#challenge-{id}")),
         action_required: row.get(10)?,
+        reply_to: reply_title
+            .zip(reply_body)
+            .map(|(title, body)| ReplyContext { title, body }),
     })
 }
 
@@ -140,7 +154,7 @@ const NOTICE_COLUMNS: &str =
  n.read_at / 1000,n.challenge_id,exists(select 1 from community_members m
  join community_challenges c on c.id=m.challenge where c.id=n.challenge_id
  and n.kind='challenge_invite' and m.user=n.recipient and m.status='invited'
- and c.cancelled=0 and c.end_at>?2)";
+ and c.cancelled=0 and c.end_at>?2),n.reply_to_title,n.reply_to_body";
 
 /// A completion that was just announced, echoed back so the client can say so locally.
 #[derive(Debug, Serialize)]
@@ -284,6 +298,8 @@ pub fn initialize(conn: &Connection) -> Result<(), Error> {
         ("completion_cancelled", "integer not null default 0"),
         ("read_at", "integer"),
         ("challenge_id", "integer"),
+        ("reply_to_title", "text"),
+        ("reply_to_body", "text"),
     ] {
         let present = conn
             .prepare("select 1 from pragma_table_info('notifications') where name = ?1")?
@@ -810,7 +826,7 @@ impl Store {
                 |row| {
                     Ok(Sent {
                         notice: notification(row)?,
-                        recipient: row.get(11)?,
+                        recipient: row.get(13)?,
                     })
                 },
             )?
@@ -1062,14 +1078,21 @@ impl Store {
         let tx = self.conn.transaction()?;
         let target = tx
             .query_row(
-                "select sender, day from notifications
+                "select sender, day, title, body from notifications
                  where id = ?1 and recipient = ?2 and replied = 0 and sender not in ('', ?2)
                  and completion_cancelled = 0",
                 params![id, user],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((sender, day)) = target else {
+        let Some((sender, day, title, body)) = target else {
             return Ok(None);
         };
         tx.execute(
@@ -1077,9 +1100,9 @@ impl Store {
             params![id],
         )?;
         tx.execute(
-            "insert into notifications (recipient, sender, title, body, day, created_at, kind)
-             values (?1, ?2, ?3, ?4, ?5, ?6, 'reply')",
-            params![sender, user, format!("💬 {display}"), message, day, now_ms],
+            "insert into notifications (recipient, sender, title, body, day, created_at, kind, reply_to_title, reply_to_body)
+             values (?1, ?2, ?3, ?4, ?5, ?6, 'reply', ?7, ?8)",
+            params![sender, user, format!("💬 {display}"), message, day, now_ms, title, body],
         )?;
         tx.commit()?;
         Ok(Some(sender))
@@ -1110,7 +1133,7 @@ impl Store {
                      select recipient, max(retry_at) as last_retry from notifications
                      where push_attempts > 0 group by recipient
                  )
-                 select ready.recipient, id, title, body, day, created_at / 1000, sender, replied, kind, read_at / 1000, challenge_id
+                 select ready.recipient, id, title, body, day, created_at / 1000, sender, replied, kind, read_at / 1000, challenge_id, reply_to_title, reply_to_body
                  from ready left join attempted using (recipient)
                  order by turn, coalesce(last_retry, 0), retry_at, id limit 100",
             )?;
@@ -1132,6 +1155,10 @@ impl Store {
                             .get::<_, Option<i64>>(10)?
                             .map(|id| format!("/community#challenge-{id}")),
                         action_required: false,
+                        reply_to: r
+                            .get::<_, Option<String>>(11)?
+                            .zip(r.get::<_, Option<String>>(12)?)
+                            .map(|(title, body)| ReplyContext { title, body }),
                     },
                 })
             })?
@@ -2748,6 +2775,66 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_none(),
             "nobody is recorded as the sender of a pre-reply notification"
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn replies_keep_the_message_they_answer_for_inbox_sent_and_push() {
+        let (mut store, path) = temporary_store();
+        let original = store
+            .send(
+                &Outgoing {
+                    to: "hill",
+                    from: "cerro",
+                    title: "Deck complete",
+                    body: "Cerro finished Spanish.",
+                    kind: "completion",
+                },
+                DAY,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .reply("hill", "Hill", original, "Good job!", NOW + 1)
+                .unwrap(),
+            Some("cerro".into())
+        );
+        let answer = store.notifications("cerro", NOW + 1).unwrap().remove(0);
+        let expected =
+            serde_json::json!({"title":"Deck complete","body":"Cerro finished Spanish."});
+        assert_eq!(serde_json::to_value(&answer).unwrap()["reply_to"], expected);
+        assert_eq!(
+            serde_json::to_value(&store.sent("hill", NOW + 1, None, 20).unwrap().items[0]).unwrap()
+                ["reply_to"],
+            expected
+        );
+        let pushed = store.take_deck_deliveries(NOW + 1).unwrap();
+        let reply = pushed
+            .into_iter()
+            .find(|delivery| delivery.notification.id == answer.id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(reply.notification).unwrap()["reply_to"],
+            expected
+        );
+        assert_eq!(
+            store
+                .reply("cerro", "Cerro", answer.id, "Thanks!", NOW + 2)
+                .unwrap(),
+            Some("hill".into())
+        );
+        let second = store
+            .notifications("hill", NOW + 2)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.kind == "reply")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(second).unwrap()["reply_to"],
+            serde_json::json!({"title":"💬 Hill","body":"Good job!"})
         );
         drop(store);
         std::fs::remove_dir_all(path).unwrap();

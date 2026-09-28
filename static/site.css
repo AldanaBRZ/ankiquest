@@ -355,6 +355,9 @@ input:not([type=checkbox]):not([type=radio]), select { min-height:48px; }
 .activity-list h3 { font-size:17px;overflow-wrap:anywhere; }
 .activity-item.unread { border-left:4px solid var(--accent); }
 .activity-body { white-space:pre-wrap;overflow-wrap:anywhere; }
+.reply-context { margin:12px 0;padding:10px 14px;border-left:3px solid var(--accent);background:var(--bg);border-radius:0 8px 8px 0;white-space:pre-wrap;overflow-wrap:anywhere; }
+.reply-context small,.reply-context strong,.reply-context span { display:block; }
+.reply-context small { color:var(--dim);margin-bottom:4px; }
 .activity-item .actions { display:flex;gap:8px;flex-wrap:wrap;margin-top:12px; }
 .activity-box { display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:12px 0; }
 .activity-reply { border-top:1px solid var(--line);margin-top:18px;padding-top:18px; }
