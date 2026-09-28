@@ -1,6 +1,7 @@
 """Translate authored desktop labels before formatting names or messages."""
 
 SPANISH = {
+    "Aki, your study companion.": "Aki, tu compañero de estudio.",
     "Cancel": "Cancelar", "Save": "Guardar", "Server": "Servidor", "Player": "Jugador", "Token": "Token",
     "Leaderboard": "Clasificación", "Friends": "Amigos", "Decks": "Mazos", "Notify": "Avisar",
     "Test connection": "Probar conexión", "Upload everything again": "Volver a subir todo",

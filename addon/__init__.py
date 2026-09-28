@@ -38,6 +38,8 @@ state = {
     "inbox": [],
 }
 
+mw.addonManager.setWebExports(__name__, r"aki_face\.png")
+
 
 def config():
     return mw.addonManager.getConfig(__name__) or {}
@@ -206,7 +208,8 @@ def on_deck_browser(deck_browser, content):
     if state["profile"] is None and not state["polling"]:
         poll(quiet=True)
     waiting = sum(1 for entry in state["inbox"] if notify.answerable(entry))
-    content.stats += board.html(state["profile"], state["place"], waiting, tr)
+    mascot = "/_addons/%s/aki_face.png" % mw.addonManager.addonFromModule(__name__)
+    content.stats += board.html(state["profile"], state["place"], waiting, tr, mascot)
 
 
 def on_js_message(handled, message, context):

@@ -374,3 +374,20 @@ input:not([type=checkbox]):not([type=radio]), select { min-height:48px; }
   .settings-timing { grid-template-columns:1fr; }
   #challenge-dialog .form-actions > button { flex:1; }
 }
+
+/* Aki mascot: decorative art, responsive layouts and gentle encouragement. */
+.aki-art{display:block;object-fit:contain;flex-shrink:0;pointer-events:none;max-width:100%}
+.brand img,.login-brand img{width:38px;height:38px;object-fit:contain}
+.aki-companion{display:flex;align-items:center;gap:20px;padding:16px 22px;background:var(--card);border:1px solid var(--line);border-radius:18px;grid-column:1/-1}
+.aki-companion p{font-weight:650;max-width:32em;overflow-wrap:anywhere}
+.aki-companion .aki-art{width:100px;height:100px}
+.page-hero>.aki-art{width:112px;height:112px;align-self:center}
+.empty>.aki-art{width:88px;height:88px;margin:0 auto 12px}
+.loading-copy>.aki-art{width:64px;height:64px;margin:0 0 10px}
+.login-card>.aki-art{width:132px;height:132px;margin:0 auto 16px}
+.freeze-settings>.aki-art{width:80px;height:80px;margin:0 auto 10px}
+.card-head>.aki-art{width:56px;height:56px}
+.win-heading>.aki-art{width:56px;height:56px}
+.aki-dialog-art{float:right;margin:0 0 10px 12px!important}
+@media(max-width:600px){.page-hero{flex-wrap:wrap}.page-hero>.aki-art{width:72px;height:72px;order:-1}.aki-companion{padding:14px;gap:12px}.aki-companion .aki-art{width:76px;height:76px}.aki-companion p{font-size:14px}}
+@media(prefers-reduced-motion:reduce){.aki-art{animation:none!important;transition:none!important}}

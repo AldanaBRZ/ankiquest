@@ -211,7 +211,8 @@ class RefreshTests(unittest.TestCase):
             taskman=SimpleNamespace(run_in_background=self.run_task),
             form=SimpleNamespace(menuTools=SimpleNamespace(addAction=Mock())),
             addonManager=SimpleNamespace(
-                getConfig=lambda _: dict(self.settings), writeConfig=self.write_config
+                getConfig=lambda _: dict(self.settings), writeConfig=self.write_config,
+                setWebExports=Mock(), addonFromModule=Mock(return_value="ankiquest"),
             ),
             progress=SimpleNamespace(timer=Mock()),
             deckBrowser=SimpleNamespace(refresh=Mock()),
@@ -322,6 +323,8 @@ class RefreshTests(unittest.TestCase):
         self.assertLess(content.stats.index("heatmap"), content.stats.index("Leaderboard"))
         self.assertIn("#1 this week", content.stats)
         self.assertIn("ankiquest:web:inbox", content.stats)
+        self.assertIn('/_addons/ankiquest/aki_face.png', content.stats)
+        self.mw.addonManager.setWebExports.assert_called_once_with("ankiquest_test_addon", r"aki_face\.png")
 
     def test_a_quiet_poll_only_remembers_what_a_loud_one_would_have_said(self):
         self.with_board()

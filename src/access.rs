@@ -264,17 +264,18 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 fn public_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/login"
-            | "/site.css"
-            | "/site.js"
-            | "/icon.svg"
-            | "/manifest.webmanifest"
-            | "/auth/status"
-            | "/auth/session"
-            | "/auth/logout"
-    )
+    crate::aki::public_asset(path)
+        || matches!(
+            path,
+            "/login"
+                | "/site.css"
+                | "/site.js"
+                | "/icon.svg"
+                | "/manifest.webmanifest"
+                | "/auth/status"
+                | "/auth/session"
+                | "/auth/logout"
+        )
 }
 
 fn encoded_next(path: &str) -> String {
@@ -529,12 +530,13 @@ pub(crate) async fn site_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         format!(
-            "window.AnkiQuestSpanish={};\nwindow.AnkiQuestFrench={};\nwindow.AnkiQuestGerman={};\nwindow.AnkiQuestPortuguese={};\n{}\n{}",
+            "window.AnkiQuestSpanish={};\nwindow.AnkiQuestFrench={};\nwindow.AnkiQuestGerman={};\nwindow.AnkiQuestPortuguese={};\n{}\n{}\n{}",
             include_str!("../static/translations-es.json"),
             include_str!("../static/translations-fr.json"),
             include_str!("../static/translations-de.json"),
             include_str!("../static/translations-pt.json"),
             include_str!("../static/i18n.js"),
+            include_str!("../static/aki.js"),
             include_str!("../static/site.js")
         ),
     )
@@ -1118,11 +1120,24 @@ mod tests {
             "/icon.svg",
             "/manifest.webmanifest",
             "/auth/status",
+            "/aki/face.png",
+            "/aki/welcome.png",
+            "/aki/review.png",
+            "/aki/celebrate.png",
+            "/aki/streak.png",
+            "/aki/freeze.png",
+            "/aki/winner.png",
         ] {
             assert_eq!(
                 request(&app, "GET", endpoint, &[], "").await.status(),
                 StatusCode::OK,
                 "{endpoint}"
+            );
+        }
+        for endpoint in ["/aki/config.json", "/aki/unknown.png"] {
+            assert_eq!(
+                request(&app, "GET", endpoint, &[], "").await.status(),
+                StatusCode::SEE_OTHER,
             );
         }
         cleanup(app, path);

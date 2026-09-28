@@ -1,4 +1,5 @@
 mod access;
+mod aki;
 mod avatars;
 mod challenges;
 mod competition;
@@ -1919,6 +1920,7 @@ async fn main() -> Result<(), Error> {
 
 fn router(app: Arc<App>) -> Router {
     Router::new()
+        .merge(aki::routes())
         .merge(avatars::routes())
         .merge(friend_nudges::routes())
         .route("/", get(index))

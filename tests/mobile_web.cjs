@@ -30,6 +30,9 @@ async function overflow(page, label) {
 }
 async function signIn(page, credential) {
   await page.goto(base + '/login?next=%2Fcommunity%23challenges');
+  await page.locator('.login-card > .aki-art').waitFor();
+  await page.waitForFunction(()=>document.querySelector('.login-card > .aki-art')?.naturalWidth>0);
+  await screenshot(page,'aki-login-390-light');
   await page.locator('#password').fill(credential);
   await page.locator('button[type=submit]').click();
   await page.waitForURL('**/community#challenges');
@@ -51,6 +54,11 @@ async function main() {
   log=fs.openSync(path.join(run,'server.log'),'a');
   server=spawn(exe,[path.join(run,'config.json')],{windowsHide:true,stdio:['ignore',log,log]});
   await ready();
+  for(const name of ['welcome','review','celebrate','streak','freeze','winner','face']) {
+    const art=await fetch(base+'/aki/'+name+'.png');assert.equal(art.status,200);assert.equal(art.headers.get('content-type'),'image/png');
+  }
+  assert.equal((await fetch(base+'/aki/unknown.png',{redirect:'manual'})).status,303,'unknown art paths do not bypass private access');
+  checks.push('only the seven Aki images are available before private sign-in');
   const history=new DatabaseSync(path.join(run,'ankiquest.db'));
   history.exec('PRAGMA busy_timeout=5000');
   history.prepare('INSERT INTO notifications(recipient,sender,title,body,day,created_at,kind) VALUES(?,?,?,?,?,?,?)').run('alice','','An earlier study update','Your activity stays available after a notification is dismissed.',Math.floor(Date.now()/86400000)-10,Date.now()-10*86400000,'message');
@@ -130,7 +138,10 @@ async function main() {
   assert(await page.locator('#activity-count').isHidden());
   checks.push('sent replies show when they were read; mark all as read empties the inbox count');
   await page.goto(base+'/#alice');await page.locator('#manage-freezes').waitFor();
+  await page.locator('[data-aki-companion] .aki-art').waitFor();
   await page.locator('#manage-freezes').click();await page.locator('#freeze-preferences').waitFor();
+  await page.locator('#streak-freezes .aki-dialog-art').waitFor();
+  assert.equal(await page.locator('#streak-freezes .aki-art').count(),1);
   assert.equal(await page.locator('#freeze-token:visible').count(),0);await page.locator('#freeze-enabled').check();await page.locator('#freeze-preferences button[type=submit]').click();await page.locator('#freeze-status').filter({hasText:'is on'}).waitFor();await page.locator('#freeze-close').click();
   await page.locator('#manage-decks').click();await page.locator('#deck-settings').waitFor();assert.equal(await page.locator('#deck-token:visible').count(),0);await page.locator('#deck-close').click();
   checks.push('freeze/deck preferences reuse owner session without repeated token');
@@ -141,6 +152,10 @@ async function main() {
       const readySelector={profile:'#manage-freezes',history:'#view-overview .kpi',friends:'#view-challenges .challenge',activity:'#view-activity .activity-item',goal:'#view-challenges [data-goal]',reminders:'#reminder-form'}[name];
       await page.locator(readySelector).first().waitFor();
       await overflow(page,name+' '+width+' '+theme);
+      if(name==='profile'&&width===320) {
+        await page.waitForFunction(()=>document.querySelector('[data-aki-companion] .aki-art')?.naturalWidth>0);
+        await page.screenshot({path:path.join(out,'aki-profile-320-'+theme+'-live.png'),fullPage:false});
+      }
       if(width<400&&['friends','activity','goal'].includes(name))await screenshot(page,name+'-'+width+'-'+theme);
     }
     await page.goto(base+'/community#challenges');await page.locator('[data-create-challenge]').waitFor();await page.locator('[data-create-challenge]').click();await overflow(page,'create '+width+' '+theme);await page.locator('#challenge-customize summary').click();await overflow(page,'customize '+width+' '+theme);await page.locator('[data-close=challenge-dialog]').first().click();

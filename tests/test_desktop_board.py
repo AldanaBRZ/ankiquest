@@ -32,6 +32,17 @@ FIXTURES = json.loads((Path(__file__).resolve().parent / "fixtures" / "clients.j
 
 
 class SummaryTests(unittest.TestCase):
+    def test_local_mascot_art_is_decorative_and_does_not_add_a_link(self):
+        html = board.html({}, mascot='/_addons/example/aki_face.png')
+        self.assertIn('src="/_addons/example/aki_face.png"', html)
+        self.assertIn('alt=""', html)
+        self.assertNotIn('ankiquest:web:aki', html)
+
+    def test_mascot_source_cannot_inject_html(self):
+        html = board.html({}, mascot='" onerror="alert(1)')
+        self.assertNotIn(' onerror="', html)
+        self.assertIn('&quot;', html)
+
     def test_the_deck_list_line_shows_place_level_streak_and_links(self):
         html = board.html({"level": 4, "xp_into_level": 1200, "xp_for_next": 2000, "streak": 3}, 2, 0)
         self.assertIn("#2 this week", html)
