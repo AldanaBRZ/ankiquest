@@ -149,7 +149,7 @@
   }
   function freshness() {
     const sync = state.study?.last_received_at, review = state.study?.last_review_at;
-    if (sync) return html`<span class="personal-stamp">${tr("Last upload received: ")}${esc(when(sync))}</span>`;
+    if (sync) return html`<span class="personal-stamp">${tr("Study data updated: ")}${esc(when(sync))}</span>`;
     if (review) return html`<span class="personal-stamp">${tr("Latest uploaded review: ")}${esc(when(review))}</span>`;
     return html`<span class="personal-stamp">${tr("No reviews uploaded yet.")}</span>`;
   }
@@ -189,7 +189,7 @@
       const item = map.get(key), reviews = Number(item?.reviews||0);
       const level = reviews ? Math.min(4,1+Math.floor(reviews/Math.max(1,max)*3.99)) : 0;
       const future = new Date(key+"T12:00:00Z").getTime() > Date.now()+12*3600000;
-      cells.push(future ? html`<span aria-hidden="true"></span>` : html`<button type="button" data-day="${key}" data-level="${level}" data-frozen="${!!item?.frozen}" aria-pressed="${state.selected===key}" aria-label="${esc(date(key))}: ${number(reviews)} ${tr("reviews")}${item?.frozen ? tr(", streak protected") : ""}">${day}</button>`);
+      cells.push(future && !item ? html`<span aria-hidden="true"></span>` : html`<button type="button" data-day="${key}" data-level="${level}" data-frozen="${!!item?.frozen}" aria-pressed="${state.selected===key}" aria-label="${esc(date(key))}: ${number(reviews)} ${tr("reviews")}${item?.frozen ? tr(", streak protected") : ""}">${day}</button>`);
     }
     return html`<details class="card personal-month" ${selectedMonth?"open":""}><summary>${esc(title)}<small>${number(monthReviews)} ${tr("reviews")}</small></summary><div class="personal-month-body"><div class="personal-weekdays" aria-hidden="true">${weekdays.map(label=>html`<span>${esc(label)}</span>`).join("")}</div><div class="personal-calendar">${cells.join("")}</div></div></details>`;
   }
@@ -211,7 +211,7 @@
   }
   const hourOptions = selected => Array.from({length:24},(_,hour)=>html`<option value="${hour}" ${hour===Number(selected)?"selected":""}>${String(hour).padStart(2,"0")}:00</option>`).join("");
   function settingError(name) { return html`<p class="status error" role="alert">${esc(state.errors[name] || tr("This setting could not load. Refresh to try again."))}</p>`; }
-  function renderSettings() {
+  function renderSettings(card = null) {
     const {reminders:prefs,freezes,nudges,subscriptions,decks} = state.settings;
     const reminderCard = html`<article class="card"><div class="card-head"><div><h2>${tr("Reminders")}</h2><p>${tr("Choose when AnkiQuest checks in.")}</p></div></div>${prefs ? html`<form id="reminders-form"><div class="stack">${reminders.map(([key,label])=>check(key,label,prefs[key])).join("")}</div><div class="time-grid"><label class="field"><span>${tr("Daily reminder")}</span><select name="reminder_hour">${hourOptions(prefs.reminder_hour)}</select></label><label class="field"><span>${tr("Quiet from")}</span><select name="quiet_start">${hourOptions(prefs.quiet_start)}</select></label><label class="field"><span>${tr("Quiet until")}</span><select name="quiet_end">${hourOptions(prefs.quiet_end)}</select></label><label class="field"><span>${tr("Daily limit")}</span><select name="daily_limit">${[1,2,3,4,5].map(n=>html`<option value="${n}" ${n===prefs.daily_limit?"selected":""}>${n}</option>`).join("")}</select></label></div><p class="settings-hint">${tr("Reminder times use your AnkiQuest timezone. Equal quiet-hour times disable quiet hours.")}</p><div class="setting-actions"><button class="primary" type="submit">${tr("Save reminders")}</button></div><p class="status" role="status"></p></form>` : settingError("reminders")}</article>`;
     const nudgeCard = html`<article class="card"><div class="card-head"><div><h2>${tr("Encouragement")}</h2><p>${tr("Friendly nudges and progress celebrations.")}</p></div></div>${nudges ? html`${check("",tr("Allow friends to nudge me"),nudges.receiving,"",'data-nudge-field="receiving"')}${check("",tr("Automatic progress nudges"),nudges.automatic_receiving,"",'data-nudge-field="automatic"')}<fieldset><legend>${tr("Friends who can nudge me")}</legend>${nudges.friends.length ? nudges.friends.map(friend=>check("",friend.display,!friend.muted_by_me,"",`data-nudge-sender="${esc(friend.user)}"`)).join("") : html`<p class="settings-hint">${tr("No friends to choose yet.")}</p>`}</fieldset><p id="nudge-status" class="status" role="status"></p>` : settingError("nudges")}</article>`;
@@ -219,7 +219,14 @@
     const subscribed = new Set(subscriptions?.unsubscribed_senders || []), shared = new Set([...(subscriptions?.sharing_senders||[]),...subscribed]);
     const subscriptionCard = html`<article class="card"><div class="card-head"><div><h2>${tr("Deck completion alerts I receive")}</h2><p>${tr("Choose the people whose completed decks reach you.")}</p></div></div>${subscriptions?html`<form id="subscriptions-form">${check("enabled",tr("Receive deck completion alerts"),subscriptions.enabled)}<fieldset><legend>${tr("Unsubscribe from specific people")}</legend>${subscriptions.senders.filter(person=>shared.has(person.user)).map(person=>check("",person.display,subscribed.has(person.user),"",`data-unsubscribe="${esc(person.user)}"`)).join("") || html`<p class="settings-hint">${tr("No one is sharing decks with you yet.")}</p>`}</fieldset><div class="setting-actions"><button class="primary" type="submit">${tr("Save alert preferences")}</button></div><p class="status" role="status"></p></form>`:settingError("subscriptions")}</article>`;
     const deckCard = html`<article class="card"><div class="card-head"><div><h2>${tr("What I share")}</h2><p>${tr("Choose which finished decks friends can hear about.")}</p></div></div>${decks?html`<form id="decks-form"><details><summary>${tr("Manage deck sharing")}</summary>${decks.decks.length?decks.decks.map((deck,index)=>html`<fieldset data-deck-index="${index}"><legend>${esc(deck.name)}</legend>${check("",tr("Share completion"),deck.enabled,"",'data-deck-enabled')}<div class="stack">${decks.recipients.map(person=>check("",person.display,deck.recipients.includes(person.user),"",`data-deck-recipient="${esc(person.user)}"`)).join("") || html`<p class="settings-hint">${tr("No friends are available yet.")}</p>`}</div></fieldset>`).join(""):html`<p class="settings-hint">${tr("Upload reviews from Anki to see your decks here.")}</p>`}</details>${check("",tr("Celebrate milestones"),decks.celebrations!==false,"",'id="celebrations-toggle"')}<div class="setting-actions"><button class="primary" type="submit">${tr("Save deck sharing")}</button></div><p class="status" role="status"></p></form>`:settingError("decks")}</article>`;
-    $("personal-content").innerHTML = html`<section class="personal-lead"><div class="eyebrow">${tr("Your account")}</div><h2>${esc(state.session.user)}</h2><p>${tr("All changes here apply to your AnkiQuest account across devices.")}</p></section><div class="personal-settings">${reminderCard}${nudgeCard}${freezeCard}${subscriptionCard}${deckCard}<article class="card"><h2>${tr("Privacy and account")}</h2><p class="section-intro">${tr("Your member token controls personal changes. The shared website password only lets members view the community.")}</p><div class="setting-actions"><a class="button-link" href="${esc(site.href("/week","#"+encodeURIComponent(state.session.user)))}">${tr("Edit profile picture")}</a><button type="button" id="personal-disconnect">${tr("Disconnect account")}</button></div><p class="status" role="status"></p></article></div>`;
+    const markup = html`<section class="personal-lead"><div class="eyebrow">${tr("Your account")}</div><h2>${esc(state.session.user)}</h2><p>${tr("All changes here apply to your AnkiQuest account across devices.")}</p></section><div class="personal-settings">${reminderCard}${nudgeCard}${freezeCard}${subscriptionCard}${deckCard}<article class="card"><h2>${tr("Privacy and account")}</h2><p class="section-intro">${tr("Your member token controls personal changes. The shared website password only lets members view the community.")}</p><div class="setting-actions"><a class="button-link" href="${esc(site.href("/week","#"+encodeURIComponent(state.session.user)))}">${tr("Edit profile picture")}</a><button type="button" id="personal-disconnect">${tr("Disconnect account")}</button></div><p class="status" role="status"></p></article></div>`;
+    const selector = {reminders:"#reminders-form",nudges:"#nudge-status",freezes:"#freeze-toggle",subscriptions:"#subscriptions-form",decks:"#decks-form"}[card];
+    const current = selector && $("personal-content").querySelector(selector)?.closest(".card");
+    if (!current) {$("personal-content").innerHTML = markup;return;}
+    const fresh = document.createElement("div");fresh.innerHTML = markup;
+    const replacement = fresh.querySelector(selector).closest(".card");
+    if (card === "decks") replacement.querySelector("details").open = current.querySelector("details")?.open || false;
+    current.replaceWith(replacement);
   }
   async function submitForm(form, route, body, key) {
     const session = state.session, controls = [...form.querySelectorAll("input,select,button")], status = form.querySelector(".status");
@@ -228,7 +235,7 @@
       const saved = await owner(route,body,session);
       if (state.session!==session) return;
       state.settings[key]=saved;
-      renderSettings();
+      renderSettings(key);
       const notice = $("personal-content").querySelector(`#${form.id} .status`);
       if(notice) notice.textContent=tr("Saved across your devices.");
     } catch(cause) {
@@ -268,13 +275,13 @@
     const session=state.session;
     if (target.id==="freeze-toggle") {
       target.disabled=true;const status=$("freeze-status");status.textContent=tr("Saving…");
-      try {const saved=await owner("/api/streak-freezes",{enabled:target.checked},session);if(state.session!==session)return;state.settings.freezes=saved;renderSettings();$("freeze-status").textContent=tr("Saved across your devices.");}
+      try {const saved=await owner("/api/streak-freezes",{enabled:target.checked},session);if(state.session!==session)return;state.settings.freezes=saved;renderSettings("freezes");$("freeze-status").textContent=tr("Saved across your devices.");}
       catch(cause){if(state.session===session){target.checked=!target.checked;target.disabled=false;status.className="status error";status.textContent=cause.message;}}
     }
     if (target.dataset.nudgeField || target.dataset.nudgeSender) {
       target.disabled=true;const status=$("nudge-status");status.textContent=tr("Saving…");
       const route=target.dataset.nudgeSender ? `/api/friend-nudges/${encodeURIComponent(session.user)}/senders/${encodeURIComponent(target.dataset.nudgeSender)}` : `/api/friend-nudges/${encodeURIComponent(session.user)}/${target.dataset.nudgeField}`;
-      try {await request(route,{enabled:target.checked},session);if(state.session!==session)return;state.settings.nudges=await owner("/api/friend-nudges",undefined,session);if(state.session!==session)return;renderSettings();$("nudge-status").textContent=tr("Saved across your devices.");}
+      try {await request(route,{enabled:target.checked},session);if(state.session!==session)return;state.settings.nudges=await owner("/api/friend-nudges",undefined,session);if(state.session!==session)return;renderSettings("nudges");$("nudge-status").textContent=tr("Saved across your devices.");}
       catch(cause){if(state.session===session){target.checked=!target.checked;target.disabled=false;status.className="status error";status.textContent=cause.message;}}
     }
   });

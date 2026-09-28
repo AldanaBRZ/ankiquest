@@ -36,7 +36,7 @@ The Android app and the desktop add-on show what the server writes, so they word
 
 ## Community and reminders
 
-`/today` is the member's home page on the website. It puts daily quests, streak and XP progress, friend invitations, recent updates, and a direct study link together. It also shows when the server last received a review upload, so an old sync is visible. `/history` has a selectable study-day calendar with review counts, time, XP, new cards, streaks, and freeze days; `/settings` brings reminder, nudge, freeze, and deck-notification controls together. Sign in with your own player token to use these personal pages. A shared site password can unlock the public areas, but cannot view another member's study history or change their settings.
+`/today` is the member's home page on the website. It puts daily quests, streak and XP progress, friend invitations, recent updates, and a direct study link together. It also shows when study data was last updated, so an old sync is visible. `/history` has a selectable study-day calendar with review counts, time, XP, new cards, streaks, and freeze days; `/settings` brings reminder, nudge, freeze, and deck-notification controls together. Sign in with your own player token to use these personal pages. A shared site password can unlock the public areas, but cannot view another member's study history or change their settings.
 
 The latest-session recap on Today groups uploaded reviews from the same Anki day when gaps between their timestamps are under five minutes. It is an estimate from review logs, not a separate live study timer. `GET /api/study/<user>?year=YYYY` supplies the selected year's study days, available years, last review/upload timestamps, and latest estimated session to that member only.
 

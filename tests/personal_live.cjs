@@ -77,7 +77,7 @@ async function main() {
   await page.reload();
   await page.getByRole('heading', {name:'Latest synced session'}).waitFor();
   await page.locator('.personal-summary strong').first().waitFor();
-  assert.match(await page.locator('.personal-stamp').textContent(), /Last upload received/);
+  assert.match(await page.locator('.personal-stamp').textContent(), /Study data updated/);
   assert.equal(await page.locator('.personal-summary strong').first().textContent(), '2');
   await page.goto(base + '/history');
   await page.locator('[data-day]:visible').first().waitFor();

@@ -190,7 +190,19 @@ impl Store {
         let _ = fs::remove_file(shm_of(&copy));
         let _ = fs::remove_file(&copy);
 
-        self.upsert(user, &reviews, &[], clock)?;
+        let source_updated_at = before
+            .iter()
+            .flatten()
+            .map(|(modified, _)| {
+                modified
+                    .duration_since(UNIX_EPOCH)
+                    .map(|age| age.as_millis() as i64)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .unwrap_or_default();
+        self.upsert_at(user, &reviews, &[], clock, source_updated_at)?;
         self.signatures.insert(user.into(), before);
         Ok(true)
     }
@@ -201,6 +213,18 @@ impl Store {
         reviews: &[Review],
         deleted: &[i64],
         clock: Clock,
+    ) -> Result<(), Error> {
+        let received_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+        self.upsert_at(user, reviews, deleted, clock, received_at)
+    }
+
+    fn upsert_at(
+        &mut self,
+        user: &str,
+        reviews: &[Review],
+        deleted: &[i64],
+        clock: Clock,
+        received_at: i64,
     ) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
         {
@@ -222,10 +246,9 @@ impl Store {
                      rollover_hour = excluded.rollover_hour",
                 params![user, clock.offset_west_min, clock.rollover_hour],
             )?;
-            let received_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
             tx.execute(
                 "insert into review_syncs (user, received_at) values (?1, ?2)
-                 on conflict(user) do update set received_at = excluded.received_at",
+                 on conflict(user) do update set received_at = max(review_syncs.received_at, excluded.received_at)",
                 params![user, received_at],
             )?;
         }
@@ -294,6 +317,11 @@ mod tests {
 
         assert!(store.ingest(&base, "hill").unwrap());
         assert!(!store.ingest(&base, "hill").unwrap());
+        let first_import_at = store.last_review_sync("hill").unwrap();
+        drop(store);
+        let mut store = Store::open(&dir.join("state")).unwrap();
+        assert!(store.ingest(&base, "hill").unwrap());
+        assert_eq!(store.last_review_sync("hill").unwrap(), first_import_at);
         let reviews = store.reviews("hill").unwrap();
         assert_eq!(reviews.len(), 2);
         assert_eq!(reviews[1].last_ivl, 30);

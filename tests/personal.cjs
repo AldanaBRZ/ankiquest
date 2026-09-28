@@ -72,7 +72,7 @@ async function noOverflow(page,label){const size=await page.evaluate(()=>({width
       assert.equal(await f.page.locator('img[onerror]').count(),0);
       assert.equal(await f.page.locator('.personal-quest').count(),2);
       assert.equal(await f.page.locator('.personal-summary strong').first().textContent(),'2');
-      assert.match(await f.page.locator('.personal-stamp').textContent(),/Last upload received/);
+      assert.match(await f.page.locator('.personal-stamp').textContent(),/Study data updated/);
       assert.match(await f.page.locator('a[href="/community#challenge-7"]').getAttribute('href'),/challenge-7/);
       assert.match(await f.page.locator('a[href="/community#activity"]').textContent(),/2 new updates/);
       await noOverflow(f.page,`today ${width} ${theme}`);
@@ -92,10 +92,11 @@ async function noOverflow(page,label){const size=await page.evaluate(()=>({width
     await f.page.goto('http://ankiquest.test/settings');
     await f.page.locator('#reminders-form').waitFor();
     if(screenshots)await f.page.screenshot({path:path.join(screenshots,'settings-light.png'),fullPage:true});
+    await f.page.locator('#reminders-form [name="gentle_daily"]').check();
     await f.page.locator('#freeze-toggle').check();
     await f.page.waitForFunction(()=>document.querySelector('#freeze-status')?.textContent.includes('Saved'));
     assert.deepEqual(f.data.writes.at(-1),{pathname:'/api/streak-freezes/alice',body:{enabled:true}});
-    await f.page.locator('#reminders-form [name="gentle_daily"]').check();
+    assert(await f.page.locator('#reminders-form [name="gentle_daily"]').isChecked(),'saving a different card keeps unsaved reminder edits');
     await f.page.locator('#reminders-form button[type="submit"]').click();
     await f.page.waitForFunction(()=>document.querySelector('#reminders-form .status')?.textContent.includes('Saved'));
     assert.equal(f.data.writes.at(-1).body.gentle_daily,true);
@@ -129,6 +130,14 @@ async function noOverflow(page,label){const size=await page.evaluate(()=>({width
     await spanish.page.goto('http://ankiquest.test/today');
     await spanish.page.getByRole('heading',{name:'Última sesión sincronizada'}).waitFor();
     assert.deepEqual(spanish.errors,[]);checks++;await spanish.context.close();
+    const future=await fixture(browser);
+    const futureDate=new Date(Date.now()+3*86400000).toISOString().slice(0,10);
+    future.data.study.year=Number(futureDate.slice(0,4));
+    future.data.study.years=[future.data.study.year];
+    future.data.study.days=[{date:futureDate,reviews:2,time_ms:60000,xp:20,new_cards:1,streak:2,frozen:false}];
+    await future.page.goto('http://ankiquest.test/history');
+    await future.page.locator(`[data-day="${futureDate}"]:visible`).waitFor();
+    assert.deepEqual(future.errors,[]);checks++;await future.context.close();
   } finally {await browser.close();}
   console.log(`PASS: ${checks} personal-page responsive, privacy, history and settings browser scenarios.`);
 })().catch(error=>{console.error(error);process.exitCode=1;});
