@@ -84,6 +84,10 @@ async function main() {
   await page.locator('[data-day]:visible').first().click();
   assert.match(await page.locator('#day-detail').textContent(), /reviews/);
   await page.goto(base + '/settings');
+  if (await page.locator('#freeze-toggle').isChecked()) {
+    await page.locator('#freeze-toggle').uncheck();
+    await page.locator('#freeze-status').filter({hasText:'Saved'}).waitFor();
+  }
   await page.locator('#freeze-toggle').check();
   await page.locator('#freeze-status').filter({hasText:'Saved'}).waitFor();
   const freeze = await page.request.get(base + '/api/streak-freezes/alice');
