@@ -3,6 +3,7 @@ mod aki;
 mod avatars;
 mod challenges;
 mod competition;
+mod deck_copies;
 mod decks;
 mod feedback;
 mod freezes;
@@ -14,8 +15,9 @@ mod store;
 mod subscriptions;
 mod weekly_challenges;
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -643,6 +645,129 @@ async fn get_decks(
             eprintln!("deck settings for {user} failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+#[derive(Deserialize)]
+struct CopyRequest {
+    deck: String,
+    recipients: String,
+}
+
+#[derive(Serialize)]
+struct CopyInbox {
+    offers: Vec<deck_copies::Offer>,
+    friends: Vec<decks::Recipient>,
+    max_bytes: usize,
+}
+
+async fn deck_copy_inbox(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<CopyInbox>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let offers = deck_copies::inbox(&app.store.lock().unwrap().conn, &user, now_ms())
+        .map_err(store_error)?;
+    let mut friends: Vec<_> = app
+        .config
+        .users
+        .iter()
+        .filter(|(id, config)| {
+            *id != &user
+                && config
+                    .token
+                    .as_deref()
+                    .is_some_and(|token| !token.is_empty())
+        })
+        .map(|(id, _)| decks::Recipient {
+            user: id.clone(),
+            display: app.display(id),
+        })
+        .collect();
+    friends.sort_by(|a, b| a.display.cmp(&b.display));
+    Ok(Json(CopyInbox {
+        offers,
+        friends,
+        max_bytes: deck_copies::MAX_BYTES,
+    }))
+}
+
+async fn offer_deck_copy(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    headers: HeaderMap,
+    Query(request): Query<CopyRequest>,
+    package: Bytes,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let recipients: Vec<String> =
+        serde_json::from_str(&request.recipients).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if package.len() > deck_copies::MAX_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    if !deck_copies::valid_request(&user, &request.deck, &recipients, &package)
+        || recipients.iter().any(|id| {
+            !app.config
+                .users
+                .get(id)
+                .and_then(|config| config.token.as_deref())
+                .is_some_and(|token| !token.is_empty())
+        })
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let id = deck_copies::create(
+        &mut app.store.lock().unwrap().conn,
+        &user,
+        &request.deck,
+        &recipients,
+        &package,
+        now_ms(),
+    )
+    .map_err(store_error)?
+    .ok_or(StatusCode::TOO_MANY_REQUESTS)?;
+    Ok(Json(serde_json::json!({"id":id})))
+}
+
+async fn download_deck_copy(
+    State(app): State<Arc<App>>,
+    UrlPath((user, id)): UrlPath<(String, i64)>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let package = deck_copies::package(&app.store.lock().unwrap().conn, &user, id, now_ms())
+        .map_err(store_error)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=ankiquest-shared-deck.apkg",
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(package))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn dismiss_deck_copy(
+    State(app): State<Arc<App>>,
+    UrlPath((user, id)): UrlPath<(String, i64)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if deck_copies::dismiss(&mut app.store.lock().unwrap().conn, &user, id).map_err(store_error)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 async fn set_decks(
@@ -1971,6 +2096,16 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/rank/{user}", post(rank))
         .route("/api/decks/{user}", get(get_decks).post(set_decks))
         .route(
+            "/api/deck-copies/{user}",
+            get(deck_copy_inbox)
+                .post(offer_deck_copy)
+                .layer(axum::extract::DefaultBodyLimit::max(deck_copies::MAX_BYTES)),
+        )
+        .route(
+            "/api/deck-copies/{user}/{id}",
+            get(download_deck_copy).delete(dismiss_deck_copy),
+        )
+        .route(
             "/api/streak-freezes/{user}",
             get(get_freezes).post(set_freezes),
         )
@@ -2028,6 +2163,113 @@ mod tests {
             format!("Bearer {user}-secret").parse().unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn deck_copies_are_private_to_selected_players() {
+        let (app, path) = fixture();
+        let request = || CopyRequest {
+            deck: "Spanish".into(),
+            recipients: r#"["hill"]"#.into(),
+        };
+        let package = Bytes::from_static(b"PK\x03\x04example-package");
+        assert_eq!(
+            offer_deck_copy(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("hill"),
+                Query(request()),
+                package.clone()
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::UNAUTHORIZED,
+        );
+        let id = offer_deck_copy(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Query(request()),
+            package.clone(),
+        )
+        .await
+        .unwrap()
+        .0["id"]
+            .as_i64()
+            .unwrap();
+        let hill = deck_copy_inbox(State(app.clone()), UrlPath("hill".into()), headers("hill"))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(hill.offers.len(), 1);
+        assert_eq!(hill.offers[0].deck, "Spanish");
+        assert!(
+            deck_copy_inbox(
+                State(app.clone()),
+                UrlPath("friend".into()),
+                headers("friend")
+            )
+            .await
+            .unwrap()
+            .0
+            .offers
+            .is_empty()
+        );
+        assert_eq!(
+            download_deck_copy(
+                State(app.clone()),
+                UrlPath(("friend".into(), id)),
+                headers("friend")
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::NOT_FOUND,
+        );
+        let download = download_deck_copy(
+            State(app.clone()),
+            UrlPath(("hill".into(), id)),
+            headers("hill"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(download.into_body(), deck_copies::MAX_BYTES)
+                .await
+                .unwrap(),
+            package
+        );
+        assert_eq!(
+            dismiss_deck_copy(
+                State(app.clone()),
+                UrlPath(("hill".into(), id)),
+                headers("friend")
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::UNAUTHORIZED,
+        );
+        assert_eq!(
+            dismiss_deck_copy(
+                State(app.clone()),
+                UrlPath(("hill".into(), id)),
+                headers("hill")
+            )
+            .await
+            .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            download_deck_copy(
+                State(app.clone()),
+                UrlPath(("hill".into(), id)),
+                headers("hill")
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]
