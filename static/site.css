@@ -291,7 +291,7 @@ dialog{padding:20px}
 .embedded-nav { margin-bottom: 16px; }
 @media (max-width: 760px) {
   .topbar { gap: 12px; }
-  .site-nav { order: 3; margin: 0; flex-basis: 100%; }
+  .site-nav { order: 3; margin: 0; flex-basis: 100%; flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
   .top-actions { margin-left: auto; gap: 10px; }
 }
 @media (max-width: 620px) {

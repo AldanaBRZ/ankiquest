@@ -21,7 +21,7 @@ use axum::{Json, Router};
 use chrono::Datelike;
 use game::{Clock, Periods, Profile, Records, Review, Week};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -235,6 +235,121 @@ async fn profile(
     let mut profile = app.profile(&user).ok_or(StatusCode::NOT_FOUND)?;
     i18n::profile(&mut profile, &language);
     Ok(Json(profile))
+}
+
+#[derive(Deserialize, Default)]
+struct StudyQuery {
+    year: Option<i32>,
+}
+
+#[derive(Serialize)]
+struct StudySession {
+    started_at: i64,
+    ended_at: i64,
+    reviews: u64,
+    time_ms: i64,
+    new_cards: u64,
+}
+
+#[derive(Serialize)]
+struct StudyHistory {
+    year: i32,
+    years: Vec<i32>,
+    days: Vec<game::HistoryDay>,
+    last_review_at: Option<i64>,
+    last_received_at: Option<i64>,
+    latest_session: Option<StudySession>,
+}
+
+fn latest_study_session(player: &Player) -> Option<StudySession> {
+    let last = player.reviews.last()?;
+    let day = player.clock.day(last.id);
+    let mut session = StudySession {
+        started_at: last.id,
+        ended_at: last.id,
+        reviews: 0,
+        time_ms: 0,
+        new_cards: 0,
+    };
+    let mut next_at = last.id;
+    let mut new_cards = HashSet::new();
+    for review in player.reviews.iter().rev() {
+        if player.clock.day(review.id) != day
+            || next_at.saturating_sub(review.id) >= game::SESSION_GAP_MS
+        {
+            break;
+        }
+        session.started_at = review.id;
+        session.reviews += 1;
+        session.time_ms = session.time_ms.saturating_add(review.time_ms.max(0));
+        if review.kind == 0 && new_cards.insert(review.cid) {
+            session.new_cards += 1;
+        }
+        next_at = review.id;
+    }
+    Some(session)
+}
+
+async fn study_history(
+    State(app): State<Arc<App>>,
+    UrlPath(user): UrlPath<String>,
+    Query(query): Query<StudyQuery>,
+    headers: HeaderMap,
+) -> Result<Json<StudyHistory>, StatusCode> {
+    if !authorized(&app, &user, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let (current_year, latest_session) = {
+        let players = app.players.read().unwrap();
+        let player = players.get(&user);
+        let day = player.map_or_else(
+            || now_ms().div_euclid(86_400_000),
+            |player| player.clock.day(now_ms()),
+        );
+        let year = game::date_string(day)
+            .get(..4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1970);
+        (year, player.and_then(latest_study_session))
+    };
+    let year = query.year.unwrap_or(current_year);
+    if !(1970..=2100).contains(&year) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let profile = app.profile(&user);
+    let (years, days) = profile.as_ref().map_or_else(
+        || (Vec::new(), Vec::new()),
+        |profile| {
+            let years: BTreeSet<_> = profile
+                .history
+                .iter()
+                .filter_map(|day| day.date.get(..4)?.parse::<i32>().ok())
+                .collect();
+            let days = profile
+                .history
+                .iter()
+                .filter(|day| day.date.starts_with(&year.to_string()))
+                .cloned()
+                .collect();
+            (years.into_iter().rev().collect(), days)
+        },
+    );
+    let last_received_at = app
+        .store
+        .lock()
+        .unwrap()
+        .last_review_sync(&user)
+        .map_err(store_error)?;
+    Ok(Json(StudyHistory {
+        year,
+        years,
+        days,
+        last_review_at: profile
+            .as_ref()
+            .and_then(|p| (p.last_review_id > 0).then_some(p.last_review_id)),
+        last_received_at,
+        latest_session,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -973,6 +1088,10 @@ async fn index() -> Html<&'static str> {
 
 async fn community_page() -> Html<&'static str> {
     Html(include_str!("../static/community.html"))
+}
+
+async fn personal_page() -> Html<&'static str> {
+    Html(include_str!("../static/personal.html"))
 }
 
 #[derive(Deserialize, Default)]
@@ -1805,11 +1924,16 @@ fn router(app: Arc<App>) -> Router {
         .route("/", get(index))
         .route("/records", get(index))
         .route("/community", get(community_page))
+        .route("/today", get(personal_page))
+        .route("/history", get(personal_page))
+        .route("/settings", get(personal_page))
         .route("/{period}", get(period_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/site.css", get(access::site_css))
         .route("/site.js", get(access::site_js))
+        .route("/personal.css", get(access::personal_css))
+        .route("/personal.js", get(access::personal_js))
         .route("/login", get(access::login))
         .route("/auth/status", get(access::status))
         .route(
@@ -1839,6 +1963,7 @@ fn router(app: Arc<App>) -> Router {
         )
         .route("/api/week", get(week_info))
         .route("/api/profile/{user}", get(profile))
+        .route("/api/study/{user}", get(study_history))
         .route("/api/preview/{user}", post(preview))
         .route("/api/reviews/{user}", post(upload))
         .route("/api/rank/{user}", post(rank))
@@ -1901,6 +2026,98 @@ mod tests {
             format!("Bearer {user}-secret").parse().unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn personal_history_requires_owner_and_uses_anki_days_and_review_gaps() {
+        let (app, _path) = fixture();
+        let at = |hour: &str| {
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-09-25T{hour}:00Z"))
+                .unwrap()
+                .timestamp_millis()
+        };
+        {
+            let mut store = app.store.lock().unwrap();
+            let reviews = [
+                (at("03:59"), 1, 1),
+                (at("04:01"), 2, 1),
+                (at("04:10"), 3, 0),
+                (at("04:12"), 3, 1),
+            ]
+            .map(|(id, cid, kind)| Review {
+                id,
+                cid,
+                kind,
+                last_ivl: 1,
+                time_ms: 30_000,
+            });
+            store
+                .upsert("cerro", &reviews, &[], Clock::default())
+                .unwrap();
+            app.players
+                .write()
+                .unwrap()
+                .insert("cerro".into(), load_player(&store, "cerro").unwrap());
+        }
+        assert_eq!(
+            study_history(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                Query(StudyQuery { year: Some(2026) }),
+                headers("hill")
+            )
+            .await
+            .err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            study_history(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                Query(StudyQuery { year: Some(1800) }),
+                headers("cerro")
+            )
+            .await
+            .err(),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        let Json(history) = study_history(
+            State(app),
+            UrlPath("cerro".into()),
+            Query(StudyQuery { year: Some(2026) }),
+            headers("cerro"),
+        )
+        .await
+        .unwrap();
+        assert!(history.last_received_at.is_some());
+        assert_eq!(history.last_review_at, Some(at("04:12")));
+        assert_eq!(
+            history
+                .days
+                .iter()
+                .find(|day| day.date == "2026-09-24")
+                .unwrap()
+                .reviews,
+            1
+        );
+        assert_eq!(
+            history
+                .days
+                .iter()
+                .find(|day| day.date == "2026-09-25")
+                .unwrap()
+                .reviews,
+            3
+        );
+        let session = history.latest_session.unwrap();
+        assert_eq!(
+            (session.started_at, session.ended_at),
+            (at("04:10"), at("04:12"))
+        );
+        assert_eq!(
+            (session.reviews, session.time_ms, session.new_cards),
+            (2, 60_000, 1)
+        );
     }
 
     #[tokio::test]

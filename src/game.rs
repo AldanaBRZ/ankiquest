@@ -3,7 +3,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
-const SESSION_GAP_MS: i64 = 300_000;
+pub(crate) const SESSION_GAP_MS: i64 = 300_000;
 const MATURE_IVL: i64 = 21;
 pub const MAX_FREEZES: u32 = 3;
 const QUEST_XP: u64 = 50;

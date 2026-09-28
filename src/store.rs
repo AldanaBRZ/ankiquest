@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -72,6 +72,10 @@ impl Store {
                  user text not null,
                  key text not null,
                  primary key (user, key)
+             ) without rowid;
+             create table if not exists review_syncs (
+                 user text primary key,
+                 received_at integer not null
              ) without rowid;",
         )?;
         crate::avatars::initialize(&conn)?;
@@ -142,6 +146,17 @@ impl Store {
             .is_some())
     }
 
+    pub fn last_review_sync(&self, user: &str) -> Result<Option<i64>, Error> {
+        self.conn
+            .query_row(
+                "select received_at from review_syncs where user = ?1",
+                [user],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn mark_seen(&self, user: &str, key: &str) -> Result<bool, Error> {
         let changed = self.conn.execute(
             "insert or ignore into seen (user, key) values (?1, ?2)",
@@ -175,7 +190,19 @@ impl Store {
         let _ = fs::remove_file(shm_of(&copy));
         let _ = fs::remove_file(&copy);
 
-        self.upsert(user, &reviews, &[], clock)?;
+        let source_updated_at = before
+            .iter()
+            .flatten()
+            .map(|(modified, _)| {
+                modified
+                    .duration_since(UNIX_EPOCH)
+                    .map(|age| age.as_millis() as i64)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .unwrap_or_default();
+        self.upsert_at(user, &reviews, &[], clock, source_updated_at)?;
         self.signatures.insert(user.into(), before);
         Ok(true)
     }
@@ -186,6 +213,18 @@ impl Store {
         reviews: &[Review],
         deleted: &[i64],
         clock: Clock,
+    ) -> Result<(), Error> {
+        let received_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+        self.upsert_at(user, reviews, deleted, clock, received_at)
+    }
+
+    fn upsert_at(
+        &mut self,
+        user: &str,
+        reviews: &[Review],
+        deleted: &[i64],
+        clock: Clock,
+        received_at: i64,
     ) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
         {
@@ -206,6 +245,11 @@ impl Store {
                      offset_west_min = excluded.offset_west_min,
                      rollover_hour = excluded.rollover_hour",
                 params![user, clock.offset_west_min, clock.rollover_hour],
+            )?;
+            tx.execute(
+                "insert into review_syncs (user, received_at) values (?1, ?2)
+                 on conflict(user) do update set received_at = max(review_syncs.received_at, excluded.received_at)",
+                params![user, received_at],
             )?;
         }
         tx.commit()?;
@@ -273,6 +317,11 @@ mod tests {
 
         assert!(store.ingest(&base, "hill").unwrap());
         assert!(!store.ingest(&base, "hill").unwrap());
+        let first_import_at = store.last_review_sync("hill").unwrap();
+        drop(store);
+        let mut store = Store::open(&dir.join("state")).unwrap();
+        assert!(store.ingest(&base, "hill").unwrap());
+        assert_eq!(store.last_review_sync("hill").unwrap(), first_import_at);
         let reviews = store.reviews("hill").unwrap();
         assert_eq!(reviews.len(), 2);
         assert_eq!(reviews[1].last_ivl, 30);
