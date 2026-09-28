@@ -1246,6 +1246,7 @@ mod tests {
         let (mut store, path) = store();
         let clock = Clock::default();
         let mut p = profile(&clock, at(20));
+        p.freezes_enabled = false;
         save_settings(
             &mut store,
             "hill",

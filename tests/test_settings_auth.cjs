@@ -163,6 +163,28 @@ async function fixture(t, session = savedSession, user = 'cerro', options = {}) 
   };
 }
 
+test('freezes: enabled-by-default protection can be opted out without losing stock', async t => {
+  const f = await fixture(t);
+  const spec = dialogs.find(dialog => dialog.name === 'freezes');
+  await f.page.route(`${origin}/api/streak-freezes/**`, route => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify({ enabled: true, freezes: 2, capacity: 3 }),
+  }), { times: 1 });
+  await f.open(spec);
+  await f.ready(spec);
+  const toggle = f.page.locator('#freeze-enabled');
+  assert.equal(await toggle.isChecked(), true);
+  await toggle.uncheck();
+  await f.page.locator(spec.ready).getByRole('button', { name: spec.save, exact: true }).click();
+  await f.page.locator('#freeze-status').filter({ hasText: /is off/i }).waitFor();
+  const saved = f.settingsRequests().find(request => request.method === 'POST');
+  assert.deepEqual(JSON.parse(saved.body), { enabled: false });
+  assert.match(await f.page.locator('.freeze-balance').innerText(), /2 of 3 freezes saved/i);
+  await f.close(spec);
+  await f.open(spec);
+  await f.ready(spec);
+  assert.equal(await f.page.locator('#freeze-enabled').isChecked(), false);
+});
+
 test('decks: an unexpected response can be retried without reopening', async t => {
   const f = await fixture(t);
   const spec = dialogs.find(dialog => dialog.name === 'decks');
