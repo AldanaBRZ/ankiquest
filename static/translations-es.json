@@ -4,7 +4,7 @@
   "A checked name removes you from all of their deck-sharing lists. They cannot add you back. Clear the name and save to subscribe again.": "Marcar un nombre te elimina de todas sus listas de envío de mazos. No pueden volver a añadirte. Desmarca el nombre y guarda para suscribirte de nuevo.",
   "A few reviews today can start your next streak.": "Unos pocos repasos hoy pueden iniciar tu próxima racha.",
   "A freeze covered {0}. You have {1} freeze left in storage; streak protection is now off.": "Un protector cubrió el {0}. Te queda {1} protector guardado; la protección de racha está desactivada.",
-  "A freeze covered {0}. You have {1} freeze left.": "Un protector cubrió el {0}. Te quedan {1} protector.",
+  "A freeze covered {0}. You have {1} freeze left.": "Un protector cubrió el {0}. Te queda {1} protector.",
   "A freeze covered {0}. You have {1} freezes left in storage; streak protection is now off.": "Un protector cubrió el {0}. Te quedan {1} protectores guardados; la protección de racha está desactivada.",
   "A freeze covered {0}. You have {1} freezes left.": "Un protector cubrió el {0}. Te quedan {1} protectores.",
   "A freeze is available if you need a break.": "Tienes un protector disponible si necesitas un descanso.",
@@ -574,7 +574,7 @@
   "Study before 7am on {0} days": "Estudia antes de las 7 durante {0} días",
   "Study buddies": "Compañeros de estudio",
   "Study days": "Días de estudio",
-  "Study days count actual studying; freezes do not count.": "Los días de estudio cuentan el estudio real; los protectores no cuentan.",
+  "Study days count actual studying; freezes do not count.": "Los días de estudio cuentan solo si estudias; los protectores no cuentan.",
   "Study for {0} hours in total": "Estudia durante {0} horas en total",
   "Study for {0} minutes": "Estudia durante {0} minutos",
   "Study in {0} separate sessions": "Estudia en {0} sesiones distintas",
@@ -924,5 +924,11 @@
   "Your weekly suggestion changed. Refresh and try again.": "Tu propuesta semanal ha cambiado. Actualiza e inténtalo de nuevo.",
   "Choose invite or dismiss.": "Elige invitar u omitir.",
   "This suggestion already has an invitation.": "Esta propuesta ya tiene una invitación.",
-  "You skipped this week's suggestion. You can still create a custom goal.": "Has omitido la propuesta de esta semana. Puedes crear un objetivo personalizado."
+  "You skipped this week's suggestion. You can still create a custom goal.": "Has omitido la propuesta de esta semana. Puedes crear un objetivo personalizado.",
+  "Leave this off to start now. Turn it on to give everyone the full duration after all invitees accept. Studying before then does not count.": "Déjalo desactivado para empezar ahora. Actívalo para que el plazo completo empiece cuando todos los invitados acepten. Lo que estudies antes no contará.",
+  "Start when everyone accepts": "Empezar cuando todos acepten",
+  "Starts when everyone accepts": "Empieza cuando todos acepten",
+  "Studying before everyone accepts does not count toward this goal.": "Lo que estudies antes de que todos acepten no cuenta para este objetivo.",
+  "The full goal duration starts after everyone accepts.": "El plazo completo del objetivo empieza cuando todos acepten.",
+  "Waiting for everyone": "Esperando a todos"
 }
