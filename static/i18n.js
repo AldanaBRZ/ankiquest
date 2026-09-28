@@ -1,15 +1,24 @@
 /* Translate authored interface text before interpolating names or messages. */
 (() => {
   "use strict";
-  const catalog = window.AnkiQuestSpanish || {};
-  const normalize = value => String(value || "en").toLowerCase().split(/[-_]/)[0] === "es" ? "es" : "en";
+  const catalogs = {
+    es: window.AnkiQuestSpanish || {},
+    fr: window.AnkiQuestFrench || {},
+    de: window.AnkiQuestGerman || {},
+    pt: window.AnkiQuestPortuguese || {},
+  };
+  const normalize = value => {
+    const code = String(value || "en").toLowerCase().split(/[-_]/)[0];
+    return Object.hasOwn(catalogs, code) ? code : "en";
+  };
   let previousLanguage;
   try { previousLanguage = sessionStorage.getItem("ankiquestLanguage"); } catch (_) {}
   let language = normalize(window.ankiquestLanguage || previousLanguage || navigator.language);
   const substitute = (source, values) => source.replace(/\{(\d+)\}/g, (match, index) => index < values.length ? String(values[index]) : match);
   function translate(source) {
     const leading = source.match(/^\s*/)[0], trailing = source.match(/\s*$/)[0], key = source.trim();
-    return language === "es" && Object.hasOwn(catalog, key) ? leading + catalog[key] + trailing : source;
+    const catalog = catalogs[language];
+    return catalog && Object.hasOwn(catalog, key) ? leading + catalog[key] + trailing : source;
   }
   function t(source, ...values) {
     if (Array.isArray(source)) return substitute(translate(source.reduce((text, part, index) => text + (index ? `{${index - 1}}` : "") + part, "")), values);
