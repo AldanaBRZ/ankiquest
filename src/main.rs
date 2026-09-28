@@ -1794,11 +1794,21 @@ fn deliver_notifications(app: &App, budget: Duration) -> Result<(), Error> {
         }
         let sender_display = app.display(&delivery.notification.sender);
         i18n::notification(&mut delivery.notification, &language, &sender_display);
+        let push_body = if let Some(original) = &delivery.notification.reply_to {
+            format!(
+                "{}\n\n{}: {}",
+                delivery.notification.body,
+                i18n::text("In reply to", &language),
+                original.body
+            )
+        } else {
+            delivery.notification.body.clone()
+        };
         let result = push(
             &app.config,
             &delivery.user,
             &delivery.notification.title,
-            &delivery.notification.body,
+            &push_body,
             match delivery.notification.kind.as_str() {
                 "event" => "tada",
                 "risk" | "reminder_urgent" => "fire",
@@ -3734,6 +3744,54 @@ mod tests {
             "ntfy needs high priority to request vibration and a pop-up"
         );
         assert!(was_pushed(&app, id));
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn ntfy_reply_includes_the_message_it_answers() {
+        let (mut app, path) = fixture();
+        let (base, server) = local_push(200);
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.ntfy = Some(base);
+        config.users.get_mut("cerro").unwrap().ntfy_topic = Some("cerro-topic".into());
+        let now = now_ms();
+        let reply_id = {
+            let mut store = app.store.lock().unwrap();
+            let original = store
+                .send(
+                    &decks::Outgoing {
+                        to: "hill",
+                        from: "cerro",
+                        title: "Deck complete",
+                        body: "Cerro finished Spanish.",
+                        kind: "completion",
+                    },
+                    Clock::default().day(now),
+                    now,
+                )
+                .unwrap();
+            store
+                .reply("hill", "Hill", original, "Good job!", now + 1)
+                .unwrap();
+            store.conn.last_insert_rowid()
+        };
+        deliver_notifications(&app, PUSH_BUDGET).unwrap();
+        let request = server.join().unwrap();
+        assert!(
+            request.ends_with("Good job!\n\nIn reply to: Cerro finished Spanish."),
+            "{request}"
+        );
+        assert!(was_pushed(&app, reply_id));
+        assert_eq!(
+            app.store
+                .lock()
+                .unwrap()
+                .notifications("cerro", now + 1)
+                .unwrap()[0]
+                .body,
+            "Good job!"
+        );
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }
