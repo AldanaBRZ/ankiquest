@@ -19,6 +19,10 @@ pub(crate) fn public_asset(path: &str) -> bool {
             | "/aki/freeze.png"
             | "/aki/winner.png"
             | "/aki/face.png"
+            | "/ankilope/welcome.png"
+            | "/ankilope/study.png"
+            | "/ankilope/celebrate.png"
+            | "/ankilope/face.png"
     )
 }
 
@@ -44,8 +48,29 @@ async fn asset(Path(name): Path<String>) -> Response {
         .into_response()
 }
 
+async fn ankilope_asset(Path(name): Path<String>) -> Response {
+    let bytes: &'static [u8] = match name.as_str() {
+        "welcome.png" => include_bytes!("../static/ankilope/welcome.png"),
+        "study.png" => include_bytes!("../static/ankilope/study.png"),
+        "celebrate.png" => include_bytes!("../static/ankilope/celebrate.png"),
+        "face.png" => include_bytes!("../static/ankilope/face.png"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 pub(crate) fn routes() -> Router<Arc<App>> {
-    Router::new().route("/aki/{name}", get(asset))
+    Router::new()
+        .route("/aki/{name}", get(asset))
+        .route("/ankilope/{name}", get(ankilope_asset))
 }
 
 #[cfg(test)]
@@ -78,5 +103,16 @@ mod tests {
                 StatusCode::NOT_FOUND
             );
         }
+        for name in ["welcome", "study", "celebrate", "face"] {
+            assert!(public_asset(&format!("/ankilope/{name}.png")));
+            let response = ankilope_asset(Path(format!("{name}.png"))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        }
+        assert!(!public_asset("/ankilope/config.json"));
+        assert_eq!(
+            ankilope_asset(Path("unknown.png".into())).await.status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

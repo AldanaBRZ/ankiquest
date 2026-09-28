@@ -2,6 +2,7 @@ mod access;
 mod aki;
 mod avatars;
 mod challenges;
+mod companions;
 mod competition;
 mod deck_copies;
 mod decks;
@@ -2100,6 +2101,10 @@ fn router(app: Arc<App>) -> Router {
         )
         .route("/api/week", get(week_info))
         .route("/api/profile/{user}", get(profile))
+        .route(
+            "/api/companion/{user}",
+            get(companions::get).post(companions::set),
+        )
         .route("/api/study/{user}", get(study_history))
         .route("/api/preview/{user}", post(preview))
         .route("/api/reviews/{user}", post(upload))
@@ -2173,6 +2178,69 @@ mod tests {
             format!("Bearer {user}-secret").parse().unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn companion_choice_is_private_validated_and_independent_for_each_player() {
+        let (app, path) = fixture();
+        let get = |user: &str, token: &str| {
+            companions::get(State(app.clone()), UrlPath(user.into()), headers(token))
+        };
+        assert_eq!(get("cerro", "cerro").await.unwrap().0.companion, "aki");
+        assert_eq!(
+            get("cerro", "hill").await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            companions::set(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("cerro"),
+                Json(companions::Preference {
+                    companion: "unknown".into()
+                })
+            )
+            .await
+            .err(),
+            Some(StatusCode::BAD_REQUEST),
+        );
+        assert_eq!(
+            companions::set(
+                State(app.clone()),
+                UrlPath("cerro".into()),
+                headers("hill"),
+                Json(companions::Preference {
+                    companion: "none".into()
+                })
+            )
+            .await
+            .err(),
+            Some(StatusCode::UNAUTHORIZED),
+        );
+        let _ = companions::set(
+            State(app.clone()),
+            UrlPath("cerro".into()),
+            headers("cerro"),
+            Json(companions::Preference {
+                companion: "ankilope".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = companions::set(
+            State(app.clone()),
+            UrlPath("hill".into()),
+            headers("hill"),
+            Json(companions::Preference {
+                companion: "none".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(get("cerro", "cerro").await.unwrap().0.companion, "ankilope");
+        assert_eq!(get("hill", "hill").await.unwrap().0.companion, "none");
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]

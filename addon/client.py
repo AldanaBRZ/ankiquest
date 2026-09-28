@@ -54,6 +54,16 @@ class Client:
     def profile(self):
         return self._request("/api/profile/" + self.user)
 
+    def companion(self):
+        choice = self._request("/api/companion/" + self.user)["companion"]
+        return choice if choice in ("aki", "ankilope", "none") else "aki"
+
+    def set_companion(self, companion):
+        if companion not in ("aki", "ankilope", "none"):
+            raise ValueError("Unknown study companion")
+        choice = self._request("/api/companion/" + self.user, {"companion": companion})["companion"]
+        return choice if choice in ("aki", "ankilope", "none") else "aki"
+
     def notifications(self):
         return self._request("/api/notifications/" + self.user)
 

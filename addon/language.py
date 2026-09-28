@@ -2,6 +2,12 @@
 
 SPANISH = {
     "Aki, your study companion.": "Aki, tu compañero de estudio.",
+    "Your study companion.": "Tu compañero de estudio.",
+    "Study companion": "Compañero de estudio",
+    "Choose who cheers you on. This choice follows your account across devices.": "Elige quién te anima. Esta elección se sincroniza con tu cuenta en todos tus dispositivos.",
+    "No companion": "Sin compañero",
+    "ankiquest study companion…": "Compañero de estudio de ankiquest…",
+    "Study companion saved across your devices.": "Compañero de estudio guardado en todos tus dispositivos.",
     "Cancel": "Cancelar", "Save": "Guardar", "Server": "Servidor", "Player": "Jugador", "Token": "Token",
     "Leaderboard": "Clasificación", "Friends": "Amigos", "Decks": "Mazos", "Notify": "Avisar",
     "Test connection": "Probar conexión", "Upload everything again": "Volver a subir todo",

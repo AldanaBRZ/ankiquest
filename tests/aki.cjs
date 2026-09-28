@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 function fixture(language = 'en') {
   const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, '../static/translations-es.json'), 'utf8'));
-  const context = {document:{addEventListener(){}}, location:{pathname:'/week'}, AnkiQuestI18n:{t:value=>language==='es' ? catalog[value] || value : value}};
+  const context = {document:{addEventListener(){},documentElement:{dataset:{}},querySelectorAll(){return []}}, addEventListener(){}, dispatchEvent(){}, CustomEvent:class {constructor(name, options){this.type=name;this.detail=options.detail;}}, location:{pathname:'/week'}, AnkiQuestI18n:{t:value=>language==='es' ? catalog[value] || value : value}};
   context.window = context;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../static/aki.js'),'utf8'), context);
   return context.AnkiQuestAki;
@@ -39,6 +39,16 @@ test('pose paths are fixed and optional classes cannot inject attributes',()=>{
   assert.match(markup,/&quot;/);
   assert.doesNotMatch(markup,/ onerror="/);
   assert.match(markup,/alt="" aria-hidden="true"/);
+});
+test('Ankilope maps study states to available artwork and none hides companion content',()=>{
+  const companion=fixture();
+  companion.setChoice('ankilope');
+  assert.match(companion.image('freeze'),/src="\/ankilope\/study.png"/);
+  assert.match(companion.image('winner'),/src="\/ankilope\/celebrate.png"/);
+  companion.setChoice('none');
+  assert.equal(companion.choice(),'none');
+  companion.setChoice('../bad');
+  assert.equal(companion.choice(),'aki');
 });
 test('Aki encouragement is translated before it reaches the page',()=>{
   const markup=fixture('es').profile({streak_state:'protected',today:{reviews:0}});

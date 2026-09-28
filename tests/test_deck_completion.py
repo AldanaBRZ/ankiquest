@@ -201,7 +201,7 @@ class UploadTests(unittest.TestCase):
 class RefreshTests(unittest.TestCase):
     def setUp(self):
         self.api = SimpleNamespace(
-            configured=True, base="https://example.test", user="cerro", upload=Mock(return_value={})
+            configured=True, base="https://example.test", user="cerro", token="secret", upload=Mock(return_value={})
         )
         self.pending = [[(101, 1, 1, 1000, 1)]]
         self.settings = {"url": "https://example.test", "user": "cerro", "token": "secret"}
@@ -324,7 +324,7 @@ class RefreshTests(unittest.TestCase):
         self.assertIn("#1 this week", content.stats)
         self.assertIn("ankiquest:web:inbox", content.stats)
         self.assertIn('/_addons/ankiquest/aki_face.png', content.stats)
-        self.mw.addonManager.setWebExports.assert_called_once_with("ankiquest_test_addon", r"aki_face\.png")
+        self.mw.addonManager.setWebExports.assert_called_once_with("ankiquest_test_addon", r"(aki|ankilope)_face\.png")
 
     def test_a_quiet_poll_only_remembers_what_a_loud_one_would_have_said(self):
         self.with_board()

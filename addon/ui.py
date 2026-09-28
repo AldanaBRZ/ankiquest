@@ -4,6 +4,7 @@ from pathlib import Path
 
 from aqt.qt import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QIcon,
@@ -66,9 +67,11 @@ def _buttons(dialog, accept_text, extra=()):
     return row
 
 
-def _brand(dialog, layout):
+def _brand(dialog, layout, companion="aki"):
     """Local art works even before a server is configured or while offline."""
-    asset = str(Path(__file__).with_name("aki_face.png"))
+    if companion == "none":
+        return
+    asset = str(Path(__file__).with_name("ankilope_face.png" if companion == "ankilope" else "aki_face.png"))
     dialog.setWindowIcon(QIcon(asset))
     image = QLabel()
     image.setPixmap(QPixmap(asset).scaled(
@@ -76,15 +79,15 @@ def _brand(dialog, layout):
         _enum(Qt, "AspectRatioMode", "KeepAspectRatio"),
         _enum(Qt, "TransformationMode", "SmoothTransformation"),
     ))
-    layout.addWidget(_row(image, QLabel(tr("Aki, your study companion."))))
+    layout.addWidget(_row(image, QLabel(tr("Your study companion."))))
 
 
-def settings_dialog(parent, config, on_test, on_upload_all):
+def settings_dialog(parent, config, on_test, on_upload_all, companion="aki"):
     """Everything the phone keeps in its ankiquest preference screen."""
     dialog = QDialog(parent)
     dialog.setWindowTitle("ankiquest")
     layout = QVBoxLayout(dialog)
-    _brand(dialog, layout)
+    _brand(dialog, layout, companion)
 
     url = QLineEdit(config.get("url", ""))
     url.setPlaceholderText("https://anki.example.com")
@@ -126,7 +129,7 @@ def _values(url, user, token, rank, hours):
     }
 
 
-def deck_dialog(parent, settings):
+def deck_dialog(parent, settings, companion="aki"):
     """A tree of decks and a list of recipients; ticking a deck ticks its subdecks."""
     decks = ordered(settings.get("decks") or [])
     people = settings.get("recipients") or []
@@ -134,7 +137,7 @@ def deck_dialog(parent, settings):
     dialog.setWindowTitle(tr("Deck completion notifications"))
     dialog.resize(680, 520)
     layout = QVBoxLayout(dialog)
-    _brand(dialog, layout)
+    _brand(dialog, layout, companion)
     layout.addWidget(
         QLabel(tr("The people you pick hear once a day when you finish a shared deck."))
     )
@@ -229,3 +232,36 @@ def _titled(title, widget):
     layout.addWidget(label)
     layout.addWidget(widget)
     return holder
+
+
+def companion_dialog(parent, selected):
+    """A native picker; the caller saves the answer to the current account."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(tr("Study companion"))
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel(tr("Choose who cheers you on. This choice follows your account across devices.")))
+    choice = QComboBox()
+    options = (("Aki", "aki"), ("Ankilope", "ankilope"), (tr("No companion"), "none"))
+    for name, value in options:
+        choice.addItem(name, value)
+    choice.setCurrentIndex(next((i for i, (_, value) in enumerate(options) if value == selected), 0))
+    layout.addWidget(choice)
+    preview = QLabel()
+    preview.setAlignment(_enum(Qt, "AlignmentFlag", "AlignCenter"))
+    layout.addWidget(preview)
+
+    def update_preview():
+        value = choice.currentData()
+        if value == "none":
+            preview.clear()
+        else:
+            asset = str(Path(__file__).with_name("ankilope_face.png" if value == "ankilope" else "aki_face.png"))
+            preview.setPixmap(QPixmap(asset).scaled(
+                96, 96, _enum(Qt, "AspectRatioMode", "KeepAspectRatio"),
+                _enum(Qt, "TransformationMode", "SmoothTransformation"),
+            ))
+
+    choice.currentIndexChanged.connect(update_preview)
+    update_preview()
+    layout.addLayout(_buttons(dialog, tr("Save")))
+    return choice.currentData() if dialog.exec() else None

@@ -35,10 +35,12 @@ state = {
     "timer": None,
     "place": None,
     "profile": None,
+    "companion": "aki",
+    "companion_account": None,
     "inbox": [],
 }
 
-mw.addonManager.setWebExports(__name__, r"aki_face\.png")
+mw.addonManager.setWebExports(__name__, r"(aki|ankilope)_face\.png")
 
 
 def config():
@@ -150,18 +152,24 @@ def poll(quiet=False):
     previous = mw.pm.profile.get(ORDER_KEY) or []
 
     def work():
-        return api.rank(previous), api.profile(), api.notifications()
+        rank, profile, notifications = api.rank(previous), api.profile(), api.notifications()
+        try:
+            companion = api.companion()
+        except Exception:
+            companion = state["companion"] if state["companion_account"] == [api.base, api.user, api.token] else "aki"
+        return rank, profile, notifications, companion
 
     def done(future):
         state["polling"] = False
         try:
-            rank, profile, inbox = future.result()
+            rank, profile, inbox, companion = future.result()
         except Exception as e:
             print("ankiquest poll:", e)
             return
         order = rank.get("order") or []
         state["place"] = order.index(api.name) + 1 if api.name in order else None
         state["profile"], state["inbox"] = profile, inbox
+        state["companion"], state["companion_account"] = companion, [api.base, api.user, api.token]
         announce(rank, profile, inbox, quiet)
         redraw()
 
@@ -208,7 +216,8 @@ def on_deck_browser(deck_browser, content):
     if state["profile"] is None and not state["polling"]:
         poll(quiet=True)
     waiting = sum(1 for entry in state["inbox"] if notify.answerable(entry))
-    mascot = "/_addons/%s/aki_face.png" % mw.addonManager.addonFromModule(__name__)
+    companion = state["companion"] if state["companion_account"] == [api.base, api.user, api.token] else "aki"
+    mascot = None if companion == "none" else "/_addons/%s/%s_face.png" % (mw.addonManager.addonFromModule(__name__), companion)
     content.stats += board.html(state["profile"], state["place"], waiting, tr, mascot)
 
 
@@ -238,12 +247,13 @@ def open_inbox():
 
 
 def open_settings():
-    values = ui.settings_dialog(mw, config(), test_connection, upload_everything)
+    values = ui.settings_dialog(mw, config(), test_connection, upload_everything, state["companion"])
     if values is None:
         return
     save_config(values)
     state["profile"] = None
     state["place"] = None
+    state["companion"], state["companion_account"] = "aki", None
     refresh_shared_decks()
     poll(quiet=True)
     tooltip(tr("ankiquest settings saved."))
@@ -273,6 +283,41 @@ def upload_everything():
     tooltip(tr("Uploading your whole review history…"))
 
 
+def open_companion():
+    api = client()
+    if not api.configured:
+        tooltip(tr("Set the server, player and token in ankiquest settings first."))
+        return
+
+    def loaded(future):
+        try:
+            current = future.result()
+        except Exception as error:
+            tooltip("ankiquest: %s" % error)
+            return
+        if [client().base, client().user, client().token] != [api.base, api.user, api.token]:
+            return
+        selected = ui.companion_dialog(mw, current)
+        if selected is None or selected == current:
+            return
+
+        def saved(future):
+            try:
+                companion = future.result()
+            except Exception as error:
+                tooltip("ankiquest: %s" % error)
+                return
+            if [client().base, client().user, client().token] != [api.base, api.user, api.token]:
+                return
+            state["companion"], state["companion_account"] = companion, [api.base, api.user, api.token]
+            redraw()
+            tooltip(tr("Study companion saved across your devices."))
+
+        mw.taskman.run_in_background(lambda: api.set_companion(selected), saved)
+
+    mw.taskman.run_in_background(api.companion, loaded)
+
+
 def open_deck_notifications():
     api = client()
     if mw.col is None or not api.configured:
@@ -292,7 +337,7 @@ def open_deck_notifications():
         except Exception as e:
             tooltip(tr("ankiquest: could not load your decks (%s)") % e)
             return
-        choice = ui.deck_dialog(mw, settings)
+        choice = ui.deck_dialog(mw, settings, state["companion"])
         if choice is None:
             return
         shared, unshared, recipients, nudges, celebrations = choice
@@ -355,6 +400,7 @@ def add_action(title, handler):
 
 
 add_action(tr("ankiquest settings…"), open_settings)
+add_action(tr("ankiquest study companion…"), open_companion)
 add_action(tr("ankiquest deck notifications…"), open_deck_notifications)
 add_action(tr("ankiquest inbox…"), open_inbox)
 add_action(tr("ankiquest on the web…"), open_website)
