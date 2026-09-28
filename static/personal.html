@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<title>My AnkiQuest</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/site.css">
+<link rel="stylesheet" href="/avatars.css">
+<link rel="stylesheet" href="/personal.css">
+<script defer src="/site.js"></script>
+<script defer src="/avatars.js"></script>
+<script defer src="/personal.js"></script>
+</head>
+<body>
+<a class="skip" href="#personal-app" data-i18n="Skip to main content">Skip to main content</a>
+<div class="shell">
+  <header class="topbar" data-site-header data-site-section="today"><div data-site-actions></div></header>
+  <main id="personal-app" tabindex="-1" aria-busy="true">
+    <div class="page-hero personal-hero"><div><div class="eyebrow" data-i18n="Your study space">Your study space</div><h1 id="personal-title">Today</h1><p id="personal-intro">Your progress, one day at a time.</p></div><button id="personal-refresh" type="button" hidden data-i18n="Refresh progress">Refresh progress</button></div>
+    <nav class="tabs personal-tabs" aria-label="Personal pages"><a href="/today" data-personal-tab="today" data-i18n="Today">Today</a><a href="/history" data-personal-tab="history" data-i18n="History">History</a><a href="/settings" data-personal-tab="settings" data-i18n="Settings">Settings</a></nav>
+    <section id="personal-gate" class="card" hidden aria-labelledby="connect-title">
+      <h2 id="connect-title" data-i18n="Connect your account">Connect your account</h2>
+      <p class="section-intro" data-i18n="Your member token unlocks your private progress and settings. The shared website password only unlocks public pages.">Your member token unlocks your private progress and settings. The shared website password only unlocks public pages.</p>
+      <form id="personal-connect" class="personal-connect">
+        <label class="field"><span data-i18n="Your player">Your player</span><input name="user" required autocomplete="username" maxlength="80"></label>
+        <label class="field"><span data-i18n="Your AnkiQuest token">Your AnkiQuest token</span><input name="token" type="password" required autocomplete="current-password" spellcheck="false"></label>
+        <button class="primary" type="submit" data-i18n="Connect">Connect</button>
+      </form>
+      <p id="connect-status" class="status" role="status"></p>
+      <p class="settings-hint" data-i18n="Your token is never saved in page storage.">Your token is never saved in page storage.</p>
+    </section>
+    <div id="personal-content" class="personal-content" hidden></div>
+    <div id="personal-error" class="notice error" role="alert" hidden></div>
+  </main>
+</div>
+</body>
+</html>

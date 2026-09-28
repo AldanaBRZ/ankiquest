@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -72,6 +72,10 @@ impl Store {
                  user text not null,
                  key text not null,
                  primary key (user, key)
+             ) without rowid;
+             create table if not exists review_syncs (
+                 user text primary key,
+                 received_at integer not null
              ) without rowid;",
         )?;
         crate::avatars::initialize(&conn)?;
@@ -142,6 +146,17 @@ impl Store {
             .is_some())
     }
 
+    pub fn last_review_sync(&self, user: &str) -> Result<Option<i64>, Error> {
+        self.conn
+            .query_row(
+                "select received_at from review_syncs where user = ?1",
+                [user],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn mark_seen(&self, user: &str, key: &str) -> Result<bool, Error> {
         let changed = self.conn.execute(
             "insert or ignore into seen (user, key) values (?1, ?2)",
@@ -206,6 +221,12 @@ impl Store {
                      offset_west_min = excluded.offset_west_min,
                      rollover_hour = excluded.rollover_hour",
                 params![user, clock.offset_west_min, clock.rollover_hour],
+            )?;
+            let received_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+            tx.execute(
+                "insert into review_syncs (user, received_at) values (?1, ?2)
+                 on conflict(user) do update set received_at = excluded.received_at",
+                params![user, received_at],
             )?;
         }
         tx.commit()?;

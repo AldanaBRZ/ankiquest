@@ -513,6 +513,18 @@ pub(crate) async fn site_css() -> impl IntoResponse {
         include_str!("../static/site.css"),
     )
 }
+pub(crate) async fn personal_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../static/personal.css"),
+    )
+}
+pub(crate) async fn personal_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../static/personal.js"),
+    )
+}
 pub(crate) async fn site_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
