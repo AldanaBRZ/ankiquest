@@ -1079,6 +1079,7 @@ mod tests {
             "/api/community",
             "/api/week",
             "/api/profile/alice",
+            "/api/companion/alice",
             "/api/notifications/alice",
             "/api/decks/alice",
             "/api/community/reminders/alice",
@@ -1127,6 +1128,10 @@ mod tests {
             "/aki/streak.png",
             "/aki/freeze.png",
             "/aki/winner.png",
+            "/ankilope/face.png",
+            "/ankilope/welcome.png",
+            "/ankilope/study.png",
+            "/ankilope/celebrate.png",
         ] {
             assert_eq!(
                 request(&app, "GET", endpoint, &[], "").await.status(),

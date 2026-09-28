@@ -5,7 +5,7 @@ const path = require('node:path');
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const asset = file => fs.readFileSync(path.join(root,'static',file),'utf8');
-const siteScript = `window.AnkiQuestSpanish=${asset('translations-es.json')};\n${asset('i18n.js')}\n${asset('site.js')}`;
+const siteScript = `window.AnkiQuestSpanish=${asset('translations-es.json')};\n${asset('i18n.js')}\n${asset('aki.js')}\n${asset('site.js')}`;
 const now = Date.now();
 const token = 'test-owner-token';
 const initial = () => ({
@@ -15,6 +15,7 @@ const initial = () => ({
   challenges:{challenges:[{id:7,title:'Seven days together',status:'active',members:[{user:'alice',status:'invited'}]}]},
   activity:{items:[],unread_count:2},
   reminders:{gentle_daily:false,urgent_streak:false,freeze_used:false,freeze_refill:false,milestone:false,weekly_closing:false,weekly_recap:false,reminder_hour:20,quiet_start:22,quiet_end:9,daily_limit:2},
+  companion:{companion:'aki'},
   freezes:{enabled:false,freezes:1,capacity:3},
   nudges:{receiving:true,automatic_receiving:false,friends:[{user:'bob',display:'Bob',muted_by_me:false,enabled:true,sent_today:false}]},
   subscriptions:{enabled:true,unsubscribed_senders:[],sharing_senders:['bob'],senders:[{user:'bob',display:'Bob'}]},
@@ -37,7 +38,7 @@ async function fixture(browser, options={}) {
     if(pathname==='/api/study/alice')return route.fulfill({json:url.searchParams.get('year')==='2025'?{...data.study,year:2025,days:[{date:'2025-06-20',reviews:4,time_ms:120000,xp:40,new_cards:1,streak:1,frozen:false}]}:data.study});
     if(pathname==='/api/activity/alice')return route.fulfill({json:data.activity});
     if(pathname==='/api/community/challenges/alice')return route.fulfill({json:data.challenges});
-    const settings={'/api/community/reminders/alice':'reminders','/api/streak-freezes/alice':'freezes','/api/friend-nudges/alice':'nudges','/api/deck-subscriptions/alice':'subscriptions','/api/decks/alice':'decks'};
+    const settings={'/api/companion/alice':'companion','/api/community/reminders/alice':'reminders','/api/streak-freezes/alice':'freezes','/api/friend-nudges/alice':'nudges','/api/deck-subscriptions/alice':'subscriptions','/api/decks/alice':'decks'};
     if(settings[pathname]) {
       const key=settings[pathname];
       if(method==='POST'){const body=route.request().postDataJSON();data.writes.push({pathname,body});data[key]={...data[key],...body};}
@@ -91,6 +92,15 @@ async function noOverflow(page,label){const size=await page.evaluate(()=>({width
     const f=await fixture(browser);
     await f.page.goto('http://ankiquest.test/settings');
     await f.page.locator('#reminders-form').waitFor();
+    await f.page.locator('#companion-form [value="ankilope"]').check();
+    await f.page.locator('#companion-form button[type="submit"]').click();
+    await f.page.waitForFunction(()=>document.querySelector('#companion-form .status')?.textContent.includes('Saved'));
+    assert.deepEqual(f.data.writes.at(-1),{pathname:'/api/companion/alice',body:{companion:'ankilope'}});
+    assert.equal(await f.page.evaluate(()=>document.documentElement.dataset.companion),'ankilope');
+    await f.page.locator('#companion-form [value="none"]').check();
+    await f.page.locator('#companion-form button[type="submit"]').click();
+    await f.page.waitForFunction(()=>document.documentElement.dataset.companion==='none');
+    assert.equal(f.data.companion.companion,'none');
     if(screenshots)await f.page.screenshot({path:path.join(screenshots,'settings-light.png'),fullPage:true});
     await f.page.locator('#reminders-form [name="gentle_daily"]').check();
     await f.page.locator('#freeze-toggle').check();

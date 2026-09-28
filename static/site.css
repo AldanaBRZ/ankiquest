@@ -379,6 +379,8 @@ input:not([type=checkbox]):not([type=radio]), select { min-height:48px; }
 }
 
 /* Aki mascot: decorative art, responsive layouts and gentle encouragement. */
+html[data-companion="none"] img[data-companion-pose],
+html[data-companion="none"] .aki-companion { display: none !important; }
 .aki-art{display:block;object-fit:contain;flex-shrink:0;pointer-events:none;max-width:100%}
 .brand img,.login-brand img{width:38px;height:38px;object-fit:contain}
 .aki-companion{display:flex;align-items:center;gap:20px;padding:16px 22px;background:var(--card);border:1px solid var(--line);border-radius:18px;grid-column:1/-1}
