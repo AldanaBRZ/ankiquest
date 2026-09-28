@@ -46,3 +46,17 @@ test('Aki encouragement is translated before it reaches the page',()=>{
   assert.match(markup,/data-aki-companion="freeze"/);
   assert.doesNotMatch(markup,/Your streak/);
 });
+test('every supported web language has Aki encouragement',()=>{
+  const messages=[
+    'Aki is here to help. One card, one small step.',
+    'A small step starts with one card.',
+    'Your daily quests are complete. Look at you go!',
+    'You showed up today. That is progress worth keeping.',
+    'Your streak is protected by a freeze. A fresh start is waiting.',
+    'Aki, your study companion.',
+  ];
+  for (const language of ['es','fr','de','pt']) {
+    const catalog=JSON.parse(fs.readFileSync(path.join(__dirname,`../static/translations-${language}.json`),'utf8'));
+    for (const message of messages) assert.ok(catalog[message] && catalog[message]!==message,`${language}: ${message}`);
+  }
+});

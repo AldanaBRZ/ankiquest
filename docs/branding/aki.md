@@ -37,6 +37,8 @@ owns freezes. An expired daily profile receives neutral study encouragement.
 Contextual artwork on a settings dialog is decorative, not a protection status.
 
 Artwork has empty alternative text and is excluded from interactive controls.
+Website encouragement is translated into English, Spanish, French, German and
+Portuguese; the desktop add-on currently translates English and Spanish.
 Useful encouragement is ordinary translated text. Keep images static, allow
 text to wrap, preserve clear space and retain player avatars and names.
 
