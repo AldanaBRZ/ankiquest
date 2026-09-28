@@ -194,6 +194,11 @@ test('activity filters keep read invitations actionable and mark all across cate
   await page.goto(`${origin}/community#activity`);
   const inbox=page.locator('#view-activity');
   await inbox.getByRole('heading',{name:/Needs action/}).waitFor();
+  for(const width of [320,390,1440]){
+    await page.setViewportSize({width,height:844});
+    const overflow=await page.evaluate(()=>({viewport:innerWidth,content:document.documentElement.scrollWidth}));
+    assert(overflow.content<=overflow.viewport,`Activity must fit ${width}px: ${JSON.stringify(overflow)}`);
+  }
   assert.equal(await inbox.locator('.activity-attention-item').count(),1,'read invitation still needs action');
   await inbox.locator('[data-activity-category=deck_completions]').click();
   await inbox.locator('.activity-item[data-notice="2"]').waitFor();

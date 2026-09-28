@@ -360,7 +360,8 @@ input:not([type=checkbox]):not([type=radio]), select { min-height:48px; }
 .reply-context small { color:var(--dim);margin-bottom:4px; }
 .activity-item .actions { display:flex;gap:8px;flex-wrap:wrap;margin-top:12px; }
 .activity-box { display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:12px 0; }
-.activity-filters { display:flex;align-items:center;gap:10px;margin:14px 0; }
+#view-activity { grid-template-columns:minmax(0,1fr); }
+.activity-filters { display:flex;align-items:center;gap:10px;margin:14px 0;min-width:0; }
 .activity-categories { display:flex;gap:6px;overflow-x:auto;scrollbar-width:thin;white-space:nowrap;flex:1;min-width:0;padding:2px 0 7px; }
 .activity-categories button,.activity-unread-filter { min-height:42px;border-radius:999px;padding:8px 14px;white-space:nowrap; }
 .activity-categories button[aria-pressed=true],.activity-unread-filter[aria-pressed=true] { background:var(--accent);color:var(--card);border-color:var(--accent); }
