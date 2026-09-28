@@ -175,7 +175,7 @@
     if (!header) return;
     const actions = header.querySelector("[data-site-actions]");
     const active = header.dataset.siteSection || "leaderboard";
-    const links = [["leaderboard", "/week", aqText("Leaderboard")], ["records", "/records", aqText("Records")], ["community", "/community", aqText("Community")]];
+    const links = [["today", "/today", aqText("Today")], ["community", "/community", aqText("Community")], ["settings", "/settings", aqText("Settings")], ["leaderboard", "/week", aqText("Leaderboard")], ["records", "/records", aqText("Records")]];
     header.innerHTML = aqHtml`<a class="brand" href="${href("/")}" aria-label="AnkiQuest home"><img src="/icon.svg" alt="">ankiquest</a><nav class="site-nav" aria-label="Main navigation">${links.map(([key, path, label]) => aqHtml`<a href="${href(path)}"${key === active ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav><div class="top-actions"><a data-profile-link hidden>Profile</a><button type="button" class="site-lock" hidden>Lock site</button></div><p class="site-status error" role="status" hidden></p>`;
     if (embedded) header.insertAdjacentHTML("afterend", aqHtml`<nav class="tabs embedded-nav" aria-label="Main navigation">${links.map(([key, path, label]) => aqHtml`<a href="${href(path)}"${key === active ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`);
     const controls = header.querySelector(".top-actions");
