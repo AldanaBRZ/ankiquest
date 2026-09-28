@@ -46,6 +46,12 @@ Choose daily, urgent streak, freeze-used, freeze-refill, milestone, weekly closi
 
 The old server-wide `remind_hour` / NixOS `remindHour` setting is deprecated; enable personal reminders in `/community` instead. Existing device-only AnkiDroid and desktop add-on alarms are controlled separately in each client's settings.
 
+## Deck copies with friends
+
+In AnkiDroid's Today screen, choose **Share a deck**, select a deck and up to 20 friends, and send them an independent copy. The app exports cards, deck settings, and media as an Anki package without scheduling or review history. Each selected friend sees the offer on Today and chooses whether to import it into their own collection; importing does not keep later edits in sync. Offers expire after 30 days and recipients can remove them sooner. Packages are limited to 25 MiB, and each sender can have up to ten active offers. For larger decks, use Anki's usual export workflow.
+
+Only the sender can create an offer, and only a selected recipient can list, download, or dismiss it. The server stores package bytes in its existing state database. `GET /api/deck-copies/<user>` lists offers and eligible friends; `POST /api/deck-copies/<user>?deck=<name>&recipients=<JSON array>` accepts the raw `.apkg` body; `GET /api/deck-copies/<user>/<id>` downloads it; and `DELETE /api/deck-copies/<user>/<id>` removes a recipient's offer. These endpoints require that member's own token or session, with the usual CSRF protection for browser writes.
+
 ## Profile pictures
 
 Profile pictures are optional. Open your profile and choose **Profile picture**, or connect your account in Community and use the same control there. Choose a JPEG or PNG, preview its center square, then save with your own AnkiQuest token. **Remove picture** restores your initials. Photos appear on the leaderboard and community views; compatible Android clients also display them in widgets and offer a picture picker in AnkiQuest settings.

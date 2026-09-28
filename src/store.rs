@@ -81,6 +81,7 @@ impl Store {
         crate::avatars::initialize(&conn)?;
         crate::i18n::initialize(&conn)?;
         crate::decks::initialize(&conn)?;
+        crate::deck_copies::initialize(&conn)?;
         crate::subscriptions::initialize(&conn)?;
         crate::freezes::initialize(&conn)?;
         crate::competition::initialize(&conn)?;
