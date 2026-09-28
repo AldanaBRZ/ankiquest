@@ -35,6 +35,19 @@ test('French, German and Portuguese follow Anki language tags and preserve names
     assert.ok(context.AnkiQuestI18n.t`Reply to ${'Friends::{0}'}`.includes('Friends::{0}'));
   }
 });
+
+test('new personal pages use translated settings, streak and review terms',()=>{
+  for(const [tag,settings,streak,reviews] of [
+    ['fr-FR','Réglages','Série en cours','Aucune révision envoyée pour le moment.'],
+    ['de-DE','Einstellungen','Aktuelle Lernserie','Noch keine Wiederholungen hochgeladen.'],
+    ['pt-PT','Definições','Sequência atual','Ainda não foram enviadas revisões.'],
+  ]){
+    const {context}=fixture(tag);
+    assert.equal(context.AnkiQuestI18n.t('Settings'),settings);
+    assert.equal(context.AnkiQuestI18n.t('Current streak'),streak);
+    assert.equal(context.AnkiQuestI18n.t('No reviews uploaded yet.'),reviews);
+  }
+});
 test('new catalogs cover Spanish source phrases and preserve every substitution slot',()=>{
   const slots=value=>[...value.matchAll(/\{\d+\}/g)].map(match=>match[0]).sort();
   for(const [language,values] of Object.entries({fr:french,de:german,pt:portuguese})){
@@ -58,7 +71,7 @@ test('waiting custom challenges and a singular streak freeze read naturally in S
 });
 test('authored labels and substitution slots have Spanish catalog entries',()=>{
   const missing=[];
-  for(const name of ['community.html','site.js','friend-nudges.js','avatars.js','index.html']){
+  for(const name of ['community.html','site.js','friend-nudges.js','avatars.js','index.html','personal.html','personal.js']){
     const source=fs.readFileSync(path.join(__dirname,'../static',name),'utf8');
     for(const match of source.matchAll(/\baqText\(\s*(['"])(.*?)\1\s*\)/gs)){
       if(!Object.hasOwn(catalog,match[2].trim()))missing.push(`${name}: ${match[2]}`);
