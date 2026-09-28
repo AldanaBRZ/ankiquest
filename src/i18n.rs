@@ -1,4 +1,4 @@
-//! Device-selected language, with English fallback and a shared Spanish catalog.
+//! Device-selected language, with English fallback and shared interface catalogs.
 use crate::{
     App, authorized,
     store::{Error, Store},
@@ -31,6 +31,9 @@ pub fn normalize(language: &str) -> &'static str {
         .as_str()
     {
         "es" => "es",
+        "fr" => "fr",
+        "de" => "de",
+        "pt" => "pt",
         _ => "en",
     }
 }
@@ -124,20 +127,19 @@ pub async fn set(
     Ok(Json(Preference { language }))
 }
 
-fn catalog() -> &'static BTreeMap<String, String> {
-    static CATALOG: OnceLock<BTreeMap<String, String>> = OnceLock::new();
-    CATALOG.get_or_init(|| {
-        serde_json::from_str(include_str!("../static/translations-es.json"))
-            .expect("valid translation catalog")
-    })
+struct Catalog {
+    entries: BTreeMap<String, String>,
+    templates: Vec<(String, String)>,
 }
 
-fn templates() -> &'static Vec<(&'static String, &'static String)> {
-    static TEMPLATES: OnceLock<Vec<(&String, &String)>> = OnceLock::new();
-    TEMPLATES.get_or_init(|| {
-        let mut templates: Vec<_> = catalog()
+impl Catalog {
+    fn parse(source: &str) -> Self {
+        let entries: BTreeMap<String, String> =
+            serde_json::from_str(source).expect("valid translation catalog");
+        let mut templates: Vec<_> = entries
             .iter()
             .filter(|(source, _)| source.contains("{0}"))
+            .map(|(source, target)| (source.clone(), target.clone()))
             .collect();
         // A broad "Review {0} cards" must not capture "100 mature" as its count.
         templates.sort_by_key(|(source, _)| {
@@ -155,19 +157,41 @@ fn templates() -> &'static Vec<(&'static String, &'static String)> {
                     .sum::<usize>(),
             )
         });
-        templates
-    })
+        Self { entries, templates }
+    }
+}
+
+fn catalog(language: &str) -> Option<&'static Catalog> {
+    static ES: OnceLock<Catalog> = OnceLock::new();
+    static FR: OnceLock<Catalog> = OnceLock::new();
+    static DE: OnceLock<Catalog> = OnceLock::new();
+    static PT: OnceLock<Catalog> = OnceLock::new();
+    match normalize(language) {
+        "es" => {
+            Some(ES.get_or_init(|| Catalog::parse(include_str!("../static/translations-es.json"))))
+        }
+        "fr" => {
+            Some(FR.get_or_init(|| Catalog::parse(include_str!("../static/translations-fr.json"))))
+        }
+        "de" => {
+            Some(DE.get_or_init(|| Catalog::parse(include_str!("../static/translations-de.json"))))
+        }
+        "pt" => {
+            Some(PT.get_or_init(|| Catalog::parse(include_str!("../static/translations-pt.json"))))
+        }
+        _ => None,
+    }
 }
 
 // Templates are matched only against system-authored text. Substitutions stay verbatim.
 pub fn text(value: &str, language: &str) -> String {
-    if normalize(language) != "es" {
+    let Some(catalog) = catalog(language) else {
         return value.into();
-    }
-    if let Some(exact) = catalog().get(value) {
+    };
+    if let Some(exact) = catalog.entries.get(value) {
         return exact.clone();
     }
-    for (source, target) in templates() {
+    for (source, target) in &catalog.templates {
         if let Some(values) = capture(source, value) {
             // Replace in one pass, so a name containing a placeholder is never interpreted.
             return substitute(target, &values);
@@ -222,14 +246,25 @@ pub fn notice(notice: &mut crate::feedback::Notice, language: &str) {
 }
 
 fn system_text(value: &str, language: &str) -> String {
-    if normalize(language) != "es" {
+    let language = normalize(language);
+    if language == "en" {
         return value.into();
     }
     if let Some(title) = value.strip_prefix("Achievement: ") {
-        return format!("Logro: {}", text(title, language));
+        let title = text(title, language);
+        return if language == "es" {
+            format!("Logro: {title}")
+        } else {
+            substitute(&text("Achievement: {0}", language), &[&title])
+        };
     }
     if let Some(title) = value.strip_prefix("Quest complete: ") {
-        return format!("Misión completada: {}", text(title, language));
+        let title = text(title, language);
+        return if language == "es" {
+            format!("Misión completada: {title}")
+        } else {
+            substitute(&text("Quest complete: {0}", language), &[&title])
+        };
     }
     if let Some((description, xp)) = value.rsplit_once(" (+") {
         return format!("{} (+{xp}", text(description, language));
@@ -270,23 +305,39 @@ pub fn community(value: &mut serde_json::Value, language: &str) {
 }
 
 pub fn feedback(feedback: &mut crate::feedback::Feedback, language: &str) {
+    let language = normalize(language);
     for headline in &mut feedback.headlines {
-        if normalize(language) == "es"
+        if language != "en"
             && let Some((deck, people)) = headline.rsplit_once(" — told ")
         {
             let count = people.split_whitespace().next().unwrap_or("");
-            *headline = format!(
-                "{deck} — se avisó a {count} {}",
-                if count == "1" { "amigo" } else { "amigos" }
-            );
+            *headline = if language == "es" {
+                format!(
+                    "{deck} — se avisó a {count} {}",
+                    if count == "1" { "amigo" } else { "amigos" }
+                )
+            } else {
+                let key = if count == "1" {
+                    "{0} — told {1} friend"
+                } else {
+                    "{0} — told {1} friends"
+                };
+                substitute(&text(key, language), &[deck, count])
+            };
         } else {
             *headline = system_text(headline, language);
         }
     }
-    if normalize(language) == "es"
-        && let Some(status) = &mut feedback.status
-    {
-        *status = status.replace("Lv ", "Nv. ");
+    if let Some(status) = &mut feedback.status {
+        let prefix = match language {
+            "es" | "pt" => "Nv. ",
+            "fr" => "Niv. ",
+            "de" => "Stufe ",
+            _ => "Lv ",
+        };
+        if prefix != "Lv " {
+            *status = status.replacen("Lv ", prefix, 1);
+        }
     }
 }
 
@@ -304,7 +355,8 @@ pub fn profile(profile: &mut crate::game::Profile, language: &str) {
 }
 
 pub fn notification(notice: &mut crate::decks::Notification, language: &str, sender_display: &str) {
-    if matches!(notice.kind.as_str(), "message" | "reply") || normalize(language) != "es" {
+    let language = normalize(language);
+    if matches!(notice.kind.as_str(), "message" | "reply") || language == "en" {
         return;
     }
     if notice.kind == "completion" {
@@ -314,7 +366,14 @@ pub fn notification(notice: &mut crate::decks::Notification, language: &str, sen
             .strip_prefix(&format!("{sender_display} has finished their "))
             .and_then(|body| body.strip_suffix(" studies for today."))
         {
-            notice.body = format!("{sender_display} ha terminado su estudio de {deck} por hoy.");
+            notice.body = if language == "es" {
+                format!("{sender_display} ha terminado su estudio de {deck} por hoy.")
+            } else {
+                substitute(
+                    &text("{0} has finished their {1} studies for today.", language),
+                    &[sender_display, deck],
+                )
+            };
         } else {
             notice.body = text(&notice.body, language);
         }
@@ -364,16 +423,65 @@ mod tests {
     }
 
     #[test]
+    fn additional_anki_languages_translate_authored_text() {
+        assert_eq!(normalize("fr-FR"), "fr");
+        assert_eq!(normalize("de-DE"), "de");
+        assert_eq!(normalize("pt-BR"), "pt");
+        assert_eq!(text("Friends", "fr"), "Amis");
+        assert_eq!(text("Friends", "de"), "Freunde");
+        assert_eq!(text("Friends", "pt"), "Amigos");
+    }
+
+    #[test]
+    fn completion_notifications_keep_names_and_deck_titles_verbatim() {
+        for (language, title, body) in [
+            (
+                "fr",
+                "Paquet terminé",
+                "Aldana a terminé ses révisions du paquet Spanish::{0} pour aujourd’hui.",
+            ),
+            (
+                "de",
+                "Stapel abgeschlossen",
+                "Aldana hat die Wiederholungen für Spanish::{0} heute abgeschlossen.",
+            ),
+            (
+                "pt",
+                "Baralho concluído",
+                "Aldana terminou as revisões de Spanish::{0} por hoje.",
+            ),
+        ] {
+            let mut notice = crate::decks::Notification {
+                id: 1,
+                title: "Deck complete".into(),
+                body: "Aldana has finished their Spanish::{0} studies for today.".into(),
+                day: 0,
+                created_at: 0,
+                sender: "Aldana".into(),
+                replied: false,
+                kind: "completion".into(),
+                read_at: None,
+                challenge_id: None,
+                route: None,
+                action_required: false,
+            };
+            notification(&mut notice, language, "Aldana");
+            assert_eq!(notice.title, title);
+            assert_eq!(notice.body, body);
+        }
+    }
+
+    #[test]
     fn language_tags_templates_and_fallback() {
         assert_eq!(normalize("es_MX"), "es");
         assert_eq!(normalize("ES-es"), "es");
-        assert_eq!(normalize("fr"), "en");
+        assert_eq!(normalize("fr"), "fr");
         assert_eq!(text("Review 15 cards", "es"), "Repasa 15 tarjetas");
         assert_eq!(
             text("Study for 10 minutes", "es-ES"),
             "Estudia durante 10 minutos"
         );
-        assert_eq!(text("Review 15 cards", "de"), "Review 15 cards");
+        assert_eq!(text("Review 15 cards", "de"), "Wiederhole 15 Karten");
         assert_eq!(
             text("Unknown future wording", "es"),
             "Unknown future wording"

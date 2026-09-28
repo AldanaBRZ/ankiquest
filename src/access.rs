@@ -517,8 +517,11 @@ pub(crate) async fn site_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         format!(
-            "window.AnkiQuestSpanish={};\n{}\n{}",
+            "window.AnkiQuestSpanish={};\nwindow.AnkiQuestFrench={};\nwindow.AnkiQuestGerman={};\nwindow.AnkiQuestPortuguese={};\n{}\n{}",
             include_str!("../static/translations-es.json"),
+            include_str!("../static/translations-fr.json"),
+            include_str!("../static/translations-de.json"),
+            include_str!("../static/translations-pt.json"),
             include_str!("../static/i18n.js"),
             include_str!("../static/site.js")
         ),

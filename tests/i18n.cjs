@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const {test} = require('node:test');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const catalog = JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations-es.json'),'utf8'));
+const french = JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations-fr.json'),'utf8'));
+const german = JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations-de.json'),'utf8'));
+const portuguese = JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations-pt.json'),'utf8'));
 const script = fs.readFileSync(path.join(__dirname,'../static/i18n.js'),'utf8');
 function fixture(language='es', blocked=false) {
   const events={}, requests=[], storage=new Map(); let reloads=0;
@@ -11,7 +14,8 @@ function fixture(language='es', blocked=false) {
     sessionStorage:{getItem:key=>storage.get(key),setItem(key,value){if(blocked)throw Error('blocked');storage.set(key,value);}},
     document:{readyState:'loading',documentElement:{},querySelectorAll(){return [];},addEventListener(){}},
     addEventListener(type,handler){(events[type] ||= []).push(handler);}, dispatchEvent(event){for(const handler of events[event.type]||[])handler(event);},
-    fetch:async(input,options)=>{requests.push([input,options]);return {ok:true};}, AnkiQuestSpanish:catalog};
+    fetch:async(input,options)=>{requests.push([input,options]);return {ok:true};}, AnkiQuestSpanish:catalog,
+    AnkiQuestFrench:french,AnkiQuestGerman:german,AnkiQuestPortuguese:portuguese};
   context.window=context; vm.runInNewContext(script,context);
   return {context,requests,storage,get reloads(){return reloads;}};
 }
@@ -22,6 +26,23 @@ test('Spanish tagged labels preserve authored substitutions and placeholder-like
   assert.equal(html`<h2>Friends</h2><p>${'Friends::{0} Good job!'}</p>`,'<h2>Amigos</h2><p>Friends::{0} Good job!</p>');
   assert.equal(html`<input placeholder="Say something kind" value="${'Friends'}">`,'<input placeholder="Di algo amable" value="Friends">');
   assert.equal(t`Review ${15} cards`,'Repasa 15 tarjetas');
+});
+test('French, German and Portuguese follow Anki language tags and preserve names',()=>{
+  for(const [tag,label] of [['fr-FR','Amis'],['de-DE','Freunde'],['pt-BR','Amigos']]){
+    const {context}=fixture(tag);
+    assert.equal(context.AnkiQuestI18n.language,tag.slice(0,2));
+    assert.equal(context.AnkiQuestI18n.t('Friends'),label);
+    assert.ok(context.AnkiQuestI18n.t`Reply to ${'Friends::{0}'}`.includes('Friends::{0}'));
+  }
+});
+test('new catalogs cover Spanish source phrases and preserve every substitution slot',()=>{
+  const slots=value=>[...value.matchAll(/\{\d+\}/g)].map(match=>match[0]).sort();
+  for(const [language,values] of Object.entries({fr:french,de:german,pt:portuguese})){
+    for(const source of Object.keys(catalog)){
+      assert.ok(Object.hasOwn(values,source),`${language} missing ${source}`);
+      assert.deepEqual(slots(values[source]),slots(source),`${language}: ${source}`);
+    }
+  }
 });
 
 test('the new crop editor file hint has a Spanish translation',()=>{

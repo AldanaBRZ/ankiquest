@@ -112,6 +112,19 @@ test('the custom goal waiting choice and state are Spanish',async t=>{
   await page.getByText('Esperando a todos',{exact:true}).waitFor();
   assert.match(await page.locator('.challenge-meta').innerText(),/Empieza cuando todos acepten/);
 });
+test('the custom goal choice follows French, German and Portuguese Anki locales',async t=>{
+  for(const [language,label] of [
+    ['fr-FR','Commencer quand tout le monde accepte'],
+    ['de-DE','Starten, wenn alle zugesagt haben'],
+    ['pt-PT','Começar quando todos aceitarem'],
+  ]){
+    const {page}=await fixture(t,{language});
+    await page.locator('[data-create-challenge]').click();
+    await page.getByText(label,{exact:true}).waitFor();
+    assert.equal(await page.locator('html').getAttribute('lang'),language.slice(0,2));
+    await page.locator('.weekly-suggestion').getByText('Hill::{0}',{exact:true}).waitFor();
+  }
+});
 test('double clicks do not duplicate requests and failed choices can be retried',async t=>{
   const {page,requests,control}=await fixture(t);
   let release;control.hold=new Promise(r=>release=r);control.fail=true;
